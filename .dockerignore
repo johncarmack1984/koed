@@ -1,0 +1,13 @@
+node_modules
+dist
+**/dist
+**/target
+apps/desktop/src-tauri/resources/koed-node
+coverage
+.git
+.playwright-cli
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+**/*.tsbuildinfo

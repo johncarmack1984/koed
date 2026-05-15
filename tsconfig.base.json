@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "baseUrl": ".",
+    "paths": {
+      "@codex-memory/core": ["packages/core/src/index.ts"],
+      "@codex-memory/db": ["packages/db/src/index.ts"],
+      "@codex-memory/providers": ["packages/providers/src/index.ts"],
+      "@codex-memory/mcp-server": ["packages/mcp-server/src/index.ts"],
+      "@codex-memory/shared": ["packages/shared/src/index.ts"]
+    },
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true
+  }
+}

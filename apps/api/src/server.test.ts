@@ -1,0 +1,1618 @@
+import { randomUUID } from "node:crypto";
+import { afterEach, describe, expect, it } from "vitest";
+import type {
+  ExpandedMemoryNode,
+  MemoryActor,
+  MemoryEventRecord,
+  MemorySearchResult
+} from "@codex-memory/core";
+import type {
+  ActorContext,
+  ApiTokenRecord,
+  CapturedSessionRecord,
+  CreateMemoryNodeInput,
+  CreateProviderConfigInput,
+  CreateTeamInput,
+  CreateUserInput,
+  MemoryNodeRecord,
+  MemorySourceRepository,
+  ProviderConfigRecord,
+  TeamMemberRecord,
+  TeamRecord,
+  UserRecord,
+  Visibility
+} from "@codex-memory/db";
+import { buildServer } from "./server.js";
+
+const originalMemoryMode = process.env.MEMORY_MODE;
+const originalServerSynthesisUnsafeAllow =
+  process.env.MEMORY_SERVER_SYNTHESIS_UNSAFE_ALLOW;
+
+afterEach(() => {
+  if (originalMemoryMode === undefined) {
+    delete process.env.MEMORY_MODE;
+  } else {
+    process.env.MEMORY_MODE = originalMemoryMode;
+  }
+  if (originalServerSynthesisUnsafeAllow === undefined) {
+    delete process.env.MEMORY_SERVER_SYNTHESIS_UNSAFE_ALLOW;
+  } else {
+    process.env.MEMORY_SERVER_SYNTHESIS_UNSAFE_ALLOW =
+      originalServerSynthesisUnsafeAllow;
+  }
+  delete process.env.KOED_ALLOW_PUBLIC_REGISTRATION;
+});
+
+const cookieHeader = (response: {
+  headers: Record<string, unknown>;
+}): string => {
+  const cookie = response.headers["set-cookie"];
+  const firstCookie = Array.isArray(cookie)
+    ? cookie[0]
+    : typeof cookie === "string"
+      ? cookie
+      : undefined;
+  return firstCookie?.split(";")[0] ?? "";
+};
+
+const createFakeRepository = (): MemorySourceRepository => {
+  const users = new Map<string, UserRecord>();
+  const sessions = new Map<string, string>();
+  const teams = new Map<
+    string,
+    TeamRecord & { members: Map<string, "owner" | "admin" | "member"> }
+  >();
+  const tokens = new Map<string, ApiTokenRecord & { tokenHash: string }>();
+  const providerConfigs = new Map<string, ProviderConfigRecord>();
+  const memories: MemoryNodeRecord[] = [];
+  const policies: Array<{
+    id: string;
+    ownerUserId: string;
+    targetType: "global" | "project" | "thread";
+    projectId: string | null;
+    projectName: string | null;
+    projectPath: string | null;
+    threadId: string | null;
+    threadName: string | null;
+    captureState: "enabled" | "disabled" | "ask" | null;
+    visibility: Visibility | null;
+    pauseUntil: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }> = [];
+  const capturedSessions = new Map<string, CapturedSessionRecord>();
+  const events: MemoryEventRecord[] = [];
+  const nodeSources = new Map<string, string[]>();
+  const invalidatedNodes = new Set<string>();
+  const invalidatedEvents = new Set<string>();
+  const summaryCorrections = new Map<string, string>();
+
+  const getMembership = (userId: string, teamId: string) =>
+    teams.get(teamId)?.members.get(userId);
+
+  return {
+    health: async () => true,
+    async countUsers() {
+      return users.size;
+    },
+    async createUser(input: CreateUserInput) {
+      const id = randomUUID();
+      users.set(id, {
+        id,
+        email: input.email.toLowerCase(),
+        displayName: input.displayName ?? null,
+        passwordHash: input.passwordHash ?? null
+      });
+      return { id };
+    },
+    async findUserByEmail(email: string) {
+      return (
+        [...users.values()].find(
+          (user) => user.email === email.toLowerCase()
+        ) ?? null
+      );
+    },
+    async getUser(userId: string) {
+      return users.get(userId) ?? null;
+    },
+    async createSession(userId: string, sessionHash: string) {
+      sessions.set(sessionHash, userId);
+    },
+    async getSessionUser(sessionHash: string) {
+      const userId = sessions.get(sessionHash);
+      return userId ? (users.get(userId) ?? null) : null;
+    },
+    async revokeSession(sessionHash: string) {
+      sessions.delete(sessionHash);
+    },
+    async createTeam(input: CreateTeamInput) {
+      const id = randomUUID();
+      teams.set(id, {
+        id,
+        name: input.name,
+        inviteCode: input.inviteCode ?? "INVITE",
+        role: "owner",
+        members: new Map([[input.createdByUserId, "owner"]])
+      });
+      return { id };
+    },
+    async addTeamMember(teamId: string, userId: string, role = "member") {
+      teams.get(teamId)?.members.set(userId, role);
+    },
+    async joinTeamByInviteCode(userId: string, inviteCode: string) {
+      const team = [...teams.values()].find(
+        (candidate) => candidate.inviteCode === inviteCode
+      );
+      if (!team) {
+        throw new Error("Invalid invite code");
+      }
+      team.members.set(userId, "member");
+      return {
+        id: team.id,
+        name: team.name,
+        inviteCode: team.inviteCode,
+        role: "member"
+      };
+    },
+    async getCurrentTeam(userId: string) {
+      const team = [...teams.values()].find((candidate) =>
+        candidate.members.has(userId)
+      );
+      if (!team) {
+        return null;
+      }
+      return {
+        id: team.id,
+        name: team.name,
+        inviteCode: team.inviteCode,
+        role: team.members.get(userId)
+      };
+    },
+    async listTeamMembers(userId: string, teamId: string) {
+      if (!getMembership(userId, teamId)) {
+        throw new Error("User is not an active member of the requested team");
+      }
+      const team = teams.get(teamId);
+      if (!team) {
+        return [];
+      }
+      return [...team.members.entries()].flatMap<TeamMemberRecord>(
+        ([memberUserId, role]) => {
+          const member = users.get(memberUserId);
+          return member
+            ? [
+                {
+                  userId: member.id,
+                  email: member.email,
+                  displayName: member.displayName,
+                  role,
+                  joinedAt: new Date().toISOString()
+                }
+              ]
+            : [];
+        }
+      );
+    },
+    async createApiToken(input) {
+      if (input.teamId && !getMembership(input.ownerUserId, input.teamId)) {
+        throw new Error("User is not an active member of the requested team");
+      }
+      const id = randomUUID();
+      const record = {
+        id,
+        ownerUserId: input.ownerUserId,
+        teamId: input.teamId ?? null,
+        name: input.name,
+        tokenPrefix: input.tokenPrefix,
+        scopes: input.scopes ?? [],
+        createdAt: new Date().toISOString(),
+        lastUsedAt: null,
+        expiresAt: null,
+        revokedAt: null,
+        tokenHash: input.tokenHash
+      };
+      tokens.set(input.tokenHash, record);
+      return record;
+    },
+    async listApiTokens(userId: string) {
+      return [...tokens.values()].filter(
+        (token) => token.ownerUserId === userId && !token.revokedAt
+      );
+    },
+    async revokeApiToken(userId: string, tokenId: string) {
+      const token = [...tokens.values()].find(
+        (candidate) =>
+          candidate.id === tokenId && candidate.ownerUserId === userId
+      );
+      if (!token) {
+        return false;
+      }
+      token.revokedAt = new Date().toISOString();
+      return true;
+    },
+    async getApiTokenUser(tokenHash: string) {
+      const token = tokens.get(tokenHash);
+      return token ? (users.get(token.ownerUserId) ?? null) : null;
+    },
+    async createProviderConfig(
+      actor: ActorContext,
+      input: CreateProviderConfigInput
+    ) {
+      if (input.visibility === "team") {
+        if (!input.teamId) {
+          throw new Error("Team visibility requires a teamId");
+        }
+        if (!getMembership(actor.userId, input.teamId)) {
+          throw new Error("User is not an active member of the requested team");
+        }
+      }
+      const id = randomUUID();
+      const record: ProviderConfigRecord = {
+        id,
+        ownerUserId: input.visibility === "personal" ? actor.userId : null,
+        teamId: input.visibility === "team" ? input.teamId! : null,
+        visibility: input.visibility,
+        provider: input.provider,
+        config: {
+          ...(input.config ?? {}),
+          apiKeyConfigured: Boolean(input.apiKey)
+        },
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      providerConfigs.set(id, record);
+      return record;
+    },
+    async listProviderConfigs(actor: ActorContext) {
+      return [...providerConfigs.values()].filter(
+        (config) =>
+          (config.visibility === "personal" &&
+            config.ownerUserId === actor.userId) ||
+          (config.visibility === "team" &&
+            Boolean(
+              config.teamId && getMembership(actor.userId, config.teamId)
+            ))
+      );
+    },
+    async getRuntimeProviderConfig(actor: ActorContext, input = {}) {
+      const config =
+        [...providerConfigs.values()].find(
+          (candidate) =>
+            (!input.visibility || candidate.visibility === input.visibility) &&
+            (!input.teamId || candidate.teamId === input.teamId) &&
+            (!input.provider || candidate.provider === input.provider) &&
+            ((candidate.visibility === "personal" &&
+              candidate.ownerUserId === actor.userId) ||
+              (candidate.visibility === "team" &&
+                Boolean(
+                  candidate.teamId &&
+                  getMembership(actor.userId, candidate.teamId)
+                )))
+        ) ?? null;
+      return config ? { ...config, apiKey: "fake-secret" } : null;
+    },
+    async deleteProviderConfig(actor: ActorContext, providerConfigId: string) {
+      const config = providerConfigs.get(providerConfigId);
+      if (
+        !config ||
+        (config.visibility === "personal" &&
+          config.ownerUserId !== actor.userId) ||
+        (config.visibility === "team" &&
+          (!config.teamId || !getMembership(actor.userId, config.teamId)))
+      ) {
+        return false;
+      }
+      providerConfigs.delete(providerConfigId);
+      return true;
+    },
+    async createCapturedSession(actor: ActorContext, input) {
+      const id = randomUUID();
+      const record: CapturedSessionRecord = {
+        id,
+        ownerUserId: actor.userId,
+        teamId: null,
+        visibility: "personal",
+        externalSessionId: input.externalSessionId ?? null,
+        workspaceId: input.workspaceId ?? input.cwd ?? null,
+        sourceRuntime: input.sourceRuntime ?? "codex",
+        captureMethod: input.captureMethod ?? "mcp",
+        model: input.model ?? null,
+        cwd: input.cwd ?? null,
+        createdAt: new Date().toISOString()
+      };
+      capturedSessions.set(id, record);
+      return record;
+    },
+    async createMemoryNode(actor: ActorContext, input: CreateMemoryNodeInput) {
+      if (input.visibility === "team") {
+        if (!input.teamId) {
+          throw new Error("Team visibility requires a teamId");
+        }
+        if (!getMembership(actor.userId, input.teamId)) {
+          throw new Error("User is not an active member of the requested team");
+        }
+      }
+      const record: MemoryNodeRecord = {
+        id: randomUUID(),
+        ownerUserId: input.visibility === "personal" ? actor.userId : null,
+        teamId: input.visibility === "team" ? input.teamId! : null,
+        visibility: input.visibility,
+        title: input.title ?? null,
+        summaryText: input.summaryText
+      };
+      memories.push(record);
+      return record;
+    },
+    async getEffectiveCapturePolicy(actor, input = {}) {
+      const session = input.sessionId
+        ? capturedSessions.get(input.sessionId)
+        : null;
+      const projectId = input.projectId ?? session?.workspaceId ?? undefined;
+      const threadIds = [input.threadId, input.sessionId, session?.externalSessionId].filter(Boolean);
+      const matching = policies
+        .filter((policy) => policy.ownerUserId === actor.userId)
+        .filter(
+          (policy) =>
+            policy.targetType === "global" ||
+            (policy.targetType === "project" &&
+              policy.projectId === projectId) ||
+            (policy.targetType === "thread" &&
+              threadIds.includes(policy.threadId ?? ""))
+        )
+        .sort((left, right) => {
+          const priority = { global: 1, project: 2, thread: 3 };
+          return priority[right.targetType] - priority[left.targetType];
+        });
+      const effective = matching[0] ?? null;
+      const global = matching.find((policy) => policy.targetType === "global");
+      const pauseUntil = effective?.pauseUntil ?? global?.pauseUntil ?? null;
+      const paused = pauseUntil ? new Date(pauseUntil).getTime() > Date.now() : false;
+      return {
+        captureState: paused
+          ? "disabled"
+          : (effective?.captureState ?? global?.captureState ?? "enabled"),
+        visibility: effective?.visibility ?? global?.visibility ?? "personal",
+        paused,
+        pauseUntil,
+        source: effective?.targetType ?? (global ? "global" : "default"),
+        policy: effective
+      };
+    },
+    async listCapturePolicies(actor, targetType) {
+      return policies.filter(
+        (policy) =>
+          policy.ownerUserId === actor.userId &&
+          (!targetType || policy.targetType === targetType)
+      );
+    },
+    async upsertCapturePolicy(actor, input) {
+      const existing = policies.find(
+        (policy) =>
+          policy.ownerUserId === actor.userId &&
+          policy.targetType === input.targetType &&
+          (policy.projectId ?? "") === (input.projectId ?? "") &&
+          (policy.threadId ?? "") === (input.threadId ?? "")
+      );
+      const now = new Date().toISOString();
+      const record = {
+        id: existing?.id ?? randomUUID(),
+        ownerUserId: actor.userId,
+        targetType: input.targetType,
+        projectId: input.projectId ?? null,
+        projectName: input.projectName ?? null,
+        projectPath: input.projectPath ?? null,
+        threadId: input.threadId ?? null,
+        threadName: input.threadName ?? null,
+        captureState: input.captureState ?? null,
+        visibility: input.visibility ?? null,
+        pauseUntil:
+          input.pauseUntil instanceof Date
+            ? input.pauseUntil.toISOString()
+            : input.pauseUntil ?? null,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now
+      };
+      if (existing) {
+        Object.assign(existing, record);
+        return existing;
+      }
+      policies.push(record);
+      return record;
+    },
+    async deleteCapturePolicy(actor, policyId) {
+      const index = policies.findIndex(
+        (policy) => policy.id === policyId && policy.ownerUserId === actor.userId
+      );
+      if (index === -1) return false;
+      policies.splice(index, 1);
+      return true;
+    },
+    async getVisibleMemoryNode(actor: ActorContext, nodeId: string) {
+      return (
+        memories.find((memory) => {
+          if (invalidatedNodes.has(memory.id)) return false;
+          if (memory.id !== nodeId) {
+            return false;
+          }
+          if (memory.visibility === "personal") {
+            return memory.ownerUserId === actor.userId;
+          }
+          return Boolean(
+            memory.teamId && getMembership(actor.userId, memory.teamId)
+          );
+        }) ?? null
+      );
+    },
+    async listVisibleMemoryNodes(actor: ActorContext, visibility?: Visibility) {
+      return memories.filter((memory) => {
+        if (invalidatedNodes.has(memory.id)) return false;
+        if (visibility && memory.visibility !== visibility) {
+          return false;
+        }
+        if (memory.visibility === "personal") {
+          return memory.ownerUserId === actor.userId;
+        }
+        return Boolean(
+          memory.teamId && getMembership(actor.userId, memory.teamId)
+        );
+      });
+    },
+    async getLocalEmbeddingStatus() {
+      return {
+        enabled: true,
+        healthy: false,
+        model: null,
+        dimensions: null,
+        error: "test repository"
+      };
+    },
+    async listMemoryBrowserItems(actor, input = {}) {
+      return memories
+        .filter((memory) => {
+          if (input.visibility && memory.visibility !== input.visibility) return false;
+          if (invalidatedNodes.has(memory.id)) return false;
+          if (input.pinned !== undefined && Boolean(memory.pinnedAt) !== input.pinned) return false;
+          if (input.query && !memory.summaryText.toLowerCase().includes(input.query.toLowerCase())) return false;
+          if (memory.visibility === "personal") return memory.ownerUserId === actor.userId;
+          return Boolean(memory.teamId && getMembership(actor.userId, memory.teamId));
+        })
+        .slice(0, input.limit ?? 100)
+        .map((memory) => ({
+          id: memory.id,
+          clusterId: memory.summaryText.toLowerCase().includes("football") || memory.summaryText.toLowerCase().includes("tennis") ? "sports" : "general",
+          clusterLabel: memory.summaryText.toLowerCase().includes("football") || memory.summaryText.toLowerCase().includes("tennis") ? "Sports" : "General",
+          text: memory.summaryText,
+          title: memory.title,
+          visibility: memory.visibility,
+          createdAt: memory.createdAt ?? new Date().toISOString(),
+          updatedAt: memory.updatedAt ?? new Date().toISOString(),
+          pinnedAt: memory.pinnedAt ?? null,
+          projectId: memory.projectId ?? null,
+          projectName: memory.projectName ?? null,
+          projectPath: memory.projectPath ?? null,
+          threadId: memory.threadId ?? null,
+          threadName: memory.threadName ?? null
+        }));
+    },
+    async listMemoryClusters(actor, input = {}) {
+      const items = await this.listMemoryBrowserItems(actor, input);
+      const groups = new Map<string, { id: string; label: string; count: number; latestUpdatedAt: string; pinnedCount: number; items: typeof items }>();
+      for (const item of items) {
+        const group = groups.get(item.clusterId);
+        if (group) {
+          group.count += 1;
+          group.items.push(item);
+        } else {
+          groups.set(item.clusterId, {
+            id: item.clusterId,
+            label: item.clusterLabel,
+            count: 1,
+            latestUpdatedAt: item.updatedAt,
+            pinnedCount: item.pinnedAt ? 1 : 0,
+            items: [item]
+          });
+        }
+      }
+      return [...groups.values()];
+    },
+    async listMemoriesInCluster(actor, clusterId, input = {}) {
+      const items = await this.listMemoryBrowserItems(actor, input);
+      return items.filter((item) => item.clusterId === clusterId);
+    },
+    async updateMemoryPresentation(actor, nodeId, input) {
+      const memory = await this.getVisibleMemoryNode(actor, nodeId);
+      if (!memory) return null;
+      if (input.summaryText) memory.summaryText = input.summaryText;
+      if (input.pinned !== undefined) memory.pinnedAt = input.pinned ? new Date().toISOString() : null;
+      if (input.visibility) memory.visibility = input.visibility;
+      return (await this.listMemoryBrowserItems(actor)).find((item) => item.id === nodeId) ?? null;
+    },
+    async deleteMemory(actor, nodeId) {
+      const memory = await this.getVisibleMemoryNode(actor, nodeId);
+      if (!memory) return false;
+      invalidatedNodes.add(memory.id);
+      return true;
+    },
+    async getLcmGraphOverview(actor) {
+      const visibleNodes = await this.listLcmGraphNodes(actor, {
+        includeInvalidated: true
+      });
+      const visibleEvents = await this.listLcmGraphEvents(actor, {
+        includeInvalidated: true
+      });
+      return {
+        capturedEvents: visibleEvents.filter((event) => !event.invalidatedAt).length,
+        leafNodes: visibleNodes.filter((node) => node.kind === "leaf" && !node.invalidatedAt).length,
+        rollupNodes: visibleNodes.filter((node) => node.kind === "rollup" && !node.invalidatedAt).length,
+        pendingSummaries: visibleNodes.filter((node) => node.summaryStatus === "pending" && !node.invalidatedAt).length,
+        invalidatedRecords:
+          visibleNodes.filter((node) => node.invalidatedAt).length +
+          visibleEvents.filter((event) => event.invalidatedAt).length,
+        embeddings: {
+          enabled: true,
+          healthy: false,
+          model: null,
+          dimensions: null,
+          total: 0,
+          memoryNodes: 0,
+          memoryEvents: 0,
+          messages: 0
+        }
+      };
+    },
+    async listLcmGraphNodes(actor, input = {}) {
+      return memories
+        .filter((memory) => {
+          if (!input.includeInvalidated && invalidatedNodes.has(memory.id)) return false;
+          if (input.visibility && memory.visibility !== input.visibility) return false;
+          if (input.query && memory.id !== input.query && !memory.summaryText.toLowerCase().includes(input.query.toLowerCase())) return false;
+          if (memory.visibility === "personal") return memory.ownerUserId === actor.userId;
+          return Boolean(memory.teamId && getMembership(actor.userId, memory.teamId));
+        })
+        .slice(0, input.limit ?? 100)
+        .map((memory) => ({
+          id: memory.id,
+          kind: "leaf" as const,
+          depth: 0,
+          summaryText: memory.summaryText,
+          summaryStatus: summaryCorrections.has(memory.id) ? "summarized" as const : "pending" as const,
+          visibility: memory.visibility,
+          ownerUserId: memory.ownerUserId,
+          teamId: memory.teamId,
+          projectId: memory.projectId ?? null,
+          projectName: memory.projectName ?? null,
+          projectPath: memory.projectPath ?? null,
+          sessionId: null,
+          threadId: memory.threadId ?? null,
+          threadName: memory.threadName ?? null,
+          createdAt: memory.createdAt ?? new Date().toISOString(),
+          updatedAt: memory.updatedAt ?? new Date().toISOString(),
+          invalidatedAt: invalidatedNodes.has(memory.id) ? new Date().toISOString() : null,
+          invalidationReason: invalidatedNodes.has(memory.id) ? "user_deleted" : null,
+          sourceEventCount: nodeSources.get(memory.id)?.length ?? 0,
+          sourceTokenEstimate: null,
+          summaryTokenEstimate: null,
+          summaryModel: summaryCorrections.get(memory.id) ?? null,
+          summaryPromptVersion: null,
+          lcmAlgorithmVersion: "test-lcm",
+          embeddingCount: 0,
+          summaryCorrectedAt: summaryCorrections.has(memory.id) ? new Date().toISOString() : null,
+          summaryCorrectedByUserId: summaryCorrections.has(memory.id) ? actor.userId : null
+        }));
+    },
+    async getLcmGraphNode(actor, nodeId, input = {}) {
+      const node = (await this.listLcmGraphNodes(actor, {
+        includeInvalidated: input.includeInvalidated,
+        query: nodeId,
+        limit: 1
+      })).find((candidate) => candidate.id === nodeId);
+      if (!node) return null;
+      const sourceIds = nodeSources.get(nodeId) ?? [];
+      const sources = (await this.listLcmGraphEvents(actor, {
+        includeInvalidated: true,
+        limit: 500
+      })).filter((event) => sourceIds.includes(event.id));
+      return {
+        ...node,
+        sourceItems: sourceIds.map((eventId, position) => ({
+          kind: "memory_event" as const,
+          sourceTable: "memory_events" as const,
+          sourceId: eventId,
+          position
+        })),
+        sources,
+        childNodes: [],
+        parentNodes: []
+      };
+    },
+    async updateLcmGraphNode(actor, nodeId, input) {
+      const memory = await this.getVisibleMemoryNode(actor, nodeId);
+      if (!memory) return null;
+      if (input.summaryText) {
+        memory.summaryText = input.summaryText;
+        memory.updatedAt = new Date().toISOString();
+        summaryCorrections.set(nodeId, "user-corrected");
+      }
+      if (input.visibility) memory.visibility = input.visibility;
+      return this.getLcmGraphNode(actor, nodeId);
+    },
+    async invalidateLcmGraphNode(actor, nodeId) {
+      return this.deleteMemory(actor, nodeId);
+    },
+    async listLcmGraphEvents(actor, input = {}) {
+      return events
+        .filter((event) => {
+          if (!input.includeInvalidated && invalidatedEvents.has(event.id)) return false;
+          if (input.visibility && event.visibility !== input.visibility) return false;
+          if (input.query && event.id !== input.query && !event.content.toLowerCase().includes(input.query.toLowerCase())) return false;
+          if (event.visibility === "personal") return event.ownerUserId === actor.userId;
+          return Boolean(event.teamId && getMembership(actor.userId, event.teamId));
+        })
+        .slice(0, input.limit ?? 100)
+        .map((event) => ({
+          id: event.id,
+          actor: event.actor,
+          eventType: event.eventType,
+          sourceRuntime: "codex-cli" as const,
+          captureMethod: "hook" as const,
+          model: null,
+          workspaceId: event.workspaceId,
+          projectId: event.workspaceId,
+          projectName: typeof event.metadata.projectName === "string" ? event.metadata.projectName : null,
+          projectPath: typeof event.metadata.projectPath === "string" ? event.metadata.projectPath : null,
+          sessionId: event.sessionId,
+          threadId: typeof event.metadata.externalSessionId === "string" ? event.metadata.externalSessionId : event.sessionId,
+          threadName: typeof event.metadata.threadName === "string" ? event.metadata.threadName : null,
+          timestamp: event.createdAt,
+          visibility: event.visibility,
+          invalidatedAt: invalidatedEvents.has(event.id) ? new Date().toISOString() : null,
+          invalidationReason: invalidatedEvents.has(event.id) ? "user_deleted" : null,
+          contentPreview: event.content,
+          rawContent: input.query === event.id ? event.content : undefined,
+          metadata: event.metadata,
+          linkedNodeIds: [...nodeSources.entries()].filter(([, ids]) => ids.includes(event.id)).map(([nodeId]) => nodeId)
+        }));
+    },
+    async getLcmGraphEvent(actor, eventId, input = {}) {
+      const event = (await this.listLcmGraphEvents(actor, {
+        includeInvalidated: input.includeInvalidated,
+        query: eventId,
+        limit: 1
+      })).find((candidate) => candidate.id === eventId);
+      return event && input.includeRaw
+        ? { ...event, rawContent: events.find((candidate) => candidate.id === eventId)?.content ?? "" }
+        : event ?? null;
+    },
+    async updateLcmGraphEvent(actor, eventId, input) {
+      const event = await this.getLcmGraphEvent(actor, eventId);
+      if (!event) return null;
+      const raw = events.find((candidate) => candidate.id === eventId);
+      if (raw && input.visibility) raw.visibility = input.visibility;
+      if (input.invalidated) invalidatedEvents.add(eventId);
+      return this.getLcmGraphEvent(actor, eventId, {
+        includeInvalidated: Boolean(input.invalidated)
+      });
+    },
+    async invalidateLcmGraphEvent(actor, eventId) {
+      const event = await this.getLcmGraphEvent(actor, eventId);
+      if (!event) return false;
+      invalidatedEvents.add(eventId);
+      return true;
+    },
+    async exportMemoryRecords(actor) {
+      const overview = await this.getLcmGraphOverview(actor);
+      const nodes = await Promise.all(
+        (await this.listLcmGraphNodes(actor, { includeInvalidated: true })).map((node) =>
+          this.getLcmGraphNode(actor, node.id, { includeInvalidated: true })
+        )
+      );
+      return {
+        exportedAt: new Date().toISOString(),
+        overview,
+        nodes: nodes.filter((node): node is NonNullable<typeof node> => Boolean(node)),
+        events: await this.listLcmGraphEvents(actor, { includeInvalidated: true })
+      };
+    },
+    async listSourcesNeedingEmbeddings() {
+      return [];
+    },
+    async getEmbeddableSource() {
+      return null;
+    },
+    async upsertSourceEmbedding() {
+      return { id: randomUUID(), inserted: true };
+    },
+    async createMemoryEvent(actor, input) {
+      if (input.visibility === "team") {
+        if (!input.teamId) {
+          throw new Error("Team visibility requires a teamId");
+        }
+        if (!getMembership(actor.userId, input.teamId)) {
+          throw new Error("User is not an active member of the requested team");
+        }
+      }
+      if (input.sessionId) {
+        const session = capturedSessions.get(input.sessionId);
+        if (!session || session.ownerUserId !== actor.userId) {
+          throw new Error("Session not found or not visible");
+        }
+      }
+      const event: MemoryEventRecord = {
+        id: randomUUID(),
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId ?? null,
+        turnId: input.turnId ?? null,
+        actor: input.actor as MemoryActor,
+        eventType: input.rawEventType,
+        content: input.content,
+        metadata: input.metadata ?? {},
+        visibility: input.visibility,
+        ownerUserId: input.visibility === "personal" ? actor.userId : null,
+        teamId: input.visibility === "team" ? input.teamId! : null,
+        createdAt: new Date().toISOString()
+      };
+      events.push(event);
+      return event;
+    },
+    async searchMemoryNodes(actor, input) {
+      const results = memories
+        .filter((memory) => {
+          if (
+            input.scope !== "personal_and_team" &&
+            memory.visibility !== input.scope
+          ) {
+            return false;
+          }
+          if (memory.visibility === "personal") {
+            return memory.ownerUserId === actor.userId;
+          }
+          return Boolean(
+            memory.teamId && getMembership(actor.userId, memory.teamId)
+          );
+        })
+        .filter((memory) =>
+          memory.summaryText.toLowerCase().includes(input.query.toLowerCase())
+        )
+        .slice(0, input.limit ?? 10)
+        .map(
+          (memory): MemorySearchResult => ({
+            nodeId: memory.id,
+            visibility: memory.visibility,
+            summaryText: memory.summaryText,
+            score: 1,
+            citation: { nodeId: memory.id, visibility: memory.visibility }
+          })
+        );
+      return {
+        results,
+        metadata: {
+          retrievalMode: "semantic_vector",
+          vectorHitsCount: 0,
+          textHitsCount: 0,
+          embeddingModel: null,
+          embeddingDimensions: null
+        }
+      };
+    },
+    async createLcmNodes(actor, input) {
+      if (input.visibility === "team") {
+        if (!input.teamId) {
+          throw new Error("Team visibility requires a teamId");
+        }
+        if (!getMembership(actor.userId, input.teamId)) {
+          throw new Error("User is not an active member of the requested team");
+        }
+      }
+      const uncompacted = events.filter((event) => {
+        const visible =
+          input.visibility === "personal"
+            ? event.ownerUserId === actor.userId
+            : event.teamId === input.teamId;
+        return (
+          visible &&
+          ![...nodeSources.values()].some((sourceIds) =>
+            sourceIds.includes(event.id)
+          )
+        );
+      });
+      const leafNodeIds = uncompacted.map((event) => {
+        const node: MemoryNodeRecord = {
+          id: randomUUID(),
+          ownerUserId: event.visibility === "personal" ? actor.userId : null,
+          teamId: event.visibility === "team" ? event.teamId : null,
+          visibility: event.visibility,
+          title: null,
+          summaryText: event.content,
+          createdAt: event.createdAt,
+          updatedAt: event.createdAt,
+          pinnedAt: null,
+          projectId: event.workspaceId,
+          projectName:
+            typeof event.metadata.projectName === "string"
+              ? event.metadata.projectName
+              : null,
+          projectPath:
+            typeof event.metadata.projectPath === "string"
+              ? event.metadata.projectPath
+              : event.workspaceId,
+          threadId:
+            typeof event.metadata.externalSessionId === "string"
+              ? event.metadata.externalSessionId
+              : event.sessionId,
+          threadName:
+            typeof event.metadata.threadName === "string"
+              ? event.metadata.threadName
+              : null
+        };
+        memories.push(node);
+        nodeSources.set(node.id, [event.id]);
+        return node.id;
+      });
+      return { leafNodeIds, rollupNodeId: null };
+    },
+    async expandMemoryNode(nodeId, actor) {
+      const node =
+        memories.find((memory) => {
+          if (memory.id !== nodeId) {
+            return false;
+          }
+          if (memory.visibility === "personal") {
+            return memory.ownerUserId === actor.userId;
+          }
+          return Boolean(
+            memory.teamId && getMembership(actor.userId, memory.teamId)
+          );
+        }) ?? null;
+      if (!node) {
+        throw new Error("Memory node not found or not visible");
+      }
+      return {
+        nodeId,
+        visibility: node.visibility,
+        sourceItems: (nodeSources.get(nodeId) ?? []).map(
+          (eventId, position) => ({
+            kind: "memory_event",
+            sourceTable: "memory_events",
+            sourceId: eventId,
+            position
+          })
+        ),
+        sources: (nodeSources.get(nodeId) ?? []).map(
+          (eventId) => events.find((event) => event.id === eventId)!
+        )
+      } satisfies ExpandedMemoryNode;
+    }
+  };
+};
+
+describe("api health", () => {
+  it("returns OK", async () => {
+    const app = await buildServer();
+    const response = await app.inject({ method: "GET", url: "/health" });
+    await app.close();
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe("OK");
+  });
+});
+
+describe("account and access flows", () => {
+  it("registers a solo user without exposing manual memory-node writes", async () => {
+    const app = await buildServer({ repository: createFakeRepository() });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "solo@example.com", password: "password123" }
+    });
+    const cookie = cookieHeader(registered);
+    const me = await app.inject({
+      method: "GET",
+      url: "/me",
+      headers: { cookie }
+    });
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/memory-nodes",
+      headers: { cookie },
+      payload: { visibility: "team", summaryText: "team memory" }
+    });
+    await app.close();
+
+    expect(registered.statusCode).toBe(200);
+    expect(JSON.parse(me.body).currentTeam).toBeNull();
+    expect(rejected.statusCode).toBe(404);
+  });
+
+  it("creates a team and lets another user join by invite code", async () => {
+    process.env.KOED_ALLOW_PUBLIC_REGISTRATION = "true";
+    const repository = createFakeRepository();
+    const app = await buildServer({ repository });
+    const owner = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "owner@example.com", password: "password123" }
+    });
+    const ownerCookie = cookieHeader(owner);
+    const created = await app.inject({
+      method: "POST",
+      url: "/teams",
+      headers: { cookie: ownerCookie },
+      payload: { name: "Research" }
+    });
+    const inviteCode = JSON.parse(created.body).team.inviteCode;
+
+    const member = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "member@example.com", password: "password123" }
+    });
+    const joined = await app.inject({
+      method: "POST",
+      url: "/teams/join",
+      headers: { cookie: cookieHeader(member) },
+      payload: { inviteCode }
+    });
+    await app.close();
+
+    expect(created.statusCode).toBe(200);
+    expect(joined.statusCode).toBe(200);
+    expect(JSON.parse(joined.body).team.name).toBe("Research");
+  });
+
+  it("authenticates API requests with bearer tokens", async () => {
+    const app = await buildServer({ repository: createFakeRepository() });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "token@example.com", password: "password123" }
+    });
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie: cookieHeader(registered) },
+      payload: { name: "Codex MCP" }
+    });
+    const token = JSON.parse(createdToken.body).token;
+    const authed = await app.inject({
+      method: "GET",
+      url: "/v1/access/check",
+      headers: { authorization: `Bearer ${token}` }
+    });
+    await app.close();
+
+    expect(createdToken.statusCode).toBe(200);
+    expect(JSON.parse(createdToken.body).apiToken.tokenPrefix).toBe(
+      token.slice(0, 12)
+    );
+    expect(authed.statusCode).toBe(200);
+    expect(JSON.parse(authed.body).ok).toBe(true);
+  });
+
+  it("configures an OpenAI-compatible provider without returning the API key", async () => {
+    const app = await buildServer({ repository: createFakeRepository() });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "provider@example.com", password: "password123" }
+    });
+    const cookie = cookieHeader(registered);
+    const saved = await app.inject({
+      method: "POST",
+      url: "/provider-configs",
+      headers: { cookie },
+      payload: {
+        provider: "openai-compatible",
+        visibility: "personal",
+        apiKey: "sk-test",
+        baseUrl: "https://models.example.test/v1",
+        embeddingModel: "embed-model",
+        summaryModel: "summary-model",
+        answerModel: "answer-model",
+        embeddingDimensions: 1536,
+        enabled: true
+      }
+    });
+    const listed = await app.inject({
+      method: "GET",
+      url: "/provider-configs",
+      headers: { cookie }
+    });
+    await app.close();
+
+    expect(saved.statusCode).toBe(200);
+    const providerConfig = JSON.parse(listed.body).providerConfigs[0];
+    expect(providerConfig.provider).toBe("openai-compatible");
+    expect(providerConfig.config.apiKey).toBeUndefined();
+    expect(providerConfig.config.apiKeyConfigured).toBe(true);
+    expect(providerConfig.config.baseUrl).toBe(
+      "https://models.example.test/v1"
+    );
+    expect(providerConfig.config.embedding_model).toBe("embed-model");
+  });
+
+  it("supports MCP bearer access checks and rejects cookie auth on v1 endpoints", async () => {
+    const app = await buildServer({ repository: createFakeRepository() });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "mcp-check@example.com", password: "password123" }
+    });
+    const cookie = cookieHeader(registered);
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie },
+      payload: { name: "Codex MCP" }
+    });
+    expect(createdToken.statusCode).toBe(200);
+    const token = JSON.parse(createdToken.body).token;
+    const rejectedCookie = await app.inject({
+      method: "GET",
+      url: "/v1/access/check",
+      headers: { cookie }
+    });
+    const checked = await app.inject({
+      method: "GET",
+      url: "/v1/access/check",
+      headers: { authorization: `Bearer ${token}` }
+    });
+    await app.close();
+
+    expect(rejectedCookie.statusCode).toBe(401);
+    expect(checked.statusCode).toBe(200);
+    expect(JSON.parse(checked.body).auth).toBe("bearer_api_token");
+  });
+
+  it("captures conversation memory through MCP endpoints", async () => {
+    const app = await buildServer({
+      repository: createFakeRepository(),
+      runMemoryJobsInlineForTests: true
+    });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "mcp-memory@example.com", password: "password123" }
+    });
+    const cookie = cookieHeader(registered);
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie },
+      payload: { name: "Codex MCP" }
+    });
+    const token = JSON.parse(createdToken.body).token;
+    const headers = { authorization: `Bearer ${token}` };
+
+    const personal = await app.inject({
+      method: "POST",
+      url: "/v1/memory/capture-personal-event",
+      headers,
+      payload: {
+        actor: "user",
+        eventType: "user_prompt",
+        content: "Alice prefers concise changelog summaries"
+      }
+    });
+    const access = await app.inject({
+      method: "GET",
+      url: "/v1/access/check",
+      headers
+    });
+    const search = await app.inject({
+      method: "POST",
+      url: "/v1/memory/search",
+      headers,
+      payload: { query: "concise changelog", retrieval_scope: "personal" }
+    });
+    const answer = await app.inject({
+      method: "POST",
+      url: "/v1/memory/answer",
+      headers,
+      payload: { query: "concise changelog", retrieval_scope: "personal+team" }
+    });
+    await app.close();
+
+    expect(personal.statusCode).toBe(200);
+    expect(JSON.parse(personal.body).event.visibility).toBe("personal");
+    expect(JSON.parse(access.body).enabledProviderConfigs).toBe(0);
+    expect(JSON.parse(access.body).providerConfigRequired).toBe(false);
+    expect(search.statusCode).toBe(200);
+    expect(JSON.parse(search.body).hits).toHaveLength(1);
+    expect(answer.statusCode).toBe(200);
+    const answerBody = JSON.parse(answer.body);
+    expect(answerBody.mode).toBe("codex_subscription");
+    expect(answerBody.markdown).toContain("Evidence bundle returned");
+    expect(answerBody.evidenceBundle.instructions).toContain(
+      "Codex should synthesize"
+    );
+    expect(answerBody.evidence[0]?.summaryText).toContain("concise changelog");
+    expect(answerBody.citations).toHaveLength(1);
+  });
+
+  it("resolves capture policy inheritance and skips disabled capture", async () => {
+    const app = await buildServer({
+      repository: createFakeRepository(),
+      runMemoryJobsInlineForTests: true
+    });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "policy@example.com", password: "password123" }
+    });
+    const cookie = cookieHeader(registered);
+    const tokenResponse = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie },
+      payload: { name: "Codex MCP" }
+    });
+    const headers = { authorization: `Bearer ${JSON.parse(tokenResponse.body).token}` };
+
+    await app.inject({
+      method: "PUT",
+      url: "/v1/capture-policies",
+      headers,
+      payload: { targetType: "global", captureState: "enabled", visibility: "personal" }
+    });
+    const global = await app.inject({
+      method: "GET",
+      url: "/v1/capture-policy/effective?projectId=repo-a",
+      headers
+    });
+    await app.inject({
+      method: "PUT",
+      url: "/v1/capture-policies",
+      headers,
+      payload: { targetType: "project", projectId: "repo-a", captureState: "disabled" }
+    });
+    const project = await app.inject({
+      method: "GET",
+      url: "/v1/capture-policy/effective?projectId=repo-a",
+      headers
+    });
+    await app.inject({
+      method: "PUT",
+      url: "/v1/capture-policies",
+      headers,
+      payload: { targetType: "thread", projectId: "repo-a", threadId: "thread-a", captureState: "enabled" }
+    });
+    const thread = await app.inject({
+      method: "GET",
+      url: "/v1/capture-policy/effective?projectId=repo-a&threadId=thread-a",
+      headers
+    });
+    const skipped = await app.inject({
+      method: "POST",
+      url: "/v1/memory/capture-personal-event",
+      headers,
+      payload: {
+        workspaceId: "repo-a",
+        actor: "user",
+        eventType: "user_prompt",
+        content: "This disabled capture should not store"
+      }
+    });
+    await app.close();
+
+    expect(JSON.parse(global.body).policy.captureState).toBe("enabled");
+    expect(JSON.parse(project.body).policy.captureState).toBe("disabled");
+    expect(JSON.parse(thread.body).policy.captureState).toBe("enabled");
+    expect(JSON.parse(skipped.body)).toMatchObject({
+      skipped: true,
+      reason: "capture_disabled"
+    });
+  });
+
+  it("stores provenance and presents memories as browsable clusters", async () => {
+    const app = await buildServer({
+      repository: createFakeRepository(),
+      runMemoryJobsInlineForTests: true
+    });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "browser@example.com", password: "password123" }
+    });
+    const cookie = cookieHeader(registered);
+    const tokenResponse = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie },
+      payload: { name: "Codex MCP" }
+    });
+    const headers = { authorization: `Bearer ${JSON.parse(tokenResponse.body).token}` };
+    const captured = await app.inject({
+      method: "POST",
+      url: "/v1/memory/capture-personal-event",
+      headers,
+      payload: {
+        workspaceId: "/repo/sports",
+        actor: "user",
+        eventType: "user_prompt",
+        content: "Jacobo likes football",
+        metadata: {
+          projectName: "Sports Repo",
+          projectPath: "/repo/sports",
+          externalSessionId: "thread-sports",
+          threadName: "Sports chat"
+        }
+      }
+    });
+    const nodeId = JSON.parse(captured.body).compaction.leafNodeIds[0];
+    await app.inject({
+      method: "PATCH",
+      url: `/v1/memory/nodes/${nodeId}`,
+      headers: { cookie },
+      payload: { pinned: true }
+    });
+    const clusters = await app.inject({
+      method: "GET",
+      url: "/v1/memory/clusters",
+      headers: { cookie }
+    });
+    const items = await app.inject({
+      method: "GET",
+      url: "/v1/memory/items?pinned=true",
+      headers: { cookie }
+    });
+    await app.close();
+
+    expect(JSON.parse(captured.body).event.metadata.projectName).toBe("Sports Repo");
+    expect(JSON.parse(clusters.body).clusters[0]).toMatchObject({
+      label: "Sports"
+    });
+    expect(JSON.parse(items.body).memories[0]).toMatchObject({
+      text: "Jacobo likes football",
+      projectName: "Sports Repo",
+      threadName: "Sports chat",
+      pinnedAt: expect.any(String)
+    });
+    expect(clusters.headers.deprecation).toBe("true");
+  });
+
+  it("browses and governs LCM graph records without curated memory endpoints", async () => {
+    const app = await buildServer({
+      repository: createFakeRepository(),
+      runMemoryJobsInlineForTests: true
+    });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "graph@example.com", password: "password123" }
+    });
+    const cookie = cookieHeader(registered);
+    const tokenResponse = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie },
+      payload: { name: "Codex MCP" }
+    });
+    const headers = { authorization: `Bearer ${JSON.parse(tokenResponse.body).token}` };
+    const captured = await app.inject({
+      method: "POST",
+      url: "/v1/memory/capture-personal-event",
+      headers,
+      payload: {
+        workspaceId: "repo-graph",
+        actor: "user",
+        eventType: "user_prompt",
+        content: "Graph browser source record",
+        metadata: {
+          projectName: "Graph Repo",
+          externalSessionId: "thread-graph",
+          threadName: "Graph thread"
+        }
+      }
+    });
+    const eventId = JSON.parse(captured.body).event.id;
+    const nodeId = JSON.parse(captured.body).compaction.leafNodeIds[0];
+    const overview = await app.inject({
+      method: "GET",
+      url: "/v1/memory/graph/overview",
+      headers: { cookie }
+    });
+    const nodes = await app.inject({
+      method: "GET",
+      url: "/v1/memory/graph/nodes",
+      headers: { cookie }
+    });
+    const nodeDetail = await app.inject({
+      method: "GET",
+      url: `/v1/memory/graph/nodes/${nodeId}`,
+      headers: { cookie }
+    });
+    const corrected = await app.inject({
+      method: "PATCH",
+      url: `/v1/memory/nodes/${nodeId}`,
+      headers: { cookie },
+      payload: { summaryText: "Corrected graph browser summary" }
+    });
+    const events = await app.inject({
+      method: "GET",
+      url: "/v1/memory/graph/events",
+      headers: { cookie }
+    });
+    const rawEvent = await app.inject({
+      method: "GET",
+      url: `/v1/memory/graph/events/${eventId}?includeRaw=true`,
+      headers: { cookie }
+    });
+    const deletedEvent = await app.inject({
+      method: "DELETE",
+      url: `/v1/memory/graph/events/${eventId}`,
+      headers: { cookie }
+    });
+    const activeEvents = await app.inject({
+      method: "GET",
+      url: "/v1/memory/graph/events",
+      headers: { cookie }
+    });
+    const deletedNode = await app.inject({
+      method: "DELETE",
+      url: `/v1/memory/nodes/${nodeId}`,
+      headers: { cookie }
+    });
+    const activeNodes = await app.inject({
+      method: "GET",
+      url: "/v1/memory/graph/nodes",
+      headers: { cookie }
+    });
+    const exported = await app.inject({
+      method: "GET",
+      url: "/v1/memory/export",
+      headers: { cookie }
+    });
+    await app.close();
+
+    expect(JSON.parse(overview.body).overview).toMatchObject({
+      capturedEvents: 1,
+      leafNodes: 1,
+      rollupNodes: 0,
+      pendingSummaries: 1
+    });
+    expect(JSON.parse(nodes.body).nodes[0]).toMatchObject({
+      id: nodeId,
+      projectName: "Graph Repo",
+      threadName: "Graph thread",
+      visibility: "personal"
+    });
+    expect(JSON.parse(nodeDetail.body).node.sources[0]).toMatchObject({
+      id: eventId,
+      contentPreview: "Graph browser source record"
+    });
+    expect(JSON.parse(corrected.body).node).toMatchObject({
+      summaryText: "Corrected graph browser summary",
+      summaryCorrectedByUserId: expect.any(String)
+    });
+    expect(JSON.parse(events.body).events[0]).toMatchObject({
+      id: eventId,
+      linkedNodeIds: [nodeId]
+    });
+    expect(JSON.parse(rawEvent.body).event.rawContent).toBe(
+      "Graph browser source record"
+    );
+    expect(deletedEvent.statusCode).toBe(200);
+    expect(JSON.parse(activeEvents.body).events).toHaveLength(0);
+    expect(deletedNode.statusCode).toBe(200);
+    expect(JSON.parse(activeNodes.body).nodes).toHaveLength(0);
+    expect(JSON.parse(exported.body).nodes[0]).toMatchObject({
+      id: nodeId,
+      invalidationReason: "user_deleted"
+    });
+  });
+
+  it("ignores provider configs for memory_answer in default Codex subscription mode", async () => {
+    const app = await buildServer({
+      repository: createFakeRepository(),
+      runMemoryJobsInlineForTests: true
+    });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "no-provider-answer@example.com",
+        password: "password123"
+      }
+    });
+    const cookie = cookieHeader(registered);
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie },
+      payload: { name: "Codex MCP" }
+    });
+    expect(createdToken.statusCode).toBe(200);
+    const headers = {
+      authorization: `Bearer ${JSON.parse(createdToken.body).token}`
+    };
+    const configured = await app.inject({
+      method: "POST",
+      url: "/provider-configs",
+      headers: { cookie },
+      payload: {
+        provider: "openai-compatible",
+        visibility: "personal",
+        apiKey: "sk-should-not-be-used",
+        baseUrl: "https://models.invalid.test/v1",
+        answerModel: "should-not-be-used"
+      }
+    });
+    await app.inject({
+      method: "POST",
+      url: "/v1/memory/capture-personal-event",
+      headers,
+      payload: {
+        actor: "user",
+        eventType: "user_prompt",
+        content: "No provider answer marker"
+      }
+    });
+    const answer = await app.inject({
+      method: "POST",
+      url: "/v1/memory/answer",
+      headers,
+      payload: { query: "provider answer marker", retrieval_scope: "personal" }
+    });
+    await app.close();
+
+    expect(configured.statusCode).toBe(200);
+    expect(answer.statusCode).toBe(200);
+    const body = JSON.parse(answer.body);
+    expect(body.mode).toBe("codex_subscription");
+    expect(body.evidence[0]?.summaryText).toContain("No provider answer");
+  });
+
+  it("does not compact captured conversation events on the API hot path by default", async () => {
+    const repository = createFakeRepository();
+    let compactionCalls = 0;
+    const originalCreateLcmNodes = repository.createLcmNodes.bind(repository);
+    repository.createLcmNodes = async (...args) => {
+      compactionCalls += 1;
+      return originalCreateLcmNodes(...args);
+    };
+    const app = await buildServer({ repository });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "async-write@example.com",
+        password: "password123"
+      }
+    });
+    const cookie = cookieHeader(registered);
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie },
+      payload: { name: "Codex MCP" }
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/memory/capture-personal-event",
+      headers: {
+        authorization: `Bearer ${JSON.parse(createdToken.body).token}`
+      },
+      payload: {
+        actor: "user",
+        eventType: "user_prompt",
+        content: "Async processing marker"
+      }
+    });
+    await app.close();
+
+    expect(response.statusCode).toBe(200);
+    expect(compactionCalls).toBe(0);
+    const body = JSON.parse(response.body);
+    expect(body.compaction).toBeUndefined();
+    expect(body.processing.compaction.inline).toBe(false);
+  });
+
+  it("rejects server synthesis unless the unsafe backend LLM flag is set", async () => {
+    process.env.MEMORY_MODE = "server_synthesis";
+    delete process.env.MEMORY_SERVER_SYNTHESIS_UNSAFE_ALLOW;
+
+    await expect(
+      buildServer({ repository: createFakeRepository() })
+    ).rejects.toThrow("backend-paid LLM calls");
+  });
+
+  it("reports server synthesis only with explicit unsafe opt-in", async () => {
+    process.env.MEMORY_MODE = "server_synthesis";
+    process.env.MEMORY_SERVER_SYNTHESIS_UNSAFE_ALLOW = "1";
+
+    const app = await buildServer({ repository: createFakeRepository() });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "server-synthesis-opt-in@example.com",
+        password: "password123"
+      }
+    });
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie: cookieHeader(registered) },
+      payload: { name: "Codex MCP" }
+    });
+    const access = await app.inject({
+      method: "GET",
+      url: "/v1/access/check",
+      headers: {
+        authorization: `Bearer ${JSON.parse(createdToken.body).token}`
+      }
+    });
+    await app.close();
+
+    expect(access.statusCode).toBe(200);
+    const body = JSON.parse(access.body);
+    expect(body.memoryMode).toBe("server_synthesis");
+    expect(body.providerConfigRequired).toBe(true);
+  });
+
+  it("creates MCP sessions, captures session events, exposes nodes, and serves OpenAPI JSON", async () => {
+    const app = await buildServer({
+      repository: createFakeRepository(),
+      runMemoryJobsInlineForTests: true
+    });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "mcp-session@example.com", password: "password123" }
+    });
+    const cookie = cookieHeader(registered);
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie },
+      payload: { name: "Codex MCP" }
+    });
+    expect(createdToken.statusCode).toBe(200);
+    const headers = {
+      authorization: `Bearer ${JSON.parse(createdToken.body).token}`
+    };
+    const session = await app.inject({
+      method: "POST",
+      url: "/v1/sessions",
+      headers,
+      payload: {
+        externalSessionId: "codex-session-1",
+        model: "gpt-5.5",
+        cwd: "/tmp/project"
+      }
+    });
+    expect(session.statusCode).toBe(200);
+    const sessionId = JSON.parse(session.body).session.id;
+    const event = await app.inject({
+      method: "POST",
+      url: `/v1/sessions/${sessionId}/events`,
+      headers,
+      payload: {
+        actor: "assistant",
+        eventType: "message",
+        content: "Session event memory marker"
+      }
+    });
+    const nodeId = JSON.parse(event.body).compaction.leafNodeIds[0];
+    const node = await app.inject({
+      method: "GET",
+      url: `/v1/memory/nodes/${nodeId}`,
+      headers
+    });
+    const expanded = await app.inject({
+      method: "GET",
+      url: `/v1/memory/nodes/${nodeId}/expand`,
+      headers
+    });
+    const openapi = await app.inject({ method: "GET", url: "/openapi.json" });
+    await app.close();
+
+    expect(session.statusCode).toBe(200);
+    expect(event.statusCode).toBe(200);
+    expect(node.statusCode).toBe(200);
+    expect(JSON.parse(expanded.body).expanded.sources[0].content).toBe(
+      "Session event memory marker"
+    );
+    expect(JSON.parse(openapi.body).paths["/v1/memory/answer"]).toBeDefined();
+  });
+});

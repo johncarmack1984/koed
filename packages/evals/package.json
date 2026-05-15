@@ -1,0 +1,17 @@
+{
+  "name": "@codex-memory/evals",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "eval": "tsc -p tsconfig.json && node dist/index.js",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@codex-memory/core": "workspace:*"
+  }
+}

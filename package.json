@@ -1,0 +1,33 @@
+{
+  "name": "koed",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm -r build",
+    "console:dev": "pnpm --filter @codex-memory/console dev",
+    "console:build": "pnpm --filter @codex-memory/console build",
+    "embeddings:backfill": "pnpm --filter @codex-memory/worker embeddings:backfill",
+    "eval": "pnpm --filter @codex-memory/evals eval",
+    "smoke:lcm": "node scripts/lcm-smoke-test.mjs",
+    "test": "pnpm -r --workspace-concurrency=1 test",
+    "lint": "eslint .",
+    "typecheck": "tsc -b",
+    "fmt": "prettier --write ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "@types/node": "^22.10.7",
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "^9.18.0",
+    "eslint-config-prettier": "^10.0.1",
+    "globals": "^15.14.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.20.0",
+    "vite": "^6.0.7",
+    "vitest": "^2.1.8"
+  }
+}

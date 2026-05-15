@@ -1,0 +1,35 @@
+{
+  "name": "@codex-memory/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "codex-memory-mcp": "dist/cli.js",
+    "codex-memory-capture-hook": "dist/capture-hook.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "bundle": "pnpm run build && esbuild src/cli.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/koed-mcp-bundled.mjs",
+    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "start": "node dist/cli.js",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@codex-memory/core": "workspace:*",
+    "@codex-memory/shared": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0"
+  }
+}

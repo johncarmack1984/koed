@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.DS_Store
+.playwright-cli/
+target/
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/resources/koed-node/
+coverage/
+.env
+.env.*
+!.env.example
+.DS_Store
+*.tsbuildinfo
+packages/evals/reports/*.json

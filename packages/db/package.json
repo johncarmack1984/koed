@@ -1,0 +1,31 @@
+{
+  "name": "@codex-memory/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "migrate:up": "node-pg-migrate up --migrations-dir src/migrations --migrations-table schema_migrations",
+    "migrate:down": "node-pg-migrate down --migrations-dir src/migrations --migrations-table schema_migrations",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@codex-memory/core": "workspace:*",
+    "@codex-memory/shared": "workspace:*",
+    "node-pg-migrate": "^8.0.4",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.11"
+  }
+}
