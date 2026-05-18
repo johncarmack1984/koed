@@ -13,8 +13,12 @@
     "eval": "pnpm --filter @codex-memory/evals eval",
     "smoke:lcm": "node scripts/lcm-smoke-test.mjs",
     "test": "pnpm -r --workspace-concurrency=1 test",
+    "test:python": "node scripts/python-check.mjs",
+    "setup:python": "node scripts/python-setup.mjs",
     "lint": "eslint .",
     "typecheck": "tsc -b",
+    "typecheck:test": "tsc -p tsconfig.test.json",
+    "verify": "node scripts/verify.mjs",
     "fmt": "prettier --write ."
   },
   "devDependencies": {
