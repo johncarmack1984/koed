@@ -19,6 +19,17 @@ Postgres uses pgvector. Redis backs BullMQ. The default model mode is `codex_sub
 
 ## Quickstart
 
+Set the unique encryption args for the deployment:
+
+```bash
+cp .env.example .env
+printf "DATA_ENCRYPTION_KEY=%s\nAPI_TOKEN_PEPPER=%s\n" \
+  "$(openssl rand -base64 32)" \
+  "$(openssl rand -base64 48)" >> .env
+```
+
+Install and start the service:
+
 ```bash
 pnpm install
 pnpm build

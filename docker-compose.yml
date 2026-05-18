@@ -64,6 +64,8 @@ services:
       MEMORY_MODE: codex_subscription
       DATABASE_URL: postgres://codex_memory:codex_memory@postgres:5432/codex_memory
       REDIS_URL: redis://redis:6379
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?Set DATA_ENCRYPTION_KEY in .env}
+      API_TOKEN_PEPPER: ${API_TOKEN_PEPPER:?Set API_TOKEN_PEPPER in .env}
       EMBEDDING_SERVICE_URL: http://embedding-service:8000
       EMBEDDING_MODEL: Qwen/Qwen3-Embedding-0.6B-GGUF
       EMBEDDING_DIMENSIONS: 1024
@@ -95,6 +97,7 @@ services:
       MEMORY_MODE: codex_subscription
       DATABASE_URL: postgres://codex_memory:codex_memory@postgres:5432/codex_memory
       REDIS_URL: redis://redis:6379
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?Set DATA_ENCRYPTION_KEY in .env}
       EMBEDDING_SERVICE_URL: http://embedding-service:8000
       EMBEDDING_MODEL: Qwen/Qwen3-Embedding-0.6B-GGUF
       EMBEDDING_DIMENSIONS: 1024
