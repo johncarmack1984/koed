@@ -13,7 +13,7 @@ docker compose up --build
 If ports conflict with another local app:
 
 ```bash
-API_HOST_PORT=3300 CONSOLE_HOST_PORT=5573 docker compose up --build
+API_HOST_PORT=3300 CONSOLE_HOST_PORT=5573 CONSOLE_API_BASE_URL=http://localhost:3300 docker compose up --build
 ```
 
 Open `http://localhost:5173`, or the host port you selected. The console guides setup:

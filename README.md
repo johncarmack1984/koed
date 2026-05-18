@@ -40,7 +40,7 @@ docker compose up --build
 If the default ports are already in use, choose host ports before starting:
 
 ```bash
-API_HOST_PORT=3300 CONSOLE_HOST_PORT=5573 docker compose up --build
+API_HOST_PORT=3300 CONSOLE_HOST_PORT=5573 CONSOLE_API_BASE_URL=http://localhost:3300 docker compose up --build
 ```
 
 Then open the local console:
