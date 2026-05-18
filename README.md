@@ -23,7 +23,7 @@ Set the unique encryption args for the deployment:
 
 ```bash
 cp .env.example .env
-printf "DATA_ENCRYPTION_KEY=%s\nAPI_TOKEN_PEPPER=%s\n" \
+printf "API_DATA_ENCRYPTION_KEY=%s\nAPI_TOKEN_PEPPER=%s\n" \
   "$(openssl rand -base64 32)" \
   "$(openssl rand -base64 48)" >> .env
 ```
@@ -40,7 +40,7 @@ docker compose up --build
 If the default ports are already in use, choose host ports before starting:
 
 ```bash
-API_HOST_PORT=3300 WEB_HOST_PORT=5573 docker compose up --build
+API_HOST_PORT=3300 CONSOLE_HOST_PORT=5573 docker compose up --build
 ```
 
 Then open the local console:
@@ -49,7 +49,7 @@ Then open the local console:
 http://localhost:5173
 ```
 
-If you changed `WEB_HOST_PORT`, open that port instead.
+If you changed `CONSOLE_HOST_PORT`, open that port instead.
 
 Use the console setup flow:
 
@@ -64,13 +64,12 @@ The console can verify Koed and generate exact setup values, but it cannot write
 
 Start from `.env.example`. Important values:
 
-- `DATABASE_URL`: Postgres connection string.
-- `REDIS_URL`: Redis connection string.
-- `DATA_ENCRYPTION_KEY`: 32-byte base64 key used for stored provider API keys.
+- `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`: Postgres container settings.
+- `API_DATA_ENCRYPTION_KEY`: 32-byte base64 key used for stored provider API keys.
 - `API_TOKEN_PEPPER`: server-side pepper for API token hashes.
 - `MEMORY_MODE=codex_subscription`: recommended default.
-- `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`, `EMBEDDING_SERVICE_URL`: local embedding settings.
-- `CORS_ORIGINS`: include the local console origin.
+- `EMBEDDING_MODEL_NAME`, `EMBEDDING_DIMENSIONS`: local embedding settings.
+- `API_CORS_ORIGINS`: include the local console origin.
 
 Do not commit `.env`, `.env.production`, provider keys, API tokens, peppers, encryption keys, or private deployment details.
 

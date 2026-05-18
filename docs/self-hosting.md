@@ -13,7 +13,7 @@ docker compose up --build
 If ports conflict with another local app:
 
 ```bash
-API_HOST_PORT=3300 WEB_HOST_PORT=5573 docker compose up --build
+API_HOST_PORT=3300 CONSOLE_HOST_PORT=5573 docker compose up --build
 ```
 
 Open `http://localhost:5173`, or the host port you selected. The console guides setup:
@@ -27,4 +27,4 @@ The browser console cannot write local AI-client configuration files. This is de
 
 ## Production Notes
 
-Keep Postgres and Redis private. Expose only the console/API through your reverse proxy. Set strong `DATA_ENCRYPTION_KEY`, `API_TOKEN_PEPPER`, database password, and Redis password. Use TLS at the reverse proxy if the console or API are reachable beyond localhost.
+Keep Postgres and Redis private. Expose only the console/API through your reverse proxy. Set strong `API_DATA_ENCRYPTION_KEY`, `API_TOKEN_PEPPER`, database password, and Redis password. Use TLS at the reverse proxy if the console or API are reachable beyond localhost.
