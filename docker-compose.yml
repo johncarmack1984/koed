@@ -132,7 +132,30 @@ services:
       api:
         condition: service_started
 
+  history-browser:
+    build:
+      context: .
+      dockerfile: apps/history-browser/Dockerfile
+      args:
+        VITE_API_BASE_URL: ${CONSOLE_API_BASE_URL}
+        HISTORY_BROWSER_REPO: ${HISTORY_BROWSER_REPO:-https://github.com/koed-labs/koed-history-browser.git}
+        HISTORY_BROWSER_REF: ${HISTORY_BROWSER_REF:-main}
+      secrets:
+        - github_token
+    environment:
+      NODE_ENV: ${CONSOLE_NODE_ENV}
+      HISTORY_WEB_PORT: 5174
+    ports:
+      - "${HISTORY_WEB_HOST_PORT}:5174"
+    depends_on:
+      api:
+        condition: service_started
+
 volumes:
   postgres-data:
   redis-data:
   embedding-model-cache:
+
+secrets:
+  github_token:
+    environment: GITHUB_TOKEN

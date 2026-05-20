@@ -10,6 +10,7 @@ This repository is not the hosted Koed SaaS product. It does not include Koed Cl
 - `apps/worker`: BullMQ worker for embedding and memory background jobs.
 - `apps/embedding-service`: local embedding/reranking HTTP service.
 - `apps/console`: local operator console for setup, status, tokens, policy, memory overview, Codex setup, and redacted diagnostics.
+- `apps/history-browser`: second local frontend adapted from the T3 Code history-browser experiment for side-by-side memory UX review.
 - `packages/db`: Postgres repository and migrations.
 - `packages/core`: memory capture, retrieval, answer, and compaction logic.
 - `packages/mcp-server`: Koed MCP Server and TypeScript Codex Capture Hook.
@@ -19,28 +20,25 @@ Postgres uses pgvector. Redis backs BullMQ. Koed Self-Hosted relies on the conne
 
 ## Quickstart
 
-Set the unique encryption args for the deployment:
+Create the local environment file, then install and start the service:
 
 ```bash
-cp .env.example .env
-printf "API_DATA_ENCRYPTION_KEY=%s\nAPI_TOKEN_PEPPER=%s\n" \
-  "$(openssl rand -base64 32)" \
-  "$(openssl rand -base64 48)" >> .env
-```
-
-Install and start the service:
-
-```bash
+pnpm setup:env
 pnpm install
 pnpm build
 pnpm test
 docker compose up --build
 ```
 
+The T3-style history browser is pulled from the private
+`koed-labs/koed-history-browser` repository during local builds. Set
+`GITHUB_TOKEN` in `.env` to a GitHub token that can read that repository before
+running `docker compose up --build`.
+
 If the default ports are already in use, choose host ports before starting:
 
 ```bash
-API_HOST_PORT=3300 CONSOLE_HOST_PORT=5573 CONSOLE_API_BASE_URL=http://localhost:3300 docker compose up --build
+API_HOST_PORT=3300 CONSOLE_HOST_PORT=5573 HISTORY_WEB_HOST_PORT=5574 CONSOLE_API_BASE_URL=http://localhost:3300 docker compose up --build
 ```
 
 Then open the local console:
@@ -49,7 +47,13 @@ Then open the local console:
 http://localhost:5173
 ```
 
-If you changed `CONSOLE_HOST_PORT`, open that port instead.
+The T3-style history browser runs beside it:
+
+```text
+http://localhost:5174
+```
+
+If you changed `CONSOLE_HOST_PORT` or `HISTORY_WEB_HOST_PORT`, open those ports instead.
 
 Use the console setup flow:
 
@@ -68,7 +72,11 @@ Start from `.env.example`. Important values:
 - `API_DATA_ENCRYPTION_KEY`: 32-byte base64 key used for encrypted server-side data.
 - `API_TOKEN_PEPPER`: server-side pepper for API token hashes.
 - `EMBEDDING_MODEL_NAME`, `EMBEDDING_DIMENSIONS`: local embedding settings.
-- `API_CORS_ORIGINS`: include the local console origin.
+- `API_CORS_ORIGINS`: include the local console and history-browser origins.
+- `GITHUB_TOKEN`: GitHub token used by Docker to fetch the private
+  `koed-labs/koed-history-browser` frontend repository.
+- `HISTORY_BROWSER_REPO`, `HISTORY_BROWSER_REF`: optional override for the
+  history-browser repository and branch/tag/SHA.
 
 Do not commit `.env`, `.env.production`, API tokens, peppers, encryption keys, or private deployment details. Server-side LLM synthesis and backend LLM provider configuration are unsupported in this self-hosted build.
 
@@ -114,6 +122,21 @@ The console is an operator UI, not a marketing site. It includes:
 - built-in smoke test for capture and recall;
 - export/delete/governance entry points through retained API surfaces;
 - copyable, redacted diagnostics.
+
+## History Browser
+
+The history browser is a second frontend for gap analysis against the operator
+console. It lives in the private `koed-labs/koed-history-browser` repository and
+is fetched into `apps/history-browser/t3code-history-browser` when needed. It
+focuses on the T3 Code-style chat timeline, project/session sidebar, LCM
+inspector, and scoped memory questions. Run it locally with:
+
+```bash
+GITHUB_TOKEN=<token with access to koed-labs/koed-history-browser>
+pnpm history:dev
+```
+
+It talks to the same API and accepts the same console-created bearer API tokens.
 
 ## Security Model
 

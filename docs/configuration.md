@@ -2,6 +2,15 @@
 
 Use `.env.example` as the canonical self-hosted environment example. It is the starting point for local and production deployments.
 
+For a local deployment, run:
+
+```bash
+pnpm setup:env
+```
+
+This creates `.env` and generates `API_DATA_ENCRYPTION_KEY` and
+`API_TOKEN_PEPPER`. If `.env` already exists, the command leaves it unchanged.
+
 ## Required Deployment Values
 
 - `POSTGRES_DB`: Postgres database name used by Docker Compose.

@@ -43,6 +43,31 @@ interface MemoryJobStatus {
   };
 }
 
+interface GraphUpdatePayload {
+  table?: string;
+  operation?: string;
+  id?: string | null;
+  ownerUserId?: string | null;
+  teamId?: string | null;
+  visibility?: "personal" | "team" | string | null;
+  changedAt?: string;
+}
+
+interface GraphStreamClient {
+  userId: string;
+  reply: FastifyReply;
+}
+
+interface GraphListenClient {
+  query(sql: string): Promise<unknown>;
+  on(
+    event: "notification",
+    callback: (message: { channel: string; payload?: string }) => void
+  ): void;
+  on(event: "error", callback: (error: unknown) => void): void;
+  release(): void;
+}
+
 const hashSecret = (secret: string): string =>
   createHash("sha256")
     .update(`${process.env.API_TOKEN_PEPPER ?? ""}${secret}`)
@@ -84,7 +109,10 @@ const withTimeout = async <T>(
   });
 
 const allowedCorsOrigins = (): Set<string> => {
-  const configured = parseCsv(process.env.CORS_ORIGINS);
+  const configured = [
+    ...parseCsv(process.env.CORS_ORIGINS),
+    ...parseCsv(process.env.API_CORS_ORIGINS)
+  ];
   const derived = [process.env.PUBLIC_APP_URL, process.env.API_BASE_URL].filter(
     (value): value is string => Boolean(value)
   );
@@ -387,8 +415,64 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
       : null;
   const embeddingQueue = createQueue("memory-embed");
   const compactionQueue = createQueue("lcm-compact");
+  const graphStreamClients = new Set<GraphStreamClient>();
+  let graphListenClient: GraphListenClient | null = null;
+
+  const writeGraphStreamEvent = (
+    reply: FastifyReply,
+    event: string,
+    payload: unknown
+  ) => {
+    reply.raw.write(`event: ${event}\n`);
+    reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  const broadcastGraphUpdate = (payload: GraphUpdatePayload) => {
+    for (const client of graphStreamClients) {
+      if (
+        payload.visibility === "personal" &&
+        payload.ownerUserId &&
+        payload.ownerUserId !== client.userId
+      ) {
+        continue;
+      }
+      writeGraphStreamEvent(client.reply, "graph_update", payload);
+    }
+  };
+
+  if (pool) {
+    try {
+      graphListenClient = await pool.connect();
+      await graphListenClient.query("LISTEN koed_graph_updates");
+      graphListenClient.on("notification", (message) => {
+        if (message.channel !== "koed_graph_updates" || !message.payload) {
+          return;
+        }
+        try {
+          broadcastGraphUpdate(JSON.parse(message.payload) as GraphUpdatePayload);
+        } catch (error) {
+          app.log.warn(
+            { error: String(error), payload: message.payload },
+            "could not parse graph update notification"
+          );
+        }
+      });
+      graphListenClient.on("error", (error) => {
+        app.log.warn({ error: String(error) }, "graph update listener failed");
+      });
+    } catch (error) {
+      graphListenClient?.release();
+      graphListenClient = null;
+      app.log.warn({ error: String(error) }, "could not start graph update listener");
+    }
+  }
 
   app.addHook("onClose", async () => {
+    for (const client of graphStreamClients) {
+      client.reply.raw.end();
+    }
+    graphStreamClients.clear();
+    graphListenClient?.release();
     await Promise.all([embeddingQueue?.close(), compactionQueue?.close()]);
     await pool?.end();
   });
@@ -400,7 +484,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
         callback(null, true);
         return;
       }
-      callback(new Error("CORS origin is not allowed"), false);
+      callback(null, false);
     },
     credentials: true
   });
@@ -1175,7 +1259,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     { preHandler: memoryRateLimit },
     async (request) => {
       const repo = requireRepository();
-      const user = await authenticate(request);
+      const user = await authenticateApiToken(request);
       const query = effectivePolicyQuerySchema.parse(request.query);
       return {
         policy: await repo.getEffectiveCapturePolicy({ userId: user.id }, query)
@@ -1244,7 +1328,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     { preHandler: memoryRateLimit },
     async (request) => {
       const repo = requireRepository();
-      const user = await authenticateApiToken(request);
+      const user = await authenticate(request);
       const params = sessionIdParamsSchema.parse(request.params);
       const input = mcpSessionEventSchema.parse(request.body);
       const requesterContext = { userId: user.id };
@@ -1455,6 +1539,46 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     }
   );
 
+  app.get("/v1/memory/graph/stream", async (request, reply) => {
+    const user = await authenticate(request);
+    const origin = request.headers.origin?.replace(/\/+$/, "");
+    const streamCorsHeaders =
+      origin && corsOrigins.has(origin)
+        ? {
+            "access-control-allow-origin": origin,
+            "access-control-allow-credentials": "true",
+            vary: "Origin"
+          }
+        : {};
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      ...streamCorsHeaders,
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "x-accel-buffering": "no"
+    });
+
+    const client = { userId: user.id, reply };
+    graphStreamClients.add(client);
+    writeGraphStreamEvent(reply, "ready", {
+      ok: true,
+      changedAt: new Date().toISOString()
+    });
+
+    const heartbeat = setInterval(() => {
+      writeGraphStreamEvent(reply, "heartbeat", {
+        changedAt: new Date().toISOString()
+      });
+    }, 15_000);
+
+    request.raw.on("close", () => {
+      clearInterval(heartbeat);
+      graphStreamClients.delete(client);
+    });
+  });
+
   app.get(
     "/v1/memory/graph/events/:eventId",
     { preHandler: memoryRateLimit },
@@ -1568,7 +1692,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     { preHandler: memoryRateLimit },
     async (request) => {
       const repo = requireRepository();
-      const user = await authenticateApiToken(request);
+      const user = await authenticate(request);
       const input = searchMemorySchema.parse(request.body);
       const result = await answerMemory({
         repository: repo,
