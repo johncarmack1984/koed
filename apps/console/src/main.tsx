@@ -124,12 +124,16 @@ const StatusDot = ({ status }: { status: string }) => {
 
 const JsonBlock = ({ value }: { value: unknown }) => (
   <div className="code-box">
-    <pre>{typeof value === "string" ? value : JSON.stringify(value, null, 2)}</pre>
+    <pre>
+      {typeof value === "string" ? value : JSON.stringify(value, null, 2)}
+    </pre>
     <button
       type="button"
       className="secondary"
       onClick={() =>
-        copyText(typeof value === "string" ? value : JSON.stringify(value, null, 2))
+        copyText(
+          typeof value === "string" ? value : JSON.stringify(value, null, 2)
+        )
       }
     >
       Copy
@@ -141,17 +145,21 @@ const App = () => {
   const [setup, setSetup] = useState<SetupStatus | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [status, setStatus] = useState<Record<string, unknown> | null>(null);
-  const [overview, setOverview] = useState<Record<string, unknown> | null>(null);
+  const [overview, setOverview] = useState<Record<string, unknown> | null>(
+    null
+  );
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [policies, setPolicies] = useState<CapturePolicy[]>([]);
   const [nodes, setNodes] = useState<GraphRecord[]>([]);
   const [events, setEvents] = useState<GraphRecord[]>([]);
-  const [diagnostics, setDiagnostics] = useState<Record<string, unknown> | null>(
-    null
-  );
-  const [memoryExport, setMemoryExport] = useState<Record<string, unknown> | null>(
-    null
-  );
+  const [diagnostics, setDiagnostics] = useState<Record<
+    string,
+    unknown
+  > | null>(null);
+  const [memoryExport, setMemoryExport] = useState<Record<
+    string,
+    unknown
+  > | null>(null);
   const [smokeResult, setSmokeResult] = useState<SmokeResult | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -192,15 +200,14 @@ const App = () => {
   };
 
   const refreshPrivate = async () => {
-    const [me, graph, apiTokens, capturePolicies] =
-      await Promise.all([
-        requestJson<{ user: User }>("/me"),
-        requestJson<{ overview: Record<string, unknown> }>(
-          "/v1/memory/graph/overview"
-        ),
-        requestJson<{ apiTokens: ApiToken[] }>("/api-tokens"),
-        requestJson<{ policies: CapturePolicy[] }>("/v1/capture-policies")
-      ]);
+    const [me, graph, apiTokens, capturePolicies] = await Promise.all([
+      requestJson<{ user: User }>("/me"),
+      requestJson<{ overview: Record<string, unknown> }>(
+        "/v1/memory/graph/overview"
+      ),
+      requestJson<{ apiTokens: ApiToken[] }>("/api-tokens"),
+      requestJson<{ policies: CapturePolicy[] }>("/v1/capture-policies")
+    ]);
     setUser(me.user);
     setOverview(graph.overview);
     setTokens(apiTokens.apiTokens);
@@ -508,7 +515,9 @@ const App = () => {
             <section className="surface action-panel">
               {!user ? (
                 <>
-                  <h2>{setup?.configured ? "Sign in" : "Create local admin"}</h2>
+                  <h2>
+                    {setup?.configured ? "Sign in" : "Create local admin"}
+                  </h2>
                   <p>
                     This account exists only in the self-hosted Postgres
                     database.
@@ -531,7 +540,9 @@ const App = () => {
                         placeholder="Minimum 8 characters"
                       />
                     </label>
-                    <button>{setup?.configured ? "Sign in" : "Create admin"}</button>
+                    <button>
+                      {setup?.configured ? "Sign in" : "Create admin"}
+                    </button>
                   </form>
                 </>
               ) : (
@@ -539,7 +550,9 @@ const App = () => {
                   <h2>Token setup</h2>
                   {tokens.length === 0 ? (
                     <>
-                      <p>Create a token for Codex or another local AI client.</p>
+                      <p>
+                        Create a token for Codex or another local AI client.
+                      </p>
                       <form
                         className="inline-form"
                         onSubmit={(event) => void createToken(event)}
@@ -628,10 +641,7 @@ const App = () => {
                 <FieldCopy label="Transport" value="STDIO" />
                 <FieldCopy label="Command" value={nodeCommand} />
                 <FieldCopy label="Argument" value={mcpArg} />
-                <FieldCopy
-                  label="MEMORY_API_URL"
-                  value={apiBaseUrl}
-                />
+                <FieldCopy label="MEMORY_API_URL" value={apiBaseUrl} />
                 <FieldCopy
                   label="MEMORY_API_TOKEN"
                   value={tokenForSetup}
@@ -648,7 +658,8 @@ const App = () => {
               <p>
                 Claude, Gemini, Cursor, Pi, and other clients will need their
                 own setup surfaces. This console should keep each guide explicit
-                instead of pretending every client can be automated the same way.
+                instead of pretending every client can be automated the same
+                way.
               </p>
               <div className="client-list">
                 {["Claude", "Gemini", "Cursor", "Pi"].map((client) => (
@@ -730,7 +741,9 @@ const App = () => {
                   <small>{smokeResult.marker}</small>
                 </div>
               ) : (
-                <p className="empty">Run the smoke test to create the first memory.</p>
+                <p className="empty">
+                  Run the smoke test to create the first memory.
+                </p>
               )}
             </section>
             <section className="surface">
