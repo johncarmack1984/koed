@@ -274,6 +274,21 @@ const graphQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(500).default(100)
 });
 
+const graphEventsQuerySchema = graphQuerySchema
+  .extend({
+    cursorTimestamp: z.string().datetime({ offset: true }).optional(),
+    cursorId: z.string().uuid().optional()
+  })
+  .superRefine((input, context) => {
+    if (Boolean(input.cursorTimestamp) !== Boolean(input.cursorId)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["cursorId"],
+        message: "cursorTimestamp and cursorId must be provided together"
+      });
+    }
+  });
+
 const graphEventParamsSchema = z.object({ eventId: z.string().uuid() });
 
 const graphEventDetailQuerySchema = z.object({
@@ -1544,7 +1559,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     async (request) => {
       const repo = requireRepository();
       const user = await authenticate(request);
-      const query = graphQuerySchema.parse(request.query);
+      const query = graphEventsQuerySchema.parse(request.query);
       return {
         events: await repo.listLcmGraphEvents({ userId: user.id }, query)
       };

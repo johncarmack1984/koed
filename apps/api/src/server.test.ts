@@ -730,7 +730,20 @@ const createFakeRepository = (): MemorySourceRepository => {
             event.teamId && getMembership(actor.userId, event.teamId)
           );
         })
-        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+        .sort(
+          (left, right) =>
+            right.createdAt.localeCompare(left.createdAt) ||
+            right.id.localeCompare(left.id)
+        )
+        .filter((event) => {
+          if (!input.cursorTimestamp) return true;
+          return (
+            event.createdAt < input.cursorTimestamp ||
+            (event.createdAt === input.cursorTimestamp &&
+              input.cursorId !== undefined &&
+              event.id < input.cursorId)
+          );
+        })
         .slice(0, input.limit ?? 100)
         .map((event) => ({
           id: event.id,
@@ -1764,6 +1777,23 @@ describe("account and access flows", () => {
       url: "/v1/memory/graph/threads?limit=1&includeInvalidated=false",
       headers: { cookie }
     });
+    const firstEventPage = await app.inject({
+      method: "GET",
+      url: "/v1/memory/graph/events?threadId=thread-index-a&limit=1&includeInvalidated=false",
+      headers: { cookie }
+    });
+    const firstCursorEvent = jsonBody<GraphEventsResponse>(firstEventPage)
+      .events[0] as { id: string; timestamp: string };
+    const secondEventPage = await app.inject({
+      method: "GET",
+      url: `/v1/memory/graph/events?threadId=thread-index-a&limit=1&cursorTimestamp=${encodeURIComponent(firstCursorEvent.timestamp)}&cursorId=${encodeURIComponent(firstCursorEvent.id)}&includeInvalidated=false`,
+      headers: { cookie }
+    });
+    const invalidCursorPage = await app.inject({
+      method: "GET",
+      url: `/v1/memory/graph/events?threadId=thread-index-a&limit=1&cursorTimestamp=${encodeURIComponent(firstCursorEvent.timestamp)}&includeInvalidated=false`,
+      headers: { cookie }
+    });
     await app.inject({
       method: "DELETE",
       url: `/v1/memory/graph/events/${jsonBody<CaptureResponse>(firstThreadEvent).event.id}`,
@@ -1817,6 +1847,17 @@ describe("account and access flows", () => {
         (project) => project.threads
       )
     ).toHaveLength(1);
+    expect(jsonBody<GraphEventsResponse>(secondEventPage).events).toHaveLength(
+      1
+    );
+    expect(
+      (
+        jsonBody<GraphEventsResponse>(secondEventPage).events[0] as {
+          id: string;
+        }
+      ).id
+    ).not.toBe(firstCursorEvent.id);
+    expect(invalidCursorPage.statusCode).toBe(400);
     expect(
       jsonBody<GraphThreadIndexResponse>(activeAfterDelete)
         .projects.flatMap((project) => project.threads)

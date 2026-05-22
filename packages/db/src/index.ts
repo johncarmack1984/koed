@@ -487,6 +487,8 @@ export interface MemorySourceRepository extends MemoryEngineRepository {
       visibility?: Visibility;
       projectId?: string;
       threadId?: string;
+      cursorTimestamp?: string;
+      cursorId?: string;
       includeInvalidated?: boolean;
       limit?: number;
     }
@@ -2851,6 +2853,15 @@ export const createMemorySourceRepository = (
           and ($5::text is null or coalesce(me.payload #>> '{metadata,externalSessionId}', s.external_session_id, s.id::text) = $5)
           and ($6::text is null or me.payload ->> 'content' ilike '%' || $6 || '%' or me.id::text = $6)
           and (
+            $7::timestamptz is null
+            or me.captured_at < $7::timestamptz
+            or (
+              $8::uuid is not null
+              and me.captured_at = $7::timestamptz
+              and me.id < $8::uuid
+            )
+          )
+          and (
             (me.visibility = 'personal' and me.owner_user_id = $1)
             or (
               me.visibility = 'team'
@@ -2864,7 +2875,7 @@ export const createMemorySourceRepository = (
           )
         group by me.id, s.id
         order by me.captured_at desc, me.id desc
-        limit $7
+        limit $9
       `,
       [
         actor.userId,
@@ -2873,6 +2884,8 @@ export const createMemorySourceRepository = (
         input.projectId ?? null,
         input.threadId ?? null,
         input.query?.trim() || null,
+        input.cursorTimestamp ?? null,
+        input.cursorId ?? null,
         limit
       ]
     );
