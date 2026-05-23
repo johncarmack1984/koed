@@ -70,6 +70,8 @@ These values are copied into the AI Client configuration and are not consumed au
 - `MEMORY_LCM_BACKGROUND_INTERVAL_MS`: periodic background check interval for pending summaries.
 - `MEMORY_LCM_BACKGROUND_BATCH_LIMIT`: maximum pending LCM summaries processed in one background batch.
 
+Configure Codex to run the Supported Capture Hook for `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `SubagentStart`, and `SubagentStop`. The subagent hooks let Koed preserve child conversation identity and parent linkage for thread-spawned Codex subagents.
+
 Koed Self-Hosted relies on the connected AI Client for Synthesis; backend LLM provider configuration and server-side synthesis are unsupported in this build.
 The MCP-local LCM Summary Service is enabled by default in this build. Failures are reported as diagnostics and pending summaries remain searchable as degraded evidence.
 

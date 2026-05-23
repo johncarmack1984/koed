@@ -107,6 +107,7 @@ Working directory: /path/to/koed-self-hosted
 If you changed `API_HOST_PORT`, use that port in `MEMORY_API_URL`.
 
 5. Configure the Capture Hook shown on the console setup page with the same `MEMORY_API_URL` and `MEMORY_API_TOKEN`. This is the supported automatic capture path; MCP by itself is recall-only and does not automatically record full conversations.
+   Install it for Codex `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `SubagentStart`, and `SubagentStop` events.
 
 6. Verify the Capture Hook:
 
