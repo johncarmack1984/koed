@@ -45,21 +45,40 @@ interface MemoryJobStatus {
   };
 }
 
-interface GraphUpdatePayload {
+export interface GraphUpdatePayload {
   table?: string;
   operation?: string;
   id?: string | null;
+  eventRefs?: GraphUpdateEventRef[];
+  eventIds?: string[];
   ownerUserId?: string | null;
+  projectId?: string | null;
   teamId?: string | null;
+  threadId?: string | null;
   visibility?: "personal" | "team" | string | null;
   changedAt?: string;
   coalesced?: boolean;
+}
+
+interface GraphUpdateEventRef {
+  id: string;
+  projectId: string;
+  threadId: string;
 }
 
 interface GraphStreamClient {
   userId: string;
   reply: FastifyReply;
 }
+
+export const shouldIgnoreGraphStreamPayload = (
+  payload: GraphUpdatePayload
+): boolean => payload.table === "memory_embeddings";
+
+export const graphUpdateActionForPayload = (payload: GraphUpdatePayload) => ({
+  broadcast: !shouldIgnoreGraphStreamPayload(payload),
+  invalidateCache: true
+});
 
 interface GraphListenClient {
   query(sql: string): Promise<unknown>;
@@ -614,9 +633,17 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     "GRAPH_UPDATE_DEBOUNCE_MS",
     1_000
   );
+  const memoryEventGraphUpdateDebounceMs = parsePositiveInt(
+    "MEMORY_EVENT_GRAPH_UPDATE_DEBOUNCE_MS",
+    Math.min(graphUpdateDebounceMs, 100)
+  );
   const pendingGraphUpdates = new Map<
     string,
-    { payload: GraphUpdatePayload; timer: ReturnType<typeof setTimeout> }
+    {
+      eventRefs: Map<string, GraphUpdateEventRef>;
+      payload: GraphUpdatePayload;
+      timer: ReturnType<typeof setTimeout>;
+    }
   >();
   let graphListenClient: GraphListenClient | null = null;
   const memoryRateLimitWindowMs = parsePositiveInt(
@@ -685,30 +712,66 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   };
 
   const scheduleGraphUpdate = (payload: GraphUpdatePayload) => {
-    void cacheProvider.deleteByPrefix("koed:graph:").catch((error: unknown) => {
-      app.log.warn(
-        { error: String(error) },
-        "could not invalidate graph cache"
-      );
-    });
+    const action = graphUpdateActionForPayload(payload);
+    if (action.invalidateCache) {
+      void cacheProvider
+        .deleteByPrefix("koed:graph:")
+        .catch((error: unknown) => {
+          app.log.warn(
+            { error: String(error) },
+            "could not invalidate graph cache"
+          );
+        });
+    }
+    if (!action.broadcast) {
+      return;
+    }
     const key = graphUpdateKey(payload);
+    const eventRef =
+      payload.table === "memory_events" &&
+      payload.operation !== "DELETE" &&
+      payload.id &&
+      payload.projectId &&
+      payload.threadId
+        ? {
+            id: payload.id,
+            projectId: payload.projectId,
+            threadId: payload.threadId
+          }
+        : null;
     const current = pendingGraphUpdates.get(key);
     if (current) {
+      if (eventRef) {
+        current.eventRefs.set(eventRef.id, eventRef);
+      }
       pendingGraphUpdates.set(key, { ...current, payload });
       return;
     }
-    const timer = setTimeout(() => {
-      const pending = pendingGraphUpdates.get(key);
-      pendingGraphUpdates.delete(key);
-      if (pending) {
-        broadcastGraphUpdate({
-          ...pending.payload,
-          coalesced: true,
-          changedAt: new Date().toISOString()
-        });
-      }
-    }, graphUpdateDebounceMs);
-    pendingGraphUpdates.set(key, { payload, timer });
+    const timer = setTimeout(
+      () => {
+        const pending = pendingGraphUpdates.get(key);
+        pendingGraphUpdates.delete(key);
+        if (pending) {
+          broadcastGraphUpdate({
+            ...pending.payload,
+            coalesced: true,
+            ...(pending.eventRefs.size > 0
+              ? {
+                  eventIds: [...pending.eventRefs.keys()],
+                  eventRefs: [...pending.eventRefs.values()]
+                }
+              : {}),
+            changedAt: new Date().toISOString()
+          });
+        }
+      },
+      eventRef ? memoryEventGraphUpdateDebounceMs : graphUpdateDebounceMs
+    );
+    pendingGraphUpdates.set(key, {
+      eventRefs: new Map(eventRef ? [[eventRef.id, eventRef]] : []),
+      payload,
+      timer
+    });
   };
 
   if (pool) {
