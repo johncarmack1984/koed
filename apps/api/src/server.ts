@@ -51,6 +51,7 @@ export interface GraphUpdatePayload {
   id?: string | null;
   eventRefs?: GraphUpdateEventRef[];
   eventIds?: string[];
+  questionIds?: string[];
   ownerUserId?: string | null;
   projectId?: string | null;
   teamId?: string | null;
@@ -77,7 +78,7 @@ export const shouldIgnoreGraphStreamPayload = (
 
 export const graphUpdateActionForPayload = (payload: GraphUpdatePayload) => ({
   broadcast: !shouldIgnoreGraphStreamPayload(payload),
-  invalidateCache: true
+  invalidateCache: payload.table !== "memory_questions"
 });
 
 interface GraphListenClient {
@@ -461,7 +462,7 @@ const graphEventPatchSchema = z.object({
   invalidated: z.boolean().optional()
 });
 
-const retrievalScopeSchema = z
+const apiTokenRetrievalScopeInputSchema = z
   .enum(["personal", "personal+team"])
   .superRefine((scope, context) => {
     if (scope === "personal+team") {
@@ -471,8 +472,12 @@ const retrievalScopeSchema = z
           "personal+team retrieval is not supported for API-token integrations in this build"
       });
     }
-  })
-  .transform((): MemoryScope => "personal");
+  });
+const retrievalScopeSchema = apiTokenRetrievalScopeInputSchema.transform(
+  (): MemoryScope => "personal"
+);
+const memoryQuestionRetrievalScopeSchema =
+  apiTokenRetrievalScopeInputSchema.transform((): "personal" => "personal");
 
 const searchDomainSchema = z.enum(["global", "project", "session"]);
 
@@ -501,6 +506,76 @@ const searchMemorySchema = z
       });
     }
   });
+
+const memoryQuestionSchema = z
+  .object({
+    query: z.string().min(1),
+    retrieval_scope: memoryQuestionRetrievalScopeSchema.default("personal"),
+    search_domain: searchDomainSchema.default("global"),
+    workspace_id: z.string().min(1).optional(),
+    project_name: z.string().min(1).optional(),
+    project_path: z.string().min(1).optional(),
+    session_id: z.string().uuid().optional(),
+    thread_id: z.string().min(1).optional(),
+    thread_name: z.string().min(1).optional()
+  })
+  .superRefine((input, context) => {
+    if (input.search_domain === "session" && !input.session_id) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["session_id"],
+        message: "session_id is required when search_domain is session"
+      });
+    }
+    if (input.search_domain === "project" && !input.workspace_id) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["workspace_id"],
+        message: "workspace_id is required when search_domain is project"
+      });
+    }
+  });
+
+const memoryQuestionsQuerySchema = z.object({
+  query: z.string().min(1).optional(),
+  search_domain: searchDomainSchema.optional(),
+  status: z.enum(["pending", "answered", "error"]).optional(),
+  workspace_id: z.string().min(1).optional(),
+  session_id: z.string().uuid().optional(),
+  limit: z.coerce.number().int().positive().max(500).default(100),
+  offset: z.coerce.number().int().nonnegative().default(0)
+});
+
+const memoryQuestionParamsSchema = z.object({
+  questionId: z.string().uuid()
+});
+
+const claimMemoryQuestionsSchema = z.object({
+  question_id: z.string().uuid().optional(),
+  limit: z.coerce.number().int().positive().max(10).default(1),
+  lease_seconds: z.coerce.number().int().positive().max(3600).default(180)
+});
+
+const updateMemoryQuestionSchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("answered"),
+    answer_markdown: z.string().min(1),
+    attempt_count: z.number().int().positive().optional(),
+    response: z.record(z.string(), z.unknown()).optional(),
+    evidence: z.array(z.unknown()).optional(),
+    citations: z.array(z.unknown()).optional(),
+    retrieval: z.record(z.string(), z.unknown()).optional(),
+    local_memory_worker: z.record(z.string(), z.unknown()).optional()
+  }),
+  z.object({
+    status: z.literal("error"),
+    error_message: z.string().min(1),
+    attempt_count: z.number().int().positive().optional(),
+    response: z.record(z.string(), z.unknown()).optional(),
+    retrieval: z.record(z.string(), z.unknown()).optional(),
+    local_memory_worker: z.record(z.string(), z.unknown()).optional()
+  })
+]);
 
 const lcmPendingSummariesQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(50).default(10)
@@ -536,6 +611,11 @@ const openApiEndpoints: Array<[string, string]> = [
   ["PATCH", "/v1/memory/graph/events/{eventId}"],
   ["DELETE", "/v1/memory/graph/events/{eventId}"],
   ["GET", "/v1/memory/export"],
+  ["GET", "/v1/memory/questions"],
+  ["POST", "/v1/memory/questions"],
+  ["POST", "/v1/memory/questions/claim-pending"],
+  ["GET", "/v1/memory/questions/{questionId}"],
+  ["PATCH", "/v1/memory/questions/{questionId}"],
   ["POST", "/v1/memory/search"],
   ["POST", "/v1/memory/answer"],
   ["PATCH", "/v1/memory/nodes/{nodeId}"],
@@ -641,6 +721,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     string,
     {
       eventRefs: Map<string, GraphUpdateEventRef>;
+      questionIds: Set<string>;
       payload: GraphUpdatePayload;
       timer: ReturnType<typeof setTimeout>;
     }
@@ -739,10 +820,15 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
             threadId: payload.threadId
           }
         : null;
+    const questionId =
+      payload.table === "memory_questions" && payload.id ? payload.id : null;
     const current = pendingGraphUpdates.get(key);
     if (current) {
       if (eventRef) {
         current.eventRefs.set(eventRef.id, eventRef);
+      }
+      if (questionId) {
+        current.questionIds.add(questionId);
       }
       pendingGraphUpdates.set(key, { ...current, payload });
       return;
@@ -761,6 +847,9 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
                   eventRefs: [...pending.eventRefs.values()]
                 }
               : {}),
+            ...(pending.questionIds.size > 0
+              ? { questionIds: [...pending.questionIds] }
+              : {}),
             changedAt: new Date().toISOString()
           });
         }
@@ -769,6 +858,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     );
     pendingGraphUpdates.set(key, {
       eventRefs: new Map(eventRef ? [[eventRef.id, eventRef]] : []),
+      questionIds: new Set(questionId ? [questionId] : []),
       payload,
       timer
     });
@@ -2048,6 +2138,131 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
       const repo = requireRepository();
       const user = await authenticate(request);
       return await repo.exportMemoryRecords({ userId: user.id });
+    }
+  );
+
+  app.get(
+    "/v1/memory/questions",
+    { preHandler: memoryReadRateLimit },
+    async (request) => {
+      const repo = requireRepository();
+      const user = await authenticate(request);
+      const query = memoryQuestionsQuerySchema.parse(request.query);
+      const questions = await repo.listMemoryQuestions(
+        { userId: user.id },
+        {
+          query: query.query,
+          searchDomain: query.search_domain,
+          status: query.status,
+          workspaceId: query.workspace_id,
+          sessionId: query.session_id,
+          limit: query.limit,
+          offset: query.offset
+        }
+      );
+      return { questions };
+    }
+  );
+
+  app.post(
+    "/v1/memory/questions",
+    { preHandler: memoryWriteRateLimit },
+    async (request) => {
+      const repo = requireRepository();
+      const user = await authenticate(request);
+      const input = memoryQuestionSchema.parse(request.body);
+      const question = await repo.createMemoryQuestion(
+        { userId: user.id },
+        {
+          query: input.query,
+          retrievalScope: input.retrieval_scope,
+          searchDomain: input.search_domain,
+          workspaceId: input.workspace_id,
+          projectName: input.project_name,
+          projectPath: input.project_path,
+          sessionId: input.session_id,
+          threadId: input.thread_id,
+          threadName: input.thread_name
+        }
+      );
+      return { question };
+    }
+  );
+
+  app.post(
+    "/v1/memory/questions/claim-pending",
+    { preHandler: memoryWriteRateLimit },
+    async (request) => {
+      const repo = requireRepository();
+      const user = await authenticate(request);
+      const input = claimMemoryQuestionsSchema.parse(request.body);
+      const questions = await repo.claimPendingMemoryQuestions(
+        { userId: user.id },
+        {
+          questionId: input.question_id,
+          limit: input.limit,
+          leaseSeconds: input.lease_seconds
+        }
+      );
+      return { questions };
+    }
+  );
+
+  app.get(
+    "/v1/memory/questions/:questionId",
+    { preHandler: memoryReadRateLimit },
+    async (request, reply) => {
+      const repo = requireRepository();
+      const user = await authenticate(request);
+      const params = memoryQuestionParamsSchema.parse(request.params);
+      const question = await repo.getMemoryQuestion(
+        { userId: user.id },
+        params.questionId
+      );
+      return question
+        ? { question }
+        : reply
+            .status(404)
+            .send({ error: "Question not found or not visible" });
+    }
+  );
+
+  app.patch(
+    "/v1/memory/questions/:questionId",
+    { preHandler: memoryWriteRateLimit },
+    async (request, reply) => {
+      const repo = requireRepository();
+      const user = await authenticate(request);
+      const params = memoryQuestionParamsSchema.parse(request.params);
+      const input = updateMemoryQuestionSchema.parse(request.body);
+      const question = await repo.updateMemoryQuestion(
+        { userId: user.id },
+        params.questionId,
+        input.status === "answered"
+          ? {
+              status: input.status,
+              answerMarkdown: input.answer_markdown,
+              attemptCount: input.attempt_count,
+              response: input.response,
+              evidence: input.evidence,
+              citations: input.citations,
+              retrieval: input.retrieval,
+              localMemoryWorker: input.local_memory_worker
+            }
+          : {
+              status: input.status,
+              errorMessage: input.error_message,
+              attemptCount: input.attempt_count,
+              response: input.response,
+              retrieval: input.retrieval,
+              localMemoryWorker: input.local_memory_worker
+            }
+      );
+      return question
+        ? { question }
+        : reply
+            .status(404)
+            .send({ error: "Question not found or not visible" });
     }
   );
 

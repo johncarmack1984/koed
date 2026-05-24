@@ -13,6 +13,7 @@ import type {
   CreateMemoryNodeInput,
   CreateTeamInput,
   CreateUserInput,
+  MemoryQuestionDetailRecord,
   MemoryNodeRecord,
   MemorySourceRepository,
   TeamMemberRecord,
@@ -145,6 +146,8 @@ type MemoryExportResponse = { nodes: Array<Record<string, unknown>> };
 type SessionResponse = { session: { id: string } };
 type ExpandedResponse = { expanded: { sources: Array<{ content: string }> } };
 type OpenApiResponse = { paths: Record<string, unknown> };
+type MemoryQuestionResponse = { question: MemoryQuestionDetailRecord };
+type MemoryQuestionsResponse = { questions: MemoryQuestionDetailRecord[] };
 
 const createFakeRepository = (): MemorySourceRepository => {
   const users = new Map<string, UserRecord>();
@@ -178,6 +181,7 @@ const createFakeRepository = (): MemorySourceRepository => {
   const invalidatedNodes = new Set<string>();
   const invalidatedEvents = new Set<string>();
   const summaryCorrections = new Map<string, string>();
+  const memoryQuestions = new Map<string, MemoryQuestionDetailRecord>();
 
   const getMembership = (userId: string, teamId: string) =>
     teams.get(teamId)?.members.get(userId);
@@ -344,6 +348,161 @@ const createFakeRepository = (): MemorySourceRepository => {
       };
       capturedSessions.set(id, record);
       return record;
+    },
+    async createMemoryQuestion(actor, input) {
+      const now = new Date().toISOString();
+      const record: MemoryQuestionDetailRecord = {
+        id: randomUUID(),
+        ownerUserId: actor.userId,
+        teamId: null,
+        visibility: "personal",
+        retrievalScope: input.retrievalScope ?? "personal",
+        searchDomain: input.searchDomain,
+        workspaceId: input.workspaceId ?? null,
+        projectName: input.projectName ?? null,
+        projectPath: input.projectPath ?? null,
+        sessionId: input.sessionId ?? null,
+        threadId: input.threadId ?? null,
+        threadName: input.threadName ?? null,
+        query: input.query,
+        answerPreview: null,
+        answerMarkdown: null,
+        errorMessage: null,
+        evidence: null,
+        citations: null,
+        retrieval: null,
+        localMemoryWorker: null,
+        response: null,
+        status: "pending",
+        createdAt: now,
+        updatedAt: now,
+        answeredAt: null,
+        processingStartedAt: null,
+        processingLeaseUntil: null,
+        attemptCount: 0,
+        lastErrorMessage: null,
+        evidenceCount: 0
+      };
+      memoryQuestions.set(record.id, record);
+      return record;
+    },
+    async listMemoryQuestions(actor, input = {}) {
+      const query = input.query?.toLowerCase();
+      return [...memoryQuestions.values()]
+        .filter((question) => question.ownerUserId === actor.userId)
+        .filter(
+          (question) =>
+            !input.searchDomain || question.searchDomain === input.searchDomain
+        )
+        .filter(
+          (question) =>
+            !input.workspaceId || question.workspaceId === input.workspaceId
+        )
+        .filter(
+          (question) =>
+            !input.sessionId || question.sessionId === input.sessionId
+        )
+        .filter((question) => !input.status || question.status === input.status)
+        .filter(
+          (question) =>
+            !query ||
+            question.query.toLowerCase().includes(query) ||
+            (question.answerMarkdown ?? "").toLowerCase().includes(query)
+        )
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+        .slice(input.offset ?? 0, (input.offset ?? 0) + (input.limit ?? 100));
+    },
+    async claimPendingMemoryQuestions(actor, input = {}) {
+      const now = new Date();
+      const leaseUntil = new Date(
+        now.getTime() + (input.leaseSeconds ?? 180) * 1000
+      ).toISOString();
+      const claimed: MemoryQuestionDetailRecord[] = [];
+      for (const question of [...memoryQuestions.values()].sort((left, right) =>
+        left.createdAt.localeCompare(right.createdAt)
+      )) {
+        if (claimed.length >= (input.limit ?? 1)) {
+          break;
+        }
+        if (
+          question.ownerUserId !== actor.userId ||
+          question.status !== "pending" ||
+          (input.questionId && question.id !== input.questionId)
+        ) {
+          continue;
+        }
+        if (
+          question.processingLeaseUntil &&
+          Date.parse(question.processingLeaseUntil) > now.getTime()
+        ) {
+          continue;
+        }
+        const updated: MemoryQuestionDetailRecord = {
+          ...question,
+          processingStartedAt: now.toISOString(),
+          processingLeaseUntil: leaseUntil,
+          attemptCount: question.attemptCount + 1,
+          lastErrorMessage: null,
+          updatedAt: now.toISOString()
+        };
+        memoryQuestions.set(question.id, updated);
+        claimed.push(updated);
+      }
+      return claimed;
+    },
+    async getMemoryQuestion(actor, questionId) {
+      const question = memoryQuestions.get(questionId);
+      return question?.ownerUserId === actor.userId ? question : null;
+    },
+    async updateMemoryQuestion(actor, questionId, input) {
+      const question = memoryQuestions.get(questionId);
+      if (
+        !question ||
+        question.ownerUserId !== actor.userId ||
+        question.status !== "pending" ||
+        (input.attemptCount !== undefined &&
+          input.attemptCount !== question.attemptCount)
+      ) {
+        return null;
+      }
+      const answeredAt = new Date().toISOString();
+      const updated: MemoryQuestionDetailRecord =
+        input.status === "answered"
+          ? {
+              ...question,
+              status: "answered",
+              answerMarkdown: input.answerMarkdown,
+              answerPreview: input.answerMarkdown.slice(0, 280),
+              errorMessage: null,
+              response: input.response ?? question.response,
+              evidence: input.evidence ?? question.evidence,
+              citations: input.citations ?? question.citations,
+              retrieval: input.retrieval ?? question.retrieval,
+              localMemoryWorker:
+                input.localMemoryWorker ?? question.localMemoryWorker,
+              evidenceCount: input.evidence?.length ?? question.evidenceCount,
+              answeredAt,
+              updatedAt: answeredAt,
+              processingLeaseUntil: null,
+              lastErrorMessage: null
+            }
+          : {
+              ...question,
+              status: "error",
+              answerMarkdown: null,
+              answerPreview: null,
+              errorMessage: input.errorMessage,
+              response: input.response ?? question.response,
+              retrieval: input.retrieval ?? question.retrieval,
+              localMemoryWorker:
+                input.localMemoryWorker ?? question.localMemoryWorker,
+              answeredAt,
+              updatedAt: answeredAt,
+              processingLeaseUntil: null,
+              lastErrorMessage: input.errorMessage
+            };
+      memoryQuestions.set(questionId, updated);
+      return updated;
     },
     async createMemoryNode(actor: ActorContext, input: CreateMemoryNodeInput) {
       if (input.visibility === "team") {
@@ -866,6 +1025,7 @@ const createFakeRepository = (): MemorySourceRepository => {
           threads: Array<{
             id: string;
             name: string;
+            sessionId: string | null;
             projectId: string;
             projectName: string;
             eventCount: number;
@@ -883,6 +1043,7 @@ const createFakeRepository = (): MemorySourceRepository => {
         {
           id: string;
           name: string;
+          sessionId: string | null;
           projectId: string;
           projectName: string;
           eventCount: number;
@@ -924,6 +1085,7 @@ const createFakeRepository = (): MemorySourceRepository => {
               event.threadId ??
               event.sessionId ??
               "Untitled conversation",
+            sessionId: event.sessionId,
             projectId,
             projectName,
             eventCount: 0,
@@ -1026,6 +1188,7 @@ const createFakeRepository = (): MemorySourceRepository => {
                 : null) ??
               session.externalSessionId ??
               "Untitled conversation",
+            sessionId: session.id,
             projectId,
             projectName,
             eventCount: 0,
@@ -1346,6 +1509,11 @@ describe("api health", () => {
       operation: "INSERT",
       table: "memory_events"
     } as const;
+    const questionPayload = {
+      id: randomUUID(),
+      operation: "UPDATE",
+      table: "memory_questions"
+    } as const;
 
     expect(graphUpdateActionForPayload(embeddingPayload)).toEqual({
       broadcast: false,
@@ -1355,8 +1523,13 @@ describe("api health", () => {
       broadcast: true,
       invalidateCache: true
     });
+    expect(graphUpdateActionForPayload(questionPayload)).toEqual({
+      broadcast: true,
+      invalidateCache: false
+    });
     expect(shouldIgnoreGraphStreamPayload(embeddingPayload)).toBe(true);
     expect(shouldIgnoreGraphStreamPayload(eventPayload)).toBe(false);
+    expect(shouldIgnoreGraphStreamPayload(questionPayload)).toBe(false);
   });
 
   it("returns OK", async () => {
@@ -2739,6 +2912,150 @@ describe("account and access flows", () => {
     expect(access.statusCode).toBe(200);
     const body = jsonBody<AccessResponse>(access);
     expect(body.providerConfigSupported).toBe(false);
+  });
+
+  it("persists memory questions and exposes shell and detail records", async () => {
+    const app = await buildServer({ repository: createFakeRepository() });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "memory-question@example.com", password: "password123" }
+    });
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie: cookieHeader(registered) },
+      payload: { name: "Client Integration" }
+    });
+    const headers = {
+      authorization: `Bearer ${jsonBody<TokenResponse>(createdToken).token}`
+    };
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/memory/questions",
+      headers,
+      payload: {
+        query: "What did we decide about rate limits?",
+        search_domain: "project",
+        workspace_id: "project-1",
+        project_name: "Koed",
+        thread_id: "thread-1",
+        thread_name: "Explorer"
+      }
+    });
+    const questionId = jsonBody<MemoryQuestionResponse>(created).question.id;
+    const claimed = await app.inject({
+      method: "POST",
+      url: "/v1/memory/questions/claim-pending",
+      headers,
+      payload: { question_id: questionId, limit: 1, lease_seconds: 120 }
+    });
+    const secondClaim = await app.inject({
+      method: "POST",
+      url: "/v1/memory/questions/claim-pending",
+      headers,
+      payload: { question_id: questionId, limit: 1, lease_seconds: 120 }
+    });
+    const pending = await app.inject({
+      method: "GET",
+      url: "/v1/memory/questions?status=pending",
+      headers
+    });
+    const answered = await app.inject({
+      method: "PATCH",
+      url: `/v1/memory/questions/${questionId}`,
+      headers,
+      payload: {
+        status: "answered",
+        attempt_count:
+          jsonBody<MemoryQuestionsResponse>(claimed).questions[0]!.attemptCount,
+        answer_markdown: "Use the documented read and write limits.",
+        evidence: [{ id: "evidence-1" }],
+        citations: [{ id: "citation-1" }],
+        retrieval: { searchDomain: "project" },
+        local_memory_worker: { status: "ok" },
+        response: { markdown: "Use the documented read and write limits." }
+      }
+    });
+    const listed = await app.inject({
+      method: "GET",
+      url: "/v1/memory/questions?search_domain=project&workspace_id=project-1",
+      headers
+    });
+    const detail = await app.inject({
+      method: "GET",
+      url: `/v1/memory/questions/${questionId}`,
+      headers
+    });
+    await app.close();
+
+    expect(created.statusCode).toBe(200);
+    expect(jsonBody<MemoryQuestionResponse>(created).question.status).toBe(
+      "pending"
+    );
+    expect(
+      jsonBody<MemoryQuestionResponse>(created).question.retrievalScope
+    ).toBe("personal");
+    expect(claimed.statusCode).toBe(200);
+    expect(jsonBody<MemoryQuestionsResponse>(claimed).questions).toHaveLength(
+      1
+    );
+    expect(
+      jsonBody<MemoryQuestionsResponse>(claimed).questions[0]?.attemptCount
+    ).toBe(1);
+    expect(jsonBody<MemoryQuestionsResponse>(secondClaim).questions).toEqual(
+      []
+    );
+    expect(jsonBody<MemoryQuestionsResponse>(pending).questions).toHaveLength(
+      1
+    );
+    expect(answered.statusCode).toBe(200);
+    expect(jsonBody<MemoryQuestionResponse>(answered).question.status).toBe(
+      "answered"
+    );
+    expect(jsonBody<MemoryQuestionsResponse>(listed).questions).toHaveLength(1);
+    expect(jsonBody<MemoryQuestionResponse>(detail).question).toMatchObject({
+      id: questionId,
+      answerMarkdown: "Use the documented read and write limits.",
+      evidenceCount: 1,
+      searchDomain: "project",
+      workspaceId: "project-1"
+    });
+  });
+
+  it("rejects unsupported team retrieval scope for persisted questions", async () => {
+    const app = await buildServer({ repository: createFakeRepository() });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "memory-question-scope@example.com",
+        password: "password123"
+      }
+    });
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie: cookieHeader(registered) },
+      payload: { name: "Client Integration" }
+    });
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/v1/memory/questions",
+      headers: {
+        authorization: `Bearer ${jsonBody<TokenResponse>(createdToken).token}`
+      },
+      payload: {
+        query: "What did we decide about team memory?",
+        retrieval_scope: "personal+team"
+      }
+    });
+    await app.close();
+
+    expect(rejected.statusCode).toBe(400);
+    expect(rejected.json()).toMatchObject({
+      error: "Invalid request payload"
+    });
   });
 
   it("creates MCP sessions, captures session events, exposes nodes, and serves OpenAPI JSON", async () => {

@@ -184,6 +184,36 @@ export class MemoryApiClient {
     return this.request("POST", "/v1/memory/answer", input);
   }
 
+  async createQuestion(
+    input: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    return this.request("POST", "/v1/memory/questions", input);
+  }
+
+  async getQuestion(questionId: string): Promise<Record<string, unknown>> {
+    return this.request(
+      "GET",
+      `/v1/memory/questions/${encodeURIComponent(questionId)}`
+    );
+  }
+
+  async claimPendingQuestions(
+    input: Record<string, unknown> = {}
+  ): Promise<Record<string, unknown>> {
+    return this.request("POST", "/v1/memory/questions/claim-pending", input);
+  }
+
+  async updateQuestion(
+    questionId: string,
+    input: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      "PATCH",
+      `/v1/memory/questions/${encodeURIComponent(questionId)}`,
+      input
+    );
+  }
+
   async search(
     input: Record<string, unknown>
   ): Promise<Record<string, unknown>> {
@@ -227,7 +257,7 @@ export class MemoryApiClient {
   }
 
   private async request<T>(
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "PATCH",
     path: string,
     body?: unknown
   ): Promise<T> {
