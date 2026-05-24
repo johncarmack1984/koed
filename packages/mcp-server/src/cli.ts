@@ -5,6 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { answerWithMemoryWorker } from "./answer-worker.js";
+import { startAnswerBridgeWithRetry } from "./answer-bridge-lifecycle.js";
 import {
   MemoryApiClient,
   type McpServerConfig,
@@ -206,6 +207,7 @@ const backgroundLcmSummaryService = startLcmSummaryService(client, {
   serviceConfig: resolveLcmSummaryServiceConfig(process.env),
   workerConfig: resolveLcmSummaryWorkerConfig(process.env)
 });
+const answerBridgeHandle = startAnswerBridgeWithRetry();
 
 server.registerTool(
   "memory_access_check",
@@ -334,8 +336,24 @@ if (toolExposure.exposeLowLevelMemoryTools) {
 }
 
 const transport = new StdioServerTransport();
-try {
-  await server.connect(transport);
-} finally {
+let cleanedUp = false;
+const cleanup = () => {
+  if (cleanedUp) {
+    return;
+  }
+  cleanedUp = true;
+  answerBridgeHandle.close();
   backgroundLcmSummaryService?.stop();
-}
+};
+
+process.once("SIGINT", () => {
+  cleanup();
+  process.exit(130);
+});
+process.once("SIGTERM", () => {
+  cleanup();
+  process.exit(143);
+});
+process.once("exit", cleanup);
+
+await server.connect(transport);
