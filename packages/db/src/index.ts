@@ -255,6 +255,7 @@ export interface LcmGraphEvent {
   threadName: string | null;
   timestamp: string;
   visibility: Visibility;
+  teamId: string | null;
   invalidatedAt: string | null;
   invalidationReason: string | null;
   contentPreview: string;
@@ -701,6 +702,28 @@ const requireTeamMembership = async (
   }
 };
 
+const requireTeamMemoryWritePermission = async (
+  pool: pg.Pool,
+  userId: string,
+  teamId: string
+): Promise<void> => {
+  const result = await pool.query<{ role: "owner" | "admin" | "member" }>(
+    `
+      select role
+      from team_members
+      where user_id = $1
+        and team_id = $2
+        and removed_at is null
+      limit 1
+    `,
+    [userId, teamId]
+  );
+  const role = result.rows[0]?.role;
+  if (role !== "owner" && role !== "admin") {
+    throw new Error("User is not allowed to modify Team Memory");
+  }
+};
+
 const mapMemoryNode = (row: {
   id: string;
   owner_user_id: string | null;
@@ -1136,6 +1159,7 @@ const mapLcmGraphEvent = (row: {
   thread_name: string | null;
   captured_at: Date;
   visibility: Visibility;
+  team_id: string | null;
   invalidated_at: Date | null;
   invalidation_reason: string | null;
   content: string | null;
@@ -1161,6 +1185,7 @@ const mapLcmGraphEvent = (row: {
     threadName: row.thread_name,
     timestamp: row.captured_at.toISOString(),
     visibility: row.visibility,
+    teamId: row.team_id,
     invalidatedAt: row.invalidated_at?.toISOString() ?? null,
     invalidationReason: row.invalidation_reason,
     contentPreview: truncateDisplayText(content, 220),
@@ -1357,6 +1382,11 @@ const localEmbeddingServiceUrl = (): string | null =>
   (
     process.env.EMBEDDING_SERVICE_URL ?? "http://embedding-service:8000"
   ).trim() || null;
+
+const embeddingServiceHeaders = (): Record<string, string> => {
+  const token = process.env.EMBEDDING_SERVICE_TOKEN?.trim();
+  return token ? { "x-koed-embedding-token": token } : {};
+};
 
 const localEmbeddingModel = (): string =>
   process.env.EMBEDDING_MODEL ?? "Qwen/Qwen3-Embedding-0.6B-GGUF";
@@ -1566,7 +1596,10 @@ const embedTexts = async (
 
   const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/embed`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...embeddingServiceHeaders()
+    },
     body: JSON.stringify({ texts })
   });
   const payload = (await response.json().catch(() => ({}))) as {
@@ -1606,7 +1639,10 @@ const rerankTexts = async (
 
   const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/rerank`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...embeddingServiceHeaders()
+    },
     body: JSON.stringify({ query, documents })
   });
   const payload = (await response.json().catch(() => ({}))) as {
@@ -1759,17 +1795,26 @@ export const createMemorySourceRepository = (
     }
 
     try {
-      const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/health`);
+      const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/health`, {
+        headers: embeddingServiceHeaders()
+      });
       const payload = (await response.json().catch(() => ({}))) as {
         model?: string;
         dimensions?: number;
+        authRequired?: boolean;
+        authValid?: boolean;
       };
+      const authHealthy = !payload.authRequired || payload.authValid === true;
       return {
         enabled: true,
-        healthy: response.ok,
+        healthy: response.ok && authHealthy,
         model: payload.model ?? null,
         dimensions: payload.dimensions ?? null,
-        ...(response.ok ? {} : { error: `HTTP ${response.status}` })
+        ...(!response.ok
+          ? { error: `HTTP ${response.status}` }
+          : !authHealthy
+            ? { error: "Embedding service token rejected" }
+            : {})
       };
     } catch (error) {
       return {
@@ -2834,6 +2879,13 @@ export const createMemorySourceRepository = (
     if (!existing) {
       return null;
     }
+    if (existing.visibility === "team" && existing.teamId) {
+      await requireTeamMemoryWritePermission(
+        pool,
+        actor.userId,
+        existing.teamId
+      );
+    }
     if (input.visibility === "team" && existing.visibility !== "team") {
       const currentTeam = await this.getCurrentTeam(actor.userId);
       if (!currentTeam) {
@@ -2894,6 +2946,17 @@ export const createMemorySourceRepository = (
   },
 
   async deleteMemory(actor, nodeId) {
+    const existing = await this.getVisibleMemoryNode(actor, nodeId);
+    if (!existing) {
+      return false;
+    }
+    if (existing.visibility === "team" && existing.teamId) {
+      await requireTeamMemoryWritePermission(
+        pool,
+        actor.userId,
+        existing.teamId
+      );
+    }
     const result = await pool.query(
       `
         update memory_nodes mn
@@ -3224,6 +3287,13 @@ export const createMemorySourceRepository = (
     if (!existing) {
       return null;
     }
+    if (existing.visibility === "team" && existing.teamId) {
+      await requireTeamMemoryWritePermission(
+        pool,
+        actor.userId,
+        existing.teamId
+      );
+    }
     if (input.visibility === "team" && existing.visibility !== "team") {
       const currentTeam = await this.getCurrentTeam(actor.userId);
       if (!currentTeam) {
@@ -3313,6 +3383,7 @@ export const createMemorySourceRepository = (
           coalesce(me.payload #>> '{metadata,threadName}', s.external_session_id, s.id::text) as thread_name,
           me.captured_at,
           me.visibility,
+          me.team_id,
           me.invalidated_at,
           me.invalidation_reason,
           me.payload ->> 'content' as content,
@@ -3573,6 +3644,13 @@ export const createMemorySourceRepository = (
     });
     if (!existing) {
       return null;
+    }
+    if (existing.visibility === "team" && existing.teamId) {
+      await requireTeamMemoryWritePermission(
+        pool,
+        actor.userId,
+        existing.teamId
+      );
     }
     if (input.visibility === "team" && existing.visibility !== "team") {
       const currentTeam = await this.getCurrentTeam(actor.userId);
@@ -5043,9 +5121,24 @@ export const createMemorySourceRepository = (
         from memory_node_sources mns
         join memory_events me on me.id = mns.memory_event_id
         where mns.memory_node_id = $1
+          and me.invalidated_at is null
+          and (
+            (me.visibility = 'personal' and me.owner_user_id = $2)
+            or
+            (
+              me.visibility = 'team'
+              and exists (
+                select 1
+                from team_members tm
+                where tm.team_id = me.team_id
+                  and tm.user_id = $2
+                  and tm.removed_at is null
+              )
+            )
+          )
         order by me.created_at asc, me.id asc
       `,
-      [nodeId]
+      [nodeId, actor.userId]
     );
     const eventSourceItems: LcmSourceItem[] = sources.rows.map(
       (source, position) => ({

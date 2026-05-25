@@ -81,6 +81,22 @@ export const graphUpdateActionForPayload = (payload: GraphUpdatePayload) => ({
   invalidateCache: payload.table !== "memory_questions"
 });
 
+export const canReceiveGraphStreamPayload = async (
+  client: { userId: string },
+  payload: GraphUpdatePayload,
+  isTeamMember: (userId: string, teamId: string) => Promise<boolean>
+): Promise<boolean> => {
+  if (payload.visibility === "personal") {
+    return Boolean(payload.ownerUserId && payload.ownerUserId === client.userId);
+  }
+  if (payload.visibility === "team") {
+    return Boolean(
+      payload.teamId && (await isTeamMember(client.userId, payload.teamId))
+    );
+  }
+  return true;
+};
+
 interface GraphListenClient {
   query(sql: string): Promise<unknown>;
   on(
@@ -169,6 +185,33 @@ const allowedCorsOrigins = (): Set<string> => {
       origin.replace(/\/+$/, "")
     )
   );
+};
+
+const normalizeOrigin = (value: string): string => value.replace(/\/+$/, "");
+
+const originFromReferer = (referer: string | undefined): string | null => {
+  if (!referer) {
+    return null;
+  }
+  try {
+    return new URL(referer).origin;
+  } catch {
+    return null;
+  }
+};
+
+const sessionEstablishingWritePaths = new Set([
+  "/auth/setup",
+  "/auth/register",
+  "/auth/login"
+]);
+
+const requestPathname = (request: FastifyRequest): string => {
+  try {
+    return new URL(request.url, "http://koed.local").pathname;
+  } catch {
+    return request.url.split("?")[0] ?? request.url;
+  }
 };
 
 const rateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
@@ -771,12 +814,38 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
   };
 
-  const broadcastGraphUpdate = (payload: GraphUpdatePayload) => {
+  const isGraphStreamTeamMember = async (
+    userId: string,
+    teamId: string
+  ): Promise<boolean> => {
+    const repo = repository;
+    if (!repo) {
+      return false;
+    }
+    try {
+      await repo.listTeamMembers(userId, teamId);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const broadcastGraphUpdate = async (payload: GraphUpdatePayload) => {
+    const teamMembershipCache = new Map<string, Promise<boolean>>();
+    const isTeamMember = (userId: string, teamId: string) => {
+      const key = `${userId}:${teamId}`;
+      const cached = teamMembershipCache.get(key);
+      if (cached) {
+        return cached;
+      }
+      const result = isGraphStreamTeamMember(userId, teamId);
+      teamMembershipCache.set(key, result);
+      return result;
+    };
+
     for (const client of graphStreamClients) {
       if (
-        payload.visibility === "personal" &&
-        payload.ownerUserId &&
-        payload.ownerUserId !== client.userId
+        !(await canReceiveGraphStreamPayload(client, payload, isTeamMember))
       ) {
         continue;
       }
@@ -840,7 +909,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
         const pending = pendingGraphUpdates.get(key);
         pendingGraphUpdates.delete(key);
         if (pending) {
-          broadcastGraphUpdate({
+          void broadcastGraphUpdate({
             ...pending.payload,
             coalesced: true,
             ...(pending.eventRefs.size > 0
@@ -853,6 +922,11 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
               ? { questionIds: [...pending.questionIds] }
               : {}),
             changedAt: new Date().toISOString()
+          }).catch((error: unknown) => {
+            app.log.warn(
+              { error: String(error) },
+              "could not broadcast graph update"
+            );
           });
         }
       },
@@ -920,7 +994,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   const corsOrigins = allowedCorsOrigins();
   await app.register(cors, {
     origin: (origin, callback) => {
-      if (!origin || corsOrigins.has(origin.replace(/\/+$/, ""))) {
+      if (!origin || corsOrigins.has(normalizeOrigin(origin))) {
         callback(null, true);
         return;
       }
@@ -932,6 +1006,31 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   });
 
   await app.register(cookie);
+  app.addHook("preHandler", (request, _reply, done) => {
+    if (!["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
+      done();
+      return;
+    }
+    const hasSessionCookie = Boolean(request.cookies[sessionCookieName]);
+    const createsSessionCookie = sessionEstablishingWritePaths.has(
+      requestPathname(request)
+    );
+    if (!hasSessionCookie && !createsSessionCookie) {
+      done();
+      return;
+    }
+    const requestOrigin =
+      request.headers.origin ?? originFromReferer(request.headers.referer);
+    if (requestOrigin && !corsOrigins.has(normalizeOrigin(requestOrigin))) {
+      done(
+        Object.assign(new Error("Invalid request origin"), {
+          statusCode: 403
+        })
+      );
+      return;
+    }
+    done();
+  });
   const requireRepository = (): MemorySourceRepository => {
     if (!repository) {
       throw Object.assign(new Error("Database is not configured"), {
@@ -975,6 +1074,21 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     }
 
     throw Object.assign(new Error("Unauthorized"), { statusCode: 401 });
+  };
+
+  const authenticateSession = async (request: FastifyRequest) => {
+    const repo = requireRepository();
+    const sessionSecret = request.cookies[sessionCookieName];
+    if (sessionSecret) {
+      const user = await repo.getSessionUser(hashSecret(sessionSecret));
+      if (user) {
+        return user;
+      }
+    }
+
+    throw Object.assign(new Error("Console session required"), {
+      statusCode: 401
+    });
   };
 
   const authenticateApiToken = async (request: FastifyRequest) => {
@@ -1195,9 +1309,11 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
         ? 400
         : message.includes("not an active member")
           ? 403
-          : message.includes("not found or not visible")
-            ? 404
-            : undefined;
+          : message.includes("not allowed to modify Team Memory")
+            ? 403
+            : message.includes("not found or not visible")
+              ? 404
+              : undefined;
     const statusCode =
       typeof statusCodeCandidate === "number"
         ? statusCodeCandidate
@@ -1226,26 +1342,25 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     reply.type("text/plain").send("OK")
   );
 
+  const publicHealth = (
+    service: string,
+    status: "ok" | "degraded" | "error" = "ok"
+  ) => createHealth(service, status);
+
   app.get("/ready", async (_request, reply) => {
-    const checks = [createHealth("api")];
+    const checks = [publicHealth("api")];
     const repo = repository;
 
     if (repo) {
       try {
         checks.push(
-          createHealth("postgres", (await repo.health()) ? "ok" : "error")
+          publicHealth("postgres", (await repo.health()) ? "ok" : "error")
         );
-      } catch (error) {
-        checks.push(
-          createHealth("postgres", "error", { message: String(error) })
-        );
+      } catch {
+        checks.push(publicHealth("postgres", "error"));
       }
     } else if (process.env.DATABASE_URL) {
-      checks.push(
-        createHealth("postgres", "error", {
-          message: "Database repository is not configured"
-        })
-      );
+      checks.push(publicHealth("postgres", "error"));
     }
 
     if (process.env.REDIS_URL) {
@@ -1256,9 +1371,9 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
       try {
         await redis.connect();
         await redis.ping();
-        checks.push(createHealth("redis"));
-      } catch (error) {
-        checks.push(createHealth("redis", "error", { message: String(error) }));
+        checks.push(publicHealth("redis"));
+      } catch {
+        checks.push(publicHealth("redis", "error"));
       } finally {
         redis.disconnect();
       }
@@ -1268,21 +1383,10 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
       try {
         const status = await repo.getLocalEmbeddingStatus();
         checks.push(
-          createHealth(
-            "embedding-service",
-            status.healthy ? "ok" : "degraded",
-            {
-              enabled: status.enabled,
-              model: status.model,
-              dimensions: status.dimensions,
-              error: status.error
-            }
-          )
+          publicHealth("embedding-service", status.healthy ? "ok" : "degraded")
         );
-      } catch (error) {
-        checks.push(
-          createHealth("embedding-service", "error", { message: String(error) })
-        );
+      } catch {
+        checks.push(publicHealth("embedding-service", "error"));
       }
     }
 
@@ -1296,7 +1400,8 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 
   app.get("/openapi.json", () => openApiDocument);
 
-  app.get("/health/details", async () => {
+  app.get("/health/details", async (request) => {
+    await authenticateSession(request);
     const checks = [createHealth("api")];
 
     if (process.env.DATABASE_URL) {
@@ -1304,10 +1409,8 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
       try {
         await pool.query("select 1");
         checks.push(createHealth("postgres"));
-      } catch (error) {
-        checks.push(
-          createHealth("postgres", "error", { message: String(error) })
-        );
+      } catch {
+        checks.push(createHealth("postgres", "error"));
       } finally {
         await pool.end();
       }
@@ -1322,8 +1425,8 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
         await redis.connect();
         await redis.ping();
         checks.push(createHealth("redis"));
-      } catch (error) {
-        checks.push(createHealth("redis", "error", { message: String(error) }));
+      } catch {
+        checks.push(createHealth("redis", "error"));
       } finally {
         redis.disconnect();
       }
@@ -1337,24 +1440,41 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     };
   });
 
-  app.get("/self-host/status", async () => {
+  app.get("/self-host/status", async (request) => {
     const repo = requireRepository();
+    const user = await authenticateSession(request).catch(() => null);
+    if (!user) {
+      const ready = await repo.health().catch(() => false);
+      return {
+        status: ready ? "ok" : "error",
+        components: {
+          api: { status: "ok" },
+          postgres: { status: ready ? "ok" : "error" },
+          redis: {
+            status: process.env.REDIS_URL ? "configured" : "not_configured"
+          },
+          embeddingService: { status: "not_disclosed" },
+          workerQueues: { status: "not_disclosed" }
+        },
+        redacted: true
+      };
+    }
     const [ready, embedding, embeddingJobs, compactionJobs] = await Promise.all(
       [
         repo.health().catch(() => false),
-        repo.getLocalEmbeddingStatus().catch((error) => ({
+        repo.getLocalEmbeddingStatus().catch(() => ({
           enabled: true,
           healthy: false,
           model: null,
           dimensions: null,
-          error: String(error)
+          error: "unavailable"
         })),
         embeddingQueue
           ?.getJobCounts("waiting", "active", "delayed", "failed")
-          .catch((error) => ({ error: String(error) })),
+          .catch(() => ({ status: "unavailable" })),
         compactionQueue
           ?.getJobCounts("waiting", "active", "delayed", "failed")
-          .catch((error) => ({ error: String(error) }))
+          .catch(() => ({ status: "unavailable" }))
       ]
     );
 
@@ -1375,7 +1495,6 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
       configuration: {
         supportedClients: ["codex"],
         plannedClients: ["claude", "gemini", "cursor", "pi"],
-        localRepositoryPath: process.env.KOED_HOST_CHECKOUT_PATH ?? null,
         embeddingModel: process.env.EMBEDDING_MODEL ?? embedding.model,
         embeddingDimensions:
           Number(process.env.EMBEDDING_DIMENSIONS ?? embedding.dimensions) ||
@@ -1387,7 +1506,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 
   app.get("/self-host/diagnostics", async (request) => {
     const repo = requireRepository();
-    const user = await authenticate(request);
+    const user = await authenticateSession(request);
     const [overview, embeddingStatus, policies, tokens] = await Promise.all([
       repo.getLcmGraphOverview({ userId: user.id }),
       repo.getLocalEmbeddingStatus(),
@@ -1427,7 +1546,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 
   app.post("/self-host/smoke-test", async (request) => {
     const repo = requireRepository();
-    const user = await authenticate(request);
+    const user = await authenticateSession(request);
     const requesterContext = { userId: user.id };
     const marker = `koed-self-hosted-console-${Date.now()}`;
     const content = `Koed self-hosted smoke test memory ${marker}. The setup is working.`;
@@ -1603,7 +1722,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 
   app.get("/me", async (request) => {
     const repo = requireRepository();
-    const user = await authenticate(request);
+    const user = await authenticateSession(request);
     const currentTeam = await repo.getCurrentTeam(user.id);
 
     return {
@@ -1614,7 +1733,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 
   app.post("/teams", async (request) => {
     const repo = requireRepository();
-    const user = await authenticate(request);
+    const user = await authenticateSession(request);
     const input = createTeamSchema.parse(request.body);
     const team = await repo.createTeam({
       name: input.name,
@@ -1627,7 +1746,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 
   app.post("/teams/join", async (request) => {
     const repo = requireRepository();
-    const user = await authenticate(request);
+    const user = await authenticateSession(request);
     const input = joinTeamSchema.parse(request.body);
     const team = await repo.joinTeamByInviteCode(user.id, input.inviteCode);
 
@@ -1636,14 +1755,14 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 
   app.get("/teams/current", async (request) => {
     const repo = requireRepository();
-    const user = await authenticate(request);
+    const user = await authenticateSession(request);
 
     return { team: await repo.getCurrentTeam(user.id) };
   });
 
   app.get("/teams/current/members", async (request) => {
     const repo = requireRepository();
-    const user = await authenticate(request);
+    const user = await authenticateSession(request);
     const currentTeam = await repo.getCurrentTeam(user.id);
     if (!currentTeam) {
       return { members: [] };
@@ -1654,7 +1773,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 
   app.post("/api-tokens", { preHandler: authRateLimit }, async (request) => {
     const repo = requireRepository();
-    const user = await authenticate(request);
+    const user = await authenticateSession(request);
     const input = createApiTokenSchema.parse(request.body);
     const token = createOpaqueSecret("cmt");
     const record = await repo.createApiToken({
@@ -1671,14 +1790,14 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 
   app.get("/api-tokens", async (request) => {
     const repo = requireRepository();
-    const user = await authenticate(request);
+    const user = await authenticateSession(request);
 
     return { apiTokens: await repo.listApiTokens(user.id) };
   });
 
   app.delete("/api-tokens/:id", async (request, reply) => {
     const repo = requireRepository();
-    const user = await authenticate(request);
+    const user = await authenticateSession(request);
     const params = z.object({ id: z.string().uuid() }).parse(request.params);
     const deleted = await repo.revokeApiToken(user.id, params.id);
 

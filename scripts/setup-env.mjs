@@ -53,8 +53,15 @@ const exampleValues = parseEnv(example);
 
 const generatedValues = new Map([
   ["API_DATA_ENCRYPTION_KEY", randomBytes(32).toString("base64")],
-  ["API_TOKEN_PEPPER", randomBytes(48).toString("base64url")]
+  ["API_TOKEN_PEPPER", randomBytes(48).toString("base64url")],
+  ["EMBEDDING_SERVICE_TOKEN", randomBytes(32).toString("base64url")]
 ]);
+
+const shouldGenerateValue = (key, value) =>
+  generatedValues.has(key) &&
+  (value === undefined ||
+    value.trim() === "" ||
+    value.trim().startsWith("replace_with_generated"));
 
 const renamedValues = new Map([
   ["API_DATA_ENCRYPTION_KEY", currentValues.get("DATA_ENCRYPTION_KEY")],
@@ -66,7 +73,7 @@ const renamedValues = new Map([
 
 const valueForKey = (key) => {
   const current = currentValues.get(key);
-  if (current !== undefined) {
+  if (current !== undefined && !shouldGenerateValue(key, current)) {
     return key === "API_CORS_ORIGINS" ? ensureOrigins(current) : current;
   }
   const renamed = renamedValues.get(key);
@@ -93,5 +100,5 @@ chmodSync(envPath, 0o600);
 console.log(
   existsSync(envPath) && existing
     ? "Updated .env with any missing current self-hosted variables."
-    : "Created .env with generated API_DATA_ENCRYPTION_KEY and API_TOKEN_PEPPER."
+    : "Created .env with generated API_DATA_ENCRYPTION_KEY, API_TOKEN_PEPPER, and EMBEDDING_SERVICE_TOKEN."
 );

@@ -8,9 +8,10 @@ For a local deployment, run:
 pnpm setup:env
 ```
 
-This creates `.env` and generates `API_DATA_ENCRYPTION_KEY` and
-`API_TOKEN_PEPPER`. If `.env` already exists, the command preserves existing
-values and adds any missing keys from `.env.example`.
+This creates `.env` and generates `API_DATA_ENCRYPTION_KEY`,
+`API_TOKEN_PEPPER`, and `EMBEDDING_SERVICE_TOKEN`. If `.env` already exists,
+the command preserves existing values and adds any missing keys from
+`.env.example`.
 
 ## Required Deployment Values
 
@@ -23,7 +24,7 @@ values and adds any missing keys from `.env.example`.
 - `API_PORT`: API port inside the API container.
 - `API_HOST_PORT`: host port mapped to the API container.
 - `API_LOG_LEVEL`: API log level.
-- `API_DATA_ENCRYPTION_KEY`: base64 32-byte key for encrypted server-side data.
+- `API_DATA_ENCRYPTION_KEY`: reserved base64 32-byte key for encrypted server-side fields. In the current self-hosted build, Memory Events, Memory Nodes, LCM source evidence and summaries, and embedding metadata remain plaintext at the application layer in Postgres.
 - `API_TOKEN_PEPPER`: server-side pepper used when hashing API Tokens.
 - `API_CORS_ORIGINS`: comma-separated allowed Operator Console origins.
 - `API_REQUEST_BODY_LIMIT_BYTES`: maximum API request body size.
@@ -61,8 +62,11 @@ values and adds any missing keys from `.env.example`.
 - `EMBEDDING_MODEL_NAME`: model name reported in retrieval metadata.
 - `EMBEDDING_DIMENSIONS`: embedding vector dimensions expected by API, worker, and database.
 - `EMBEDDING_VERSION`: embedding version string stored with generated vectors.
+- `EMBEDDING_SERVICE_TOKEN`: shared internal token required by embedding and reranking endpoints when configured. `pnpm setup:env` generates this for Docker Compose deployments.
 - `EMBEDDING_BATCH_LIMIT`: embedding service batch limit.
 - `EMBEDDING_MAX_TOKENS`: maximum tokens per embedding request.
+- `EMBEDDING_MAX_TEXT_CHARS`: maximum characters accepted for any single embedding or reranking text before model processing.
+- `EMBEDDING_MAX_REQUEST_CHARS`: maximum total characters accepted for one embedding or reranking request before model processing.
 - `EMBEDDING_LLAMA_N_CTX`: llama.cpp context size for the embedding service.
 - `EMBEDDING_RERANKER_ENABLED`: enables the embedding-service reranker.
 - `EMBEDDING_RERANKER_MODEL`: reranker model loaded by the embedding service.
@@ -92,3 +96,9 @@ The MCP-local LCM Summary Service is enabled by default in this build. Failures 
 
 Capture Policy state `ask` currently blocks automatic capture. It is reserved
 for a future AI-client approval flow and is not an implemented backend prompt.
+
+## Data At Rest
+
+Postgres is the source of truth for Users, API Tokens, Capture Policies, Memory Events, Memory Nodes, embeddings, LCM placeholders, LCM summaries, and related evidence. The application hashes API Tokens with `API_TOKEN_PEPPER`, but captured memory content, generated summaries, graph text, and embedding metadata are stored as normal database rows.
+
+Operators should treat the Postgres database and backups as sensitive memory data. Keep Postgres on a private network, restrict database credentials to Koed services and trusted administrators, use encrypted disks or managed-database storage encryption, encrypt backups, and rotate secrets if a backup or database role is exposed.

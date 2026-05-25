@@ -23,6 +23,7 @@ import type {
 } from "@koed/db";
 import {
   buildServer,
+  canReceiveGraphStreamPayload,
   graphUpdateActionForPayload,
   shouldIgnoreGraphStreamPayload
 } from "./server.js";
@@ -42,7 +43,8 @@ afterEach(() => {
     "RATE_LIMIT_REDIS_URL",
     "CACHE_STORE",
     "CACHE_REDIS_URL",
-    "GRAPH_CACHE_TTL_SECONDS"
+    "GRAPH_CACHE_TTL_SECONDS",
+    "KOED_HOST_CHECKOUT_PATH"
   ]) {
     delete process.env[name];
   }
@@ -72,6 +74,7 @@ type TokenResponse = {
 };
 
 type TeamResponse = {
+  teamId: string;
   team: { name: string; inviteCode: string };
 };
 
@@ -185,6 +188,12 @@ const createFakeRepository = (): MemorySourceRepository => {
 
   const getMembership = (userId: string, teamId: string) =>
     teams.get(teamId)?.members.get(userId);
+  const requireTeamMemoryWritePermission = (userId: string, teamId: string) => {
+    const role = getMembership(userId, teamId);
+    if (role !== "owner" && role !== "admin") {
+      throw new Error("User is not allowed to modify Team Memory");
+    }
+  };
 
   return {
     health: async () => true,
@@ -742,6 +751,9 @@ const createFakeRepository = (): MemorySourceRepository => {
     async updateMemoryPresentation(actor, nodeId, input) {
       const memory = await this.getVisibleMemoryNode(actor, nodeId);
       if (!memory) return null;
+      if (memory.visibility === "team" && memory.teamId) {
+        requireTeamMemoryWritePermission(actor.userId, memory.teamId);
+      }
       if (input.summaryText) memory.summaryText = input.summaryText;
       if (input.pinned !== undefined)
         memory.pinnedAt = input.pinned ? new Date().toISOString() : null;
@@ -755,6 +767,9 @@ const createFakeRepository = (): MemorySourceRepository => {
     async deleteMemory(actor, nodeId) {
       const memory = await this.getVisibleMemoryNode(actor, nodeId);
       if (!memory) return false;
+      if (memory.visibility === "team" && memory.teamId) {
+        requireTeamMemoryWritePermission(actor.userId, memory.teamId);
+      }
       invalidatedNodes.add(memory.id);
       return true;
     },
@@ -894,6 +909,9 @@ const createFakeRepository = (): MemorySourceRepository => {
     async updateLcmGraphNode(actor, nodeId, input) {
       const memory = await this.getVisibleMemoryNode(actor, nodeId);
       if (!memory) return null;
+      if (memory.visibility === "team" && memory.teamId) {
+        requireTeamMemoryWritePermission(actor.userId, memory.teamId);
+      }
       if (input.summaryText) {
         memory.summaryText = input.summaryText;
         memory.updatedAt = new Date().toISOString();
@@ -989,6 +1007,7 @@ const createFakeRepository = (): MemorySourceRepository => {
                 : null,
             timestamp: event.createdAt,
             visibility: event.visibility,
+            teamId: event.teamId,
             invalidatedAt: invalidatedEvents.has(event.id)
               ? new Date().toISOString()
               : null,
@@ -1264,6 +1283,9 @@ const createFakeRepository = (): MemorySourceRepository => {
     async updateLcmGraphEvent(actor, eventId, input) {
       const event = await this.getLcmGraphEvent(actor, eventId);
       if (!event) return null;
+      if (event.visibility === "team" && event.teamId) {
+        requireTeamMemoryWritePermission(actor.userId, event.teamId);
+      }
       const raw = events.find((candidate) => candidate.id === eventId);
       if (raw && input.visibility) raw.visibility = input.visibility;
       if (input.invalidated) invalidatedEvents.add(eventId);
@@ -1274,6 +1296,9 @@ const createFakeRepository = (): MemorySourceRepository => {
     async invalidateLcmGraphEvent(actor, eventId) {
       const event = await this.getLcmGraphEvent(actor, eventId);
       if (!event) return false;
+      if (event.visibility === "team" && event.teamId) {
+        requireTeamMemoryWritePermission(actor.userId, event.teamId);
+      }
       invalidatedEvents.add(eventId);
       return true;
     },
@@ -1532,6 +1557,60 @@ describe("api health", () => {
     expect(shouldIgnoreGraphStreamPayload(questionPayload)).toBe(false);
   });
 
+  it("authorizes graph stream payloads by memory visibility", async () => {
+    const ownerId = randomUUID();
+    const teammateId = randomUUID();
+    const outsiderId = randomUUID();
+    const teamId = randomUUID();
+    const isTeamMember = async (userId: string, candidateTeamId: string) =>
+      candidateTeamId === teamId && userId === teammateId;
+
+    await expect(
+      canReceiveGraphStreamPayload(
+        { userId: ownerId },
+        {
+          table: "memory_events",
+          visibility: "personal",
+          ownerUserId: ownerId
+        },
+        isTeamMember
+      )
+    ).resolves.toBe(true);
+    await expect(
+      canReceiveGraphStreamPayload(
+        { userId: outsiderId },
+        {
+          table: "memory_events",
+          visibility: "personal",
+          ownerUserId: ownerId
+        },
+        isTeamMember
+      )
+    ).resolves.toBe(false);
+    await expect(
+      canReceiveGraphStreamPayload(
+        { userId: teammateId },
+        {
+          table: "memory_events",
+          visibility: "team",
+          teamId
+        },
+        isTeamMember
+      )
+    ).resolves.toBe(true);
+    await expect(
+      canReceiveGraphStreamPayload(
+        { userId: outsiderId },
+        {
+          table: "memory_events",
+          visibility: "team",
+          teamId
+        },
+        isTeamMember
+      )
+    ).resolves.toBe(false);
+  });
+
   it("returns OK", async () => {
     const app = await buildServer();
     const response = await app.inject({ method: "GET", url: "/health" });
@@ -1557,6 +1636,37 @@ describe("api health", () => {
     expect(response.headers["access-control-allow-methods"]).toContain(
       "PATCH"
     );
+  });
+
+  it("keeps public status probes coarse and requires auth for details", async () => {
+    process.env.KOED_HOST_CHECKOUT_PATH = "/sensitive/local/path";
+    const app = await buildServer({ repository: createFakeRepository() });
+    const ready = await app.inject({ method: "GET", url: "/ready" });
+    const details = await app.inject({ method: "GET", url: "/health/details" });
+    const publicStatus = await app.inject({
+      method: "GET",
+      url: "/self-host/status"
+    });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "status@example.com", password: "password123" }
+    });
+    const privateStatus = await app.inject({
+      method: "GET",
+      url: "/self-host/status",
+      headers: { cookie: cookieHeader(registered) }
+    });
+    await app.close();
+
+    expect(ready.statusCode).toBe(200);
+    expect(ready.body).not.toContain("test repository");
+    expect(details.statusCode).toBe(401);
+    expect(publicStatus.statusCode).toBe(200);
+    expect(publicStatus.body).toContain("not_disclosed");
+    expect(publicStatus.body).not.toContain("/sensitive/local/path");
+    expect(privateStatus.statusCode).toBe(200);
+    expect(privateStatus.body).not.toContain("/sensitive/local/path");
   });
 
   it("uses separate memory rate-limit buckets with Retry-After headers", async () => {
@@ -1732,6 +1842,96 @@ describe("account and access flows", () => {
     expect(jsonBody<TeamResponse>(joined).team.name).toBe("Research");
   });
 
+  it("requires owner or admin role to modify existing Team Memory", async () => {
+    process.env.KOED_ALLOW_PUBLIC_REGISTRATION = "true";
+    const repository = createFakeRepository();
+    const app = await buildServer({ repository });
+    const owner = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "team-owner@example.com", password: "password123" }
+    });
+    const ownerCookie = cookieHeader(owner);
+    const ownerUserId = jsonBody<{ user: { id: string } }>(owner).user.id;
+    const created = await app.inject({
+      method: "POST",
+      url: "/teams",
+      headers: { cookie: ownerCookie },
+      payload: { name: "Permissions" }
+    });
+    const teamId = jsonBody<TeamResponse>(created).teamId;
+
+    const admin = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "team-admin@example.com", password: "password123" }
+    });
+    const adminCookie = cookieHeader(admin);
+    const adminUserId = jsonBody<{ user: { id: string } }>(admin).user.id;
+    const member = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "team-member@example.com", password: "password123" }
+    });
+    const memberCookie = cookieHeader(member);
+    const memberUserId = jsonBody<{ user: { id: string } }>(member).user.id;
+    await repository.addTeamMember(teamId, adminUserId, "admin");
+    await repository.addTeamMember(teamId, memberUserId, "member");
+    const teamMemory = await repository.createMemoryNode(
+      { userId: ownerUserId },
+      {
+        visibility: "team",
+        teamId,
+        summaryText: "Team Memory should be governed",
+        captureMethod: "mcp"
+      }
+    );
+    const personalMemory = await repository.createMemoryNode(
+      { userId: memberUserId },
+      {
+        visibility: "personal",
+        summaryText: "Personal Memory can still be edited",
+        captureMethod: "mcp"
+      }
+    );
+
+    const memberTeamPatch = await app.inject({
+      method: "PATCH",
+      url: `/v1/memory/nodes/${teamMemory.id}`,
+      headers: { cookie: memberCookie },
+      payload: { summaryText: "Member edit" }
+    });
+    const memberPersonalPatch = await app.inject({
+      method: "PATCH",
+      url: `/v1/memory/nodes/${personalMemory.id}`,
+      headers: { cookie: memberCookie },
+      payload: { summaryText: "Member personal edit" }
+    });
+    const adminTeamPatch = await app.inject({
+      method: "PATCH",
+      url: `/v1/memory/nodes/${teamMemory.id}`,
+      headers: { cookie: adminCookie },
+      payload: { summaryText: "Admin edit" }
+    });
+    const memberTeamDelete = await app.inject({
+      method: "DELETE",
+      url: `/v1/memory/nodes/${teamMemory.id}`,
+      headers: { cookie: memberCookie }
+    });
+    const ownerTeamDelete = await app.inject({
+      method: "DELETE",
+      url: `/v1/memory/nodes/${teamMemory.id}`,
+      headers: { cookie: ownerCookie }
+    });
+    await app.close();
+
+    expect(memberTeamPatch.statusCode).toBe(403);
+    expect(memberPersonalPatch.statusCode).toBe(200);
+    expect(adminTeamPatch.statusCode).toBe(200);
+    expect(memberTeamDelete.statusCode).toBe(403);
+    expect(ownerTeamDelete.statusCode).toBe(200);
+  });
+
   it("authenticates API requests with bearer tokens", async () => {
     const app = await buildServer({ repository: createFakeRepository() });
     const registered = await app.inject({
@@ -1759,6 +1959,155 @@ describe("account and access flows", () => {
     );
     expect(authed.statusCode).toBe(200);
     expect(jsonBody<AccessResponse>(authed).ok).toBe(true);
+  });
+
+  it("rejects cross-origin browser-session writes without blocking bearer API tokens", async () => {
+    process.env.CORS_ORIGINS = "http://console.example.test";
+
+    const app = await buildServer({ repository: createFakeRepository() });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "origin@example.com", password: "password123" }
+    });
+    const cookie = cookieHeader(registered);
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie, origin: "http://evil.example.test" },
+      payload: { name: "Blocked" }
+    });
+    const allowed = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie, origin: "http://console.example.test" },
+      payload: { name: "Client Integration" }
+    });
+    const token = jsonBody<TokenResponse>(allowed).token;
+    const bearerRequest = await app.inject({
+      method: "POST",
+      url: "/v1/memory/search",
+      headers: {
+        authorization: `Bearer ${token}`,
+        origin: "http://evil.example.test"
+      },
+      payload: { query: "anything" }
+    });
+    const mixedCredentialRequest = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: {
+        cookie,
+        authorization: `Bearer ${token}`,
+        origin: "http://evil.example.test"
+      },
+      payload: { name: "Mixed Credentials" }
+    });
+    await app.close();
+
+    expect(rejected.statusCode).toBe(403);
+    expect(allowed.statusCode).toBe(200);
+    expect(bearerRequest.statusCode).toBe(200);
+    expect(mixedCredentialRequest.statusCode).toBe(403);
+  });
+
+  it("rejects cross-origin session-establishing writes", async () => {
+    process.env.CORS_ORIGINS = "http://console.example.test";
+    process.env.KOED_ALLOW_PUBLIC_REGISTRATION = "true";
+
+    const app = await buildServer({ repository: createFakeRepository() });
+    const rejectedRegister = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      headers: { origin: "http://evil.example.test" },
+      payload: { email: "blocked-origin@example.com", password: "password123" }
+    });
+    const allowedRegister = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      headers: { origin: "http://console.example.test" },
+      payload: { email: "allowed-origin@example.com", password: "password123" }
+    });
+    const rejectedLogin = await app.inject({
+      method: "POST",
+      url: "/auth/login",
+      headers: { origin: "http://evil.example.test" },
+      payload: { email: "allowed-origin@example.com", password: "password123" }
+    });
+    await app.close();
+
+    expect(rejectedRegister.statusCode).toBe(403);
+    expect(allowedRegister.statusCode).toBe(200);
+    expect(rejectedLogin.statusCode).toBe(403);
+  });
+
+  it("does not grant API-token access to Operator Console routes", async () => {
+    const app = await buildServer({ repository: createFakeRepository() });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "console-auth@example.com", password: "password123" }
+    });
+    const cookie = cookieHeader(registered);
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie },
+      payload: { name: "Client Integration" }
+    });
+    const bearerHeaders = {
+      authorization: `Bearer ${jsonBody<TokenResponse>(createdToken).token}`
+    };
+
+    const consoleRequests = await Promise.all([
+      app.inject({ method: "GET", url: "/me", headers: bearerHeaders }),
+      app.inject({
+        method: "GET",
+        url: "/api-tokens",
+        headers: bearerHeaders
+      }),
+      app.inject({
+        method: "GET",
+        url: "/teams/current",
+        headers: bearerHeaders
+      }),
+      app.inject({
+        method: "GET",
+        url: "/self-host/diagnostics",
+        headers: bearerHeaders
+      }),
+      app.inject({
+        method: "GET",
+        url: "/health/details",
+        headers: bearerHeaders
+      }),
+      app.inject({
+        method: "GET",
+        url: "/self-host/status",
+        headers: bearerHeaders
+      })
+    ]);
+    const accessCheck = await app.inject({
+      method: "GET",
+      url: "/v1/access/check",
+      headers: bearerHeaders
+    });
+    const sessionMe = await app.inject({
+      method: "GET",
+      url: "/me",
+      headers: { cookie }
+    });
+    await app.close();
+
+    expect(createdToken.statusCode).toBe(200);
+    expect(consoleRequests.map((response) => response.statusCode)).toEqual([
+      401, 401, 401, 401, 401, 200
+    ]);
+    expect(jsonBody<{ redacted: boolean }>(consoleRequests[5]).redacted).toBe(
+      true
+    );
+    expect(accessCheck.statusCode).toBe(200);
+    expect(sessionMe.statusCode).toBe(200);
   });
 
   it("does not expose provider configuration routes", async () => {

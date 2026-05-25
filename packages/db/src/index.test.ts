@@ -95,6 +95,79 @@ describe("memory presentation helpers", () => {
   });
 });
 
+describe("local embedding status", () => {
+  const originalEmbeddingServiceUrl = process.env.EMBEDDING_SERVICE_URL;
+  const originalEmbeddingServiceToken = process.env.EMBEDDING_SERVICE_TOKEN;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (originalEmbeddingServiceUrl === undefined) {
+      delete process.env.EMBEDDING_SERVICE_URL;
+    } else {
+      process.env.EMBEDDING_SERVICE_URL = originalEmbeddingServiceUrl;
+    }
+    if (originalEmbeddingServiceToken === undefined) {
+      delete process.env.EMBEDDING_SERVICE_TOKEN;
+    } else {
+      process.env.EMBEDDING_SERVICE_TOKEN = originalEmbeddingServiceToken;
+    }
+  });
+
+  it("reports embedding health as unhealthy when the service rejects the configured token", async () => {
+    process.env.EMBEDDING_SERVICE_URL = "http://embedding.test";
+    process.env.EMBEDDING_SERVICE_TOKEN = "api-token";
+    const repo = createMemorySourceRepository({} as pg.Pool);
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          model: "Qwen/Qwen3-Embedding-0.6B-GGUF",
+          dimensions: 1024,
+          authRequired: true,
+          authValid: false
+        }),
+        { status: 200 }
+      )
+    );
+
+    await expect(repo.getLocalEmbeddingStatus()).resolves.toMatchObject({
+      enabled: true,
+      healthy: false,
+      model: "Qwen/Qwen3-Embedding-0.6B-GGUF",
+      dimensions: 1024,
+      error: "Embedding service token rejected"
+    });
+    expect(new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers).get(
+      "x-koed-embedding-token"
+    )).toBe("api-token");
+  });
+
+  it("reports embedding health as healthy when token authentication succeeds", async () => {
+    process.env.EMBEDDING_SERVICE_URL = "http://embedding.test";
+    process.env.EMBEDDING_SERVICE_TOKEN = "api-token";
+    const repo = createMemorySourceRepository({} as pg.Pool);
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          model: "Qwen/Qwen3-Embedding-0.6B-GGUF",
+          dimensions: 1024,
+          authRequired: true,
+          authValid: true
+        }),
+        { status: 200 }
+      )
+    );
+
+    await expect(repo.getLocalEmbeddingStatus()).resolves.toMatchObject({
+      enabled: true,
+      healthy: true,
+      model: "Qwen/Qwen3-Embedding-0.6B-GGUF",
+      dimensions: 1024
+    });
+  });
+});
+
 describeDb("memory repository visibility", () => {
   let pool: pg.Pool;
   let repo: MemorySourceRepository;
@@ -106,6 +179,8 @@ describeDb("memory repository visibility", () => {
       workspaceId: string;
       content: string;
       sessionId?: string;
+      visibility?: "personal" | "team";
+      teamId?: string;
       metadata?: Record<string, unknown>;
     }
   ) =>
@@ -116,6 +191,8 @@ describeDb("memory repository visibility", () => {
       actor: "user",
       eventType: "user_prompt",
       content: input.content,
+      visibility: input.visibility,
+      teamId: input.teamId,
       metadata: input.metadata
     });
 
@@ -245,6 +322,78 @@ describeDb("memory repository visibility", () => {
     expect(bobMemories).toHaveLength(0);
   });
 
+  it("keeps personal memory boundaries across read, delete, export, and expansion paths", async () => {
+    const alice = await repo.createUser({
+      email: `alice-boundary-${randomUUID()}@example.com`
+    });
+    const bob = await repo.createUser({
+      email: `bob-boundary-${randomUUID()}@example.com`
+    });
+    const engine = createMemoryEngine(repo);
+
+    const aliceEvent = await captureUserEvent(engine, alice.id, {
+      workspaceId: "workspace-personal-boundary",
+      content: "Alice-only source evidence."
+    });
+    const bobEvent = await captureUserEvent(engine, bob.id, {
+      workspaceId: "workspace-personal-boundary",
+      content: "Bob source evidence must not leak through Alice expansion."
+    });
+    const invalidatedAliceEvent = await captureUserEvent(engine, alice.id, {
+      workspaceId: "workspace-personal-boundary",
+      content: "Invalidated Alice evidence must not expand."
+    });
+    await repo.invalidateLcmGraphEvent(
+      { userId: alice.id },
+      invalidatedAliceEvent.id
+    );
+
+    const aliceNode = await repo.createMemoryNode(
+      { userId: alice.id },
+      {
+        visibility: "personal",
+        summaryText: "Alice-only memory node",
+        captureMethod: "hook",
+        sourceRuntime: "codex"
+      }
+    );
+    await pool.query(
+      `
+        insert into memory_node_sources (memory_node_id, memory_event_id, source_order)
+        values ($1, $2, 0), ($1, $3, 1), ($1, $4, 2)
+      `,
+      [aliceNode.id, aliceEvent.id, bobEvent.id, invalidatedAliceEvent.id]
+    );
+
+    expect(
+      await repo.getVisibleMemoryNode({ userId: bob.id }, aliceNode.id)
+    ).toBeNull();
+    expect(await repo.deleteMemory({ userId: bob.id }, aliceNode.id)).toBe(
+      false
+    );
+    expect(
+      await repo.updateMemoryPresentation({ userId: bob.id }, aliceNode.id, {
+        summaryText: "Bob rewrite attempt"
+      })
+    ).toBeNull();
+    await expect(
+      engine.expandMemoryNode(aliceNode.id, { userId: bob.id })
+    ).rejects.toThrow("Memory node not found or not visible");
+
+    const bobExport = await repo.exportMemoryRecords({ userId: bob.id });
+    expect(bobExport.nodes.map((node) => node.id)).not.toContain(aliceNode.id);
+    expect(bobExport.events.map((event) => event.id)).not.toContain(
+      aliceEvent.id
+    );
+
+    const aliceExpanded = await engine.expandMemoryNode(aliceNode.id, {
+      userId: alice.id
+    });
+    expect(aliceExpanded.sources.map((source) => source.content)).toEqual([
+      "Alice-only source evidence."
+    ]);
+  });
+
   it("rejects team memory writes from solo users", async () => {
     const alice = await repo.createUser({
       email: `alice-${randomUUID()}@example.com`
@@ -328,6 +477,165 @@ describeDb("memory repository visibility", () => {
     expect(bobMemories).toHaveLength(1);
     expect(bobMemories[0]?.summaryText).toBe("Shared team memory");
     expect(outsiderMemories).toHaveLength(0);
+  });
+
+  it("keeps Team Memory graph, search, and export scoped to team membership", async () => {
+    const alice = await repo.createUser({
+      email: `alice-team-boundary-${randomUUID()}@example.com`
+    });
+    const bob = await repo.createUser({
+      email: `bob-team-boundary-${randomUUID()}@example.com`
+    });
+    const outsider = await repo.createUser({
+      email: `outsider-team-boundary-${randomUUID()}@example.com`
+    });
+    const aliceTeam = await repo.createTeam({
+      name: "Alpha Research",
+      createdByUserId: alice.id
+    });
+    const bobTeam = await repo.createTeam({
+      name: "Beta Research",
+      createdByUserId: bob.id
+    });
+    const engine = createMemoryEngine(repo);
+
+    const aliceEvent = await captureUserEvent(engine, alice.id, {
+      workspaceId: "workspace-team-alpha",
+      visibility: "team",
+      teamId: aliceTeam.id,
+      content: "Alpha team source evidence."
+    });
+    const bobEvent = await captureUserEvent(engine, bob.id, {
+      workspaceId: "workspace-team-beta",
+      visibility: "team",
+      teamId: bobTeam.id,
+      content: "Beta team source evidence."
+    });
+    const aliceNode = await repo.createMemoryNode(
+      { userId: alice.id },
+      {
+        visibility: "team",
+        teamId: aliceTeam.id,
+        summaryText: "Alpha team memory node"
+      }
+    );
+    const bobNode = await repo.createMemoryNode(
+      { userId: bob.id },
+      {
+        visibility: "team",
+        teamId: bobTeam.id,
+        summaryText: "Beta team memory node"
+      }
+    );
+    await pool.query(
+      `
+        insert into memory_node_sources (memory_node_id, memory_event_id, source_order)
+        values ($1, $2, 0), ($3, $4, 0)
+      `,
+      [aliceNode.id, aliceEvent.id, bobNode.id, bobEvent.id]
+    );
+    await embedPendingSources();
+
+    const bobGraphNodes = await repo.listLcmGraphNodes(
+      { userId: bob.id },
+      { visibility: "team", includeInvalidated: true }
+    );
+    expect(bobGraphNodes.map((node) => node.id)).toContain(bobNode.id);
+    expect(bobGraphNodes.map((node) => node.id)).not.toContain(aliceNode.id);
+
+    const bobGraphEvents = await repo.listLcmGraphEvents(
+      { userId: bob.id },
+      { visibility: "team", includeContent: true, includeRaw: true }
+    );
+    expect(bobGraphEvents.map((event) => event.id)).toContain(bobEvent.id);
+    expect(bobGraphEvents.map((event) => event.id)).not.toContain(
+      aliceEvent.id
+    );
+
+    const bobSearch = await engine.searchMemory({
+      requesterContext: { userId: bob.id },
+      query: "team source evidence",
+      scope: "team",
+      limit: 10
+    });
+    expect(bobSearch.results.map((result) => result.nodeId)).toContain(
+      bobNode.id
+    );
+    expect(bobSearch.results.map((result) => result.nodeId)).not.toContain(
+      aliceNode.id
+    );
+
+    const bobExport = await repo.exportMemoryRecords({ userId: bob.id });
+    expect(bobExport.nodes.map((node) => node.id)).toContain(bobNode.id);
+    expect(bobExport.nodes.map((node) => node.id)).not.toContain(aliceNode.id);
+    expect(bobExport.events.map((event) => event.id)).toContain(bobEvent.id);
+    expect(bobExport.events.map((event) => event.id)).not.toContain(
+      aliceEvent.id
+    );
+
+    const outsiderExport = await repo.exportMemoryRecords({
+      userId: outsider.id
+    });
+    expect(outsiderExport.nodes).toHaveLength(0);
+    expect(outsiderExport.events).toHaveLength(0);
+  });
+
+  it("requires admin or owner role to modify existing Team Memory", async () => {
+    const owner = await repo.createUser({
+      email: `owner-${randomUUID()}@example.com`
+    });
+    const admin = await repo.createUser({
+      email: `admin-${randomUUID()}@example.com`
+    });
+    const member = await repo.createUser({
+      email: `member-${randomUUID()}@example.com`
+    });
+    const team = await repo.createTeam({
+      name: "Permissions",
+      createdByUserId: owner.id
+    });
+    await repo.addTeamMember(team.id, admin.id, "admin");
+    await repo.addTeamMember(team.id, member.id);
+    const memory = await repo.createMemoryNode(
+      { userId: owner.id },
+      {
+        visibility: "team",
+        teamId: team.id,
+        summaryText: "Team-governed memory",
+        captureMethod: "mcp"
+      }
+    );
+    const personalMemory = await repo.createMemoryNode(
+      { userId: member.id },
+      {
+        visibility: "personal",
+        summaryText: "Member personal memory",
+        captureMethod: "mcp"
+      }
+    );
+
+    await expect(
+      repo.updateLcmGraphNode({ userId: member.id }, memory.id, {
+        summaryText: "Member edit"
+      })
+    ).rejects.toThrow("User is not allowed to modify Team Memory");
+    await expect(
+      repo.deleteMemory({ userId: member.id }, memory.id)
+    ).rejects.toThrow("User is not allowed to modify Team Memory");
+
+    await expect(
+      repo.updateLcmGraphNode({ userId: member.id }, personalMemory.id, {
+        summaryText: "Member personal edit"
+      })
+    ).resolves.toMatchObject({ summaryText: "Member personal edit" });
+    await expect(
+      repo.updateLcmGraphNode({ userId: admin.id }, memory.id, {
+        summaryText: "Admin edit"
+      })
+    ).resolves.toMatchObject({ summaryText: "Admin edit" });
+    await expect(
+      repo.deleteMemory({ userId: owner.id }, memory.id)
+    ).resolves.toBe(true);
   });
 
   it("captures personal facts, compacts, searches, answers, and expands a cited node", async () => {
@@ -470,8 +778,10 @@ describeDb("memory repository visibility", () => {
   it("keeps non-rerankable vector hits when summary reranking is enabled", async () => {
     const originalEmbeddingServiceUrl = process.env.EMBEDDING_SERVICE_URL;
     const originalRerankingEnabled = process.env.RERANKING_ENABLED;
+    const originalEmbeddingServiceToken = process.env.EMBEDDING_SERVICE_TOKEN;
     process.env.EMBEDDING_SERVICE_URL = "http://embedding.test";
     process.env.RERANKING_ENABLED = "true";
+    process.env.EMBEDDING_SERVICE_TOKEN = "test-embedding-token";
 
     try {
       const dimensions = Number(process.env.EMBEDDING_DIMENSIONS ?? 1024);
@@ -481,6 +791,9 @@ describeDb("memory repository visibility", () => {
       vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
         const endpoint = String(url);
         if (endpoint.endsWith("/embed")) {
+          expect(new Headers(init?.headers).get("x-koed-embedding-token")).toBe(
+            "test-embedding-token"
+          );
           return new Response(
             JSON.stringify({
               model:
@@ -495,6 +808,9 @@ describeDb("memory repository visibility", () => {
           );
         }
         if (endpoint.endsWith("/rerank")) {
+          expect(new Headers(init?.headers).get("x-koed-embedding-token")).toBe(
+            "test-embedding-token"
+          );
           const request = JSON.parse(String(init?.body ?? "{}")) as {
             documents?: string[];
           };
@@ -590,6 +906,11 @@ describeDb("memory repository visibility", () => {
         delete process.env.RERANKING_ENABLED;
       } else {
         process.env.RERANKING_ENABLED = originalRerankingEnabled;
+      }
+      if (originalEmbeddingServiceToken === undefined) {
+        delete process.env.EMBEDDING_SERVICE_TOKEN;
+      } else {
+        process.env.EMBEDDING_SERVICE_TOKEN = originalEmbeddingServiceToken;
       }
     }
   });
