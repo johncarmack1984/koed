@@ -109,8 +109,17 @@ const answerLocalLeaseSeconds = () =>
     .int()
     .positive()
     .max(3600)
-    .catch(3600)
+    .catch(300)
     .parse(process.env.MEMORY_QUESTION_ANSWER_LOCAL_LEASE_SECONDS);
+
+const questionAnswerMaxAttempts = () =>
+  z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(25)
+    .catch(3)
+    .parse(process.env.MEMORY_QUESTION_ANSWER_MAX_ATTEMPTS);
 
 const applyCors = (
   request: http.IncomingMessage,
@@ -231,16 +240,46 @@ const questionsFromClaimResponse = (
   );
 };
 
+const releaseQuestionForRetry = async (
+  client: MemoryApiClient,
+  question: MemoryQuestionRecord,
+  message: string,
+  diagnostics: Partial<{
+    response: MemoryAnswerWorkerResponse;
+    retrieval: unknown;
+    localMemoryWorker: MemoryAnswerWorkerResponse["localMemoryWorker"];
+  }> = {}
+) =>
+  client.updateQuestion(question.id, {
+    status: "pending",
+    last_error_message: message,
+    ...(question.attemptCount ? { attempt_count: question.attemptCount } : {}),
+    ...(diagnostics.response ? { response: diagnostics.response } : {}),
+    ...(diagnostics.retrieval ? { retrieval: diagnostics.retrieval } : {}),
+    ...(diagnostics.localMemoryWorker
+      ? { local_memory_worker: diagnostics.localMemoryWorker }
+      : {})
+  });
+
 const updateQuestionWithError = async (
   client: MemoryApiClient,
-  questionId: string,
+  question: MemoryQuestionRecord,
   message: string,
-  attemptCount?: number | null
+  diagnostics: Partial<{
+    response: MemoryAnswerWorkerResponse;
+    retrieval: unknown;
+    localMemoryWorker: MemoryAnswerWorkerResponse["localMemoryWorker"];
+  }> = {}
 ) =>
-  client.updateQuestion(questionId, {
+  client.updateQuestion(question.id, {
     status: "error",
     error_message: message,
-    ...(attemptCount ? { attempt_count: attemptCount } : {})
+    ...(question.attemptCount ? { attempt_count: question.attemptCount } : {}),
+    ...(diagnostics.response ? { response: diagnostics.response } : {}),
+    ...(diagnostics.retrieval ? { retrieval: diagnostics.retrieval } : {}),
+    ...(diagnostics.localMemoryWorker
+      ? { local_memory_worker: diagnostics.localMemoryWorker }
+      : {})
   });
 
 const evidenceFromAnswer = (answer: MemoryAnswerWorkerResponse) =>
@@ -251,6 +290,27 @@ const citationsFromAnswer = (answer: MemoryAnswerWorkerResponse) =>
 
 const retrievalFromAnswer = (answer: MemoryAnswerWorkerResponse) =>
   answer.evidenceBundle?.retrieval ?? answer.retrieval;
+
+const isRetryableSynthesisFallback = (answer: MemoryAnswerWorkerResponse) =>
+  answer.localMemoryWorker.usedFallback === true &&
+  answer.localMemoryWorker.skippedReason === "codex_failed";
+
+const hasQuestionAttemptsRemaining = (question: MemoryQuestionRecord): boolean =>
+  (question.attemptCount ?? 0) < questionAnswerMaxAttempts();
+
+const isRetryableBridgeError = (error: unknown): boolean => {
+  if (error instanceof MemoryApiError) {
+    return (
+      error.status === undefined ||
+      error.status === 408 ||
+      error.status === 409 ||
+      error.status === 425 ||
+      error.status === 429 ||
+      error.status >= 500
+    );
+  }
+  return true;
+};
 
 const normalizeSearchDomain = (
   value: MemoryQuestionRecord["searchDomain"]
@@ -311,6 +371,24 @@ export const answerClaimedMemoryQuestion = async (
       limit: options.limit ?? 10,
       responseDetail: "with_evidence"
     });
+    if (isRetryableSynthesisFallback(answer)) {
+      const message =
+        answer.markdown?.trim() ||
+        "Memory answer worker failed before judging retrieved evidence.";
+      const diagnostics = {
+        response: answer,
+        retrieval: retrievalFromAnswer(answer),
+        localMemoryWorker: answer.localMemoryWorker
+      };
+      const updated = await (hasQuestionAttemptsRemaining(question)
+        ? releaseQuestionForRetry(client, question, message, diagnostics)
+        : updateQuestionWithError(client, question, message, diagnostics));
+      return {
+        ok: false,
+        question: questionFromResponse(updated),
+        error: message
+      };
+    }
     const updated = await updateQuestionWithAnswer(client, question, answer);
     return {
       ok: true,
@@ -319,11 +397,11 @@ export const answerClaimedMemoryQuestion = async (
     };
   } catch (error) {
     const message = errorMessage(error);
-    const updated = await updateQuestionWithError(
-      client,
-      question.id,
-      message,
-      question.attemptCount
+    const retryable =
+      hasQuestionAttemptsRemaining(question) && isRetryableBridgeError(error);
+    const updated = await (retryable
+      ? releaseQuestionForRetry(client, question, message)
+      : updateQuestionWithError(client, question, message)
     ).catch(() => ({ question }));
     return {
       ok: false,
