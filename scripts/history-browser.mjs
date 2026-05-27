@@ -7,7 +7,7 @@ import { loadEnv } from "vite";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const serviceDir = path.join(root, "apps", "history-browser");
-const target = path.join(serviceDir, "t3code-history-browser");
+const target = path.join(serviceDir, "koed-history-browser");
 const mode = process.argv[2];
 const loadedEnv = loadEnv(
   process.env.NODE_ENV ?? "development",
@@ -44,7 +44,7 @@ function pnpm(args, env = runtimeEnv) {
     [
       "pnpm@11.1.2",
       "-C",
-      "apps/history-browser/t3code-history-browser",
+      "apps/history-browser/koed-history-browser",
       ...args
     ],
     {
