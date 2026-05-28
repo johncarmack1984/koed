@@ -47,7 +47,7 @@ const requestSchema = z
   .object({
     query: z.string().min(1),
     question_id: z.string().uuid().optional(),
-    retrieval_scope: z.enum(["personal", "personal+team"]).optional(),
+    retrieval_scope: z.literal("personal").optional(),
     search_domain: z.enum(["global", "project", "session"]).default("global"),
     workspace_id: z.string().min(1).optional(),
     project_name: z.string().min(1).optional(),
@@ -326,8 +326,7 @@ const normalizeSearchDomain = (
 const normalizeRetrievalScope = (
   value: MemoryQuestionRecord["retrievalScope"],
   fallback: string
-): string =>
-  value === "personal" || value === "personal+team" ? value : fallback;
+): string => (value === "personal" ? value : fallback);
 
 const updateQuestionWithAnswer = async (
   client: MemoryApiClient,

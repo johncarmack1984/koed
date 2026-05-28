@@ -48,6 +48,9 @@ const isTransientError = (error: unknown): boolean =>
     "transient" in error &&
     error.transient === true);
 
+const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
 const embeddingVersion = (): string => workerEnv.embeddingVersion;
 
 const embeddingServiceUrl = (): string => workerEnv.embeddingServiceUrl;
@@ -244,7 +247,7 @@ const workers = queueNames.map(
         } catch (error) {
           if (isTransientError(error)) {
             console.warn(
-              `Transient processing failure in ${queueName} job ${job.id ?? "unknown"}; BullMQ will retry.`
+              `Transient processing failure in ${queueName} job ${job.id ?? "unknown"}: ${errorMessage(error)}; BullMQ will retry.`
             );
           }
           throw error;

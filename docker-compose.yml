@@ -99,12 +99,10 @@ services:
       COOKIE_SECURE: "${API_COOKIE_SECURE}"
       CORS_ORIGINS: ${API_CORS_ORIGINS}
     command: >
-      sh -c "cd packages/db &&
-      node node_modules/node-pg-migrate/bin/node-pg-migrate.js up --migrations-dir src/migrations --migrations-table schema_migrations &&
-      cd /app &&
-      node apps/api/dist/index.js"
+      sh -c "node_modules/.bin/node-pg-migrate up --migrations-dir node_modules/@koed/db/src/migrations --migrations-table schema_migrations &&
+      node dist/index.js"
     ports:
-      - "${API_HOST_PORT}:3000"
+      - "${API_HOST_PORT}:${API_PORT}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -133,6 +131,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      embedding-service:
         condition: service_healthy
 
   console:
