@@ -20,27 +20,17 @@ export const registerRawConversationRoutes = (
   app.post(
     "/v1/memory/conversation-items",
     { preHandler: memoryWriteRateLimit },
-    async (request, reply) => {
+    async (request) => {
       const repo = requireRepository();
       const user = await authenticateApiToken(request);
       const input = createConversationItemsSchema.parse(request.body);
-      const nonPersonalItem = input.items.find(
-        (item) => item.visibility === "team" || item.teamId
-      );
-      if (nonPersonalItem) {
-        return reply.status(403).send({
-          error:
-            "API token raw conversation item capture is limited to Personal Memory"
-        });
-      }
 
       const items = await repo.createConversationItems(
         { userId: user.id },
         {
           items: input.items.map((item) => ({
             ...item,
-            visibility: "personal" as const,
-            teamId: undefined
+            visibility: "personal" as const
           }))
         }
       );
