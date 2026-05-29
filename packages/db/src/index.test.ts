@@ -1331,6 +1331,168 @@ describeDb("memory repository visibility", () => {
     ]);
   });
 
+  it("projects hook-only tool payloads into semantic memory and tool events", async () => {
+    const alice = await repo.createUser({
+      email: `alice-hook-tool-fallback-${randomUUID()}@example.com`
+    });
+    const workspaceId = randomUUID();
+    await pool.query(
+      `
+        insert into workspaces (id, owner_user_id, visibility, name)
+        values ($1, $2, 'personal', 'Hook Tool Project')
+      `,
+      [workspaceId, alice.id]
+    );
+    const session = await repo.createCapturedSession(
+      { userId: alice.id },
+      {
+        workspaceId,
+        externalSessionId: `hook-tool-fallback-${randomUUID()}`,
+        sourceRuntime: "codex-cli",
+        captureMethod: "hook",
+        idempotencyKey: `hook-tool-fallback-session-${randomUUID()}`
+      }
+    );
+    await repo.createConversationItems(
+      { userId: alice.id },
+      {
+        items: [
+          {
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-hook-v1",
+            sourceTransport: "hook",
+            externalSessionId: session.externalSessionId ?? undefined,
+            externalThreadId: session.externalSessionId ?? undefined,
+            externalTurnId: "hook-tool-turn-1",
+            sourceRecordType: "hook_payload",
+            sourceEventType: "PostToolUse",
+            sourceSequence: 1,
+            rawJson: {
+              hook_event_name: "PostToolUse",
+              tool_use_id: "toolu-hook-1",
+              tool_name: "exec_command",
+              tool_input: { cmd: "git status --short" },
+              tool_response: "clean"
+            },
+            sourceHash: `hook-tool-${randomUUID()}`,
+            idempotencyKey: `hook-tool-${randomUUID()}`,
+            projectionStatus: "pending",
+            metadata: { projectName: "Hook Tool Project" }
+          },
+          {
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-hook-v1",
+            sourceTransport: "hook",
+            externalSessionId: session.externalSessionId ?? undefined,
+            externalThreadId: session.externalSessionId ?? undefined,
+            externalTurnId: "hook-tool-turn-2",
+            sourceRecordType: "hook_payload",
+            sourceEventType: "PostToolUse",
+            sourceSequence: 2,
+            rawJson: {
+              hook_event_name: "PostToolUse",
+              tool_use_id: "toolu-hook-2",
+              tool_name: "exec_command",
+              tool_input: { cmd: "git status --branch" }
+            },
+            sourceHash: `hook-tool-missing-response-${randomUUID()}`,
+            idempotencyKey: `hook-tool-missing-response-${randomUUID()}`,
+            projectionStatus: "pending",
+            metadata: { projectName: "Hook Tool Project" }
+          }
+        ]
+      }
+    );
+
+    const projection = await repo.projectPendingConversationItems(
+      { userId: alice.id },
+      { limit: 10 }
+    );
+    const events = await repo.listLcmGraphEvents(
+      { userId: alice.id },
+      {
+        projectId: workspaceId,
+        threadId: session.externalSessionId ?? undefined,
+        limit: 10
+      }
+    );
+    const memoryEvents = await pool.query<{
+      actor: string | null;
+      content: string;
+      semantic_unit_type: string | null;
+    }>(
+      `
+        select
+          payload ->> 'actor' as actor,
+          payload ->> 'content' as content,
+          payload #>> '{metadata,semanticUnitType}' as semantic_unit_type
+        from memory_events
+        where session_id = $1
+        order by created_at asc, id asc
+      `,
+      [session.id]
+    );
+    const toolEvents = await pool.query<{
+      tool_name: string;
+      tool_input: unknown;
+      tool_response: unknown;
+    }>(
+      `
+        select tool_name, tool_input, tool_response
+        from tool_events
+        where session_id = $1
+        order by transcript_item_id asc nulls last, id asc
+      `,
+      [session.id]
+    );
+
+    expect(projection.memoryEventsCreated).toBe(2);
+    expect(projection.toolEventsCreated).toBe(2);
+    expect(events.map((event) => event.contentPreview)).toHaveLength(2);
+    expect(events.map((event) => event.contentPreview)).toEqual(
+      expect.arrayContaining([
+        'Tool result: exec_command Input: {"cmd":"git status --short"} Output: clean',
+        'Tool result: exec_command Input: {"cmd":"git status --branch"}'
+      ])
+    );
+    expect(memoryEvents.rows).toEqual([
+      {
+        actor: "tool",
+        semantic_unit_type: "agent_turn",
+        content: [
+          "Tool result: exec_command",
+          "",
+          'Input:\n{"cmd":"git status --short"}',
+          "",
+          "Output:\nclean"
+        ].join("\n")
+      },
+      {
+        actor: "tool",
+        semantic_unit_type: "agent_turn",
+        content: [
+          "Tool result: exec_command",
+          "",
+          'Input:\n{"cmd":"git status --branch"}'
+        ].join("\n")
+      }
+    ]);
+    expect(toolEvents.rows).toEqual([
+      {
+        tool_name: "exec_command",
+        tool_input: { cmd: "git status --short" },
+        tool_response: "clean"
+      },
+      {
+        tool_name: "exec_command",
+        tool_input: { cmd: "git status --branch" },
+        tool_response: null
+      }
+    ]);
+  });
+
   it("bundles complete agent turns across projection limits in source order", async () => {
     const alice = await repo.createUser({
       email: `alice-complete-turn-${randomUUID()}@example.com`
