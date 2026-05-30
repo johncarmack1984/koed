@@ -268,6 +268,23 @@ export interface RetrievalMetadata {
   rerankingEnabled?: boolean;
   rerankingUnavailable?: boolean;
   rerankingError?: string;
+  temporalFilter?: {
+    recentDays?: number;
+    sourceAfter?: string;
+    sourceBefore?: string;
+  };
+  stages?: Array<{
+    name: string;
+    ran: boolean;
+    used: boolean;
+    candidateCount: number;
+    selectedCount: number;
+    durationMs: number;
+    parallelGroup?: string;
+    temporalFilterApplied?: boolean;
+    reranked?: boolean;
+    parentNodeIds?: string[];
+  }>;
 }
 
 export interface MemoryEngine {
@@ -324,6 +341,7 @@ export interface PersonalEventInput {
   codexTranscriptPath?: string;
   idempotencyKey?: string;
   sourceHash?: string;
+  capturedAt?: string;
 }
 
 export interface SearchMemoryInput {
@@ -334,6 +352,9 @@ export interface SearchMemoryInput {
   sessionId?: string;
   workspaceId?: string;
   limit?: number;
+  recentDays?: number;
+  sourceAfter?: string;
+  sourceBefore?: string;
 }
 
 export type AnswerMemoryInput = SearchMemoryInput;
@@ -363,6 +384,8 @@ export interface MemorySearchResult {
   sourceId?: string;
   sourceChunkIndex?: number;
   sourceChunkCount?: number;
+  retrievalStage?: string;
+  parentNodeIds?: string[];
   visibility: Visibility;
   summaryText: string;
   lcmNodeSummaryStatus?: "pending" | "summarized";
@@ -374,6 +397,8 @@ export interface MemorySearchResult {
     sourceId?: string;
     sourceChunkIndex?: number;
     sourceChunkCount?: number;
+    retrievalStage?: string;
+    parentNodeIds?: string[];
     visibility: Visibility;
   };
 }
@@ -429,6 +454,7 @@ export interface MemoryEngineRepository {
       codexTranscriptPath?: string;
       idempotencyKey?: string;
       sourceHash?: string;
+      capturedAt?: string;
     }
   ): Promise<MemoryEventRecord>;
   searchMemoryNodes(
@@ -440,6 +466,9 @@ export interface MemoryEngineRepository {
       sessionId?: string;
       workspaceId?: string;
       limit?: number;
+      recentDays?: number;
+      sourceAfter?: string;
+      sourceBefore?: string;
     }
   ): Promise<{
     results: MemorySearchResult[];
@@ -451,7 +480,15 @@ export interface MemoryEngineRepository {
   ): Promise<CompactionResult>;
   expandMemoryNode(
     nodeId: string,
-    actor: RequesterContext
+    actor: RequesterContext,
+    input?: {
+      searchDomain?: MemorySearchDomain;
+      sessionId?: string;
+      workspaceId?: string;
+      recentDays?: number;
+      sourceAfter?: string;
+      sourceBefore?: string;
+    }
   ): Promise<ExpandedMemoryNode>;
 }
 
@@ -475,7 +512,8 @@ export const capturePersonalEvent = async (
     captureMethod: event.captureMethod,
     codexTranscriptPath: event.codexTranscriptPath,
     idempotencyKey: event.idempotencyKey,
-    sourceHash: event.sourceHash
+    sourceHash: event.sourceHash,
+    capturedAt: event.capturedAt
   });
 };
 
@@ -531,10 +569,25 @@ export const answerMemory = async (
 
 export const expandMemoryNode = async (
   nodeId: string,
-  requesterContext: RequesterContext & { repository: MemoryEngineRepository }
+  requesterContext: RequesterContext & {
+    repository: MemoryEngineRepository;
+    searchDomain?: MemorySearchDomain;
+    sessionId?: string;
+    workspaceId?: string;
+    recentDays?: number;
+    sourceAfter?: string;
+    sourceBefore?: string;
+  }
 ): Promise<ExpandedMemoryNode> => {
   const { repository, ...actor } = requesterContext;
-  return repository.expandMemoryNode(nodeId, actor);
+  return repository.expandMemoryNode(nodeId, actor, {
+    searchDomain: requesterContext.searchDomain,
+    sessionId: requesterContext.sessionId,
+    workspaceId: requesterContext.workspaceId,
+    recentDays: requesterContext.recentDays,
+    sourceAfter: requesterContext.sourceAfter,
+    sourceBefore: requesterContext.sourceBefore
+  });
 };
 
 export const scheduleCompaction = async (
@@ -551,8 +604,18 @@ export const createMemoryEngine = (repository: MemoryEngineRepository) => ({
     searchMemory({ ...input, repository }),
   answerMemory: (input: AnswerMemoryInput) =>
     answerMemory({ ...input, repository }),
-  expandMemoryNode: (nodeId: string, requesterContext: RequesterContext) =>
-    expandMemoryNode(nodeId, { ...requesterContext, repository }),
+  expandMemoryNode: (
+    nodeId: string,
+    requesterContext: RequesterContext,
+    input: {
+      searchDomain?: MemorySearchDomain;
+      sessionId?: string;
+      workspaceId?: string;
+      recentDays?: number;
+      sourceAfter?: string;
+      sourceBefore?: string;
+    } = {}
+  ) => expandMemoryNode(nodeId, { ...requesterContext, ...input, repository }),
   scheduleCompaction: (input: ScheduleCompactionInput) =>
     scheduleCompaction({ ...input, repository })
 });
