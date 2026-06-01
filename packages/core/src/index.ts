@@ -349,6 +349,8 @@ export interface PersonalEventInput {
   idempotencyKey?: string;
   sourceHash?: string;
   capturedAt?: string;
+  sourceEventTime?: string;
+  sourceSequence?: number;
 }
 
 export interface SearchMemoryInput {
@@ -472,6 +474,8 @@ export interface MemoryEngineRepository {
       idempotencyKey?: string;
       sourceHash?: string;
       capturedAt?: string;
+      sourceEventTime?: string;
+      sourceSequence?: number;
     }
   ): Promise<MemoryEventRecord>;
   searchMemoryNodes(
@@ -533,7 +537,9 @@ export const capturePersonalEvent = async (
     codexTranscriptPath: event.codexTranscriptPath,
     idempotencyKey: event.idempotencyKey,
     sourceHash: event.sourceHash,
-    capturedAt: event.capturedAt
+    capturedAt: event.capturedAt,
+    sourceEventTime: event.sourceEventTime,
+    sourceSequence: event.sourceSequence
   });
 };
 
