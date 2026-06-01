@@ -294,6 +294,16 @@ const createFakeRepository = (): MemorySourceRepository => {
         turnId: input.turnId ?? null,
         conversationItemId: input.conversationItemId ?? null,
         model: input.model ?? null,
+        usageSource: input.usageSource ?? "app_server",
+        usageAccuracy: input.usageAccuracy ?? "provider_reported",
+        usageKind: input.usageKind ?? "turn_delta",
+        connectorClient: input.connectorClient ?? null,
+        tokenizerPackage: input.tokenizerPackage ?? null,
+        tokenizerEncoding: input.tokenizerEncoding ?? null,
+        tokenizerModel: input.tokenizerModel ?? null,
+        tokenizerExactModelMatch: input.tokenizerExactModelMatch ?? null,
+        tokenizerHeuristicFallback: input.tokenizerHeuristicFallback ?? null,
+        tokenizerVersion: input.tokenizerVersion ?? null,
         inputTokens: input.inputTokens ?? null,
         cachedInputTokens: input.cachedInputTokens ?? null,
         outputTokens: input.outputTokens ?? null,
@@ -302,6 +312,19 @@ const createFakeRepository = (): MemorySourceRepository => {
         usageScope: input.usageScope ?? "last",
         createdAt: new Date().toISOString()
       };
+    },
+    async listWorkflowTokenUsageRollups() {
+      return [
+        {
+          group: { workflow: "memory_question" },
+          rowCount: 1,
+          inputTokens: 4,
+          cachedInputTokens: 1,
+          outputTokens: 2,
+          reasoningOutputTokens: 0,
+          totalTokens: 6
+        }
+      ];
     },
     async projectPendingConversationItems(_actor, input) {
       if (input?.visibility !== "personal") {
@@ -2100,12 +2123,29 @@ describe("account and access flows", () => {
       payload: {
         workflowType: "memory_question",
         workflowId: "question-api-test",
+        answerJobId: "question-api-test",
+        sourceReferences: [{ type: "answer_job", id: "question-api-test" }],
+        usageSource: "local_estimate",
+        usageAccuracy: "local_estimate",
+        usageKind: "estimate",
+        connectorClient: "codex",
+        tokenizerPackage: "js-tiktoken",
+        tokenizerEncoding: "o200k_base",
+        tokenizerModel: "gpt-5-codex",
+        tokenizerExactModelMatch: true,
+        tokenizerHeuristicFallback: false,
+        tokenizerVersion: "test",
         inputTokens: 4,
         cachedInputTokens: 1,
         outputTokens: 2,
         totalTokens: 6,
         usageScope: "last"
       }
+    });
+    const tokenUsageRollups = await app.inject({
+      method: "GET",
+      url: "/v1/memory/token-usage/rollups?group_by=workflow&include_estimates=false",
+      headers
     });
     const projection = await app.inject({
       method: "POST",
@@ -2146,6 +2186,11 @@ describe("account and access flows", () => {
       jsonBody<{ items: unknown[] }>(rawConversationItems).items
     ).toHaveLength(1);
     expect(tokenUsage.statusCode).toBe(200);
+    expect(tokenUsageRollups.statusCode).toBe(200);
+    expect(
+      jsonBody<{ rollups: Array<{ totalTokens: number }> }>(tokenUsageRollups)
+        .rollups[0]?.totalTokens
+    ).toBe(6);
     expect(projection.statusCode).toBe(200);
     expect(rejectedSharedAnswer.statusCode).toBe(400);
     expect(cookieAnswer.statusCode).toBe(200);

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  CodexAppServerTurnError,
+  type CodexThreadTokenUsage
+} from "./codex-app-server-runner.js";
+import {
   MEMORY_ANSWER_PROMPT_VERSION,
   MEMORY_ANSWER_STRUCTURED_SCHEMA_VERSION,
   answerWithMemoryWorker,
@@ -11,6 +15,15 @@ import {
   type MemoryAnswerPayload,
   type MemoryAnswerRetrievalClient
 } from "./answer-worker.js";
+
+const tokenUsage = (totalTokens: number): CodexThreadTokenUsage => ({
+  last: {
+    totalTokens,
+    inputTokens: totalTokens - 1,
+    outputTokens: 1
+  },
+  modelContextWindow: 1000
+});
 
 const answerObject = (
   answer_markdown: string,
@@ -683,6 +696,59 @@ describe("memory answer worker", () => {
     expect(result.localMemoryWorker.promptTokenEstimate).toBeGreaterThan(0);
   });
 
+  it("preserves usage-bearing failed retry attempts", async () => {
+    const calls: number[] = [];
+    const runner: CodexAnswerRunner = async (_prompt, config, timeoutMs) => {
+      calls.push(timeoutMs);
+      if (calls.length === 1) {
+        throw new CodexAppServerTurnError("first attempt failed", {
+          model: `codex:${config.model}:${config.reasoningEffort}`,
+          tokenUsage: tokenUsage(5),
+          threadId: "thread-failed",
+          turnId: "turn-failed"
+        });
+      }
+      return {
+        text: answerJson("Second attempt answered from memory. [personal]"),
+        model: `codex:${config.model}:${config.reasoningEffort}`,
+        tokenUsage: tokenUsage(7),
+        threadId: "thread-success",
+        turnId: "turn-success"
+      };
+    };
+
+    const result = await answerWithMemoryWorker(payload, {
+      config: {
+        ...resolveMemoryAnswerWorkerConfig({
+          MEMORY_ANSWER_PROVIDER: "codex",
+          MEMORY_ANSWER_TIMEOUT_MS: "1000",
+          MEMORY_ANSWER_MAX_ATTEMPTS: "2",
+          MEMORY_ANSWER_PLANNING_MODE: "single_pass"
+        }),
+        cwd: "/tmp"
+      },
+      runner
+    });
+
+    expect(calls).toEqual([1000, 2000]);
+    expect(result.localMemoryWorker.appServerExecutions).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        attemptIndex: 1,
+        tokenUsage: tokenUsage(5),
+        threadId: "thread-failed",
+        turnId: "turn-failed"
+      }),
+      expect.objectContaining({
+        status: "succeeded",
+        attemptIndex: 2,
+        tokenUsage: tokenUsage(7),
+        threadId: "thread-success",
+        turnId: "turn-success"
+      })
+    ]);
+  });
+
   it("returns compact answer-only output by default", async () => {
     const runner: CodexAnswerRunner = async (_prompt, config) => ({
       text: answerJson(
@@ -784,7 +850,12 @@ describe("memory answer worker", () => {
             query: "memory cost decision local Codex Gemini embeddings",
             limit: 5
           }),
-          model: `codex:${config.model}:${config.reasoningEffort}`
+          model: `codex:${config.model}:${config.reasoningEffort}`,
+          threadId: "planner-thread-1",
+          turnId: "planner-turn-1",
+          tokenUsage: {
+            last: { inputTokens: 10, outputTokens: 2, totalTokens: 12 }
+          }
         };
       }
       return {
@@ -794,7 +865,12 @@ describe("memory answer worker", () => {
             "We decided embeddings can use Gemini, while answer synthesis should stay on the user's local Codex subscription. [personal]"
           )
         }),
-        model: `codex:${config.model}:${config.reasoningEffort}`
+        model: `codex:${config.model}:${config.reasoningEffort}`,
+        threadId: "planner-thread-2",
+        turnId: "planner-turn-2",
+        tokenUsage: {
+          last: { inputTokens: 20, outputTokens: 4, totalTokens: 24 }
+        }
       };
     };
     const client: MemoryAnswerRetrievalClient = {
@@ -862,6 +938,26 @@ describe("memory answer worker", () => {
       memoryStatus: "found",
       usedFallback: false
     });
+    expect(result.localMemoryWorker.appServerExecutions).toEqual([
+      expect.objectContaining({
+        stepIndex: 0,
+        stepKind: "planner",
+        threadId: "planner-thread-1",
+        turnId: "planner-turn-1",
+        tokenUsage: {
+          last: { inputTokens: 10, outputTokens: 2, totalTokens: 12 }
+        }
+      }),
+      expect.objectContaining({
+        stepIndex: 1,
+        stepKind: "planner",
+        threadId: "planner-thread-2",
+        turnId: "planner-turn-2",
+        tokenUsage: {
+          last: { inputTokens: 20, outputTokens: 4, totalTokens: 24 }
+        }
+      })
+    ]);
   });
 
   it("does not narrow a global planner follow-up to project without a workspace", async () => {
