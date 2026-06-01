@@ -4,7 +4,7 @@ import os
 from contextlib import asynccontextmanager, contextmanager
 from hmac import compare_digest
 from threading import Lock
-from typing import Any
+from typing import Any, cast
 
 from env_config import resolve_env
 
@@ -222,7 +222,7 @@ def scheduled_embedding(chunk_text: str, priority: str) -> list[float]:
                 raise HTTPException(status_code=503, detail="embedding model is still loading")
             with suppress_native_stderr(config.suppress_llama_warnings):
                 result = model.create_embedding(chunk_text, model=config.model_name)
-            embedding = result["data"][0]["embedding"]
+            embedding = cast(list[float], result["data"][0]["embedding"])
             return normalize_vector(list(embedding))
 
 
