@@ -46,12 +46,19 @@ try {
   run(
     "python unit tests apps/embedding-service",
     path.join(venvDir, "bin", "python"),
-    ["-m", "unittest", "discover"]
+    ["-m", "unittest", "discover", "-s", "tests", "-t", "."]
   );
   run("mypy apps/embedding-service", mypy, [
     "app.py",
+    "auth.py",
     "benchmark_embeddings.py",
-    "env_config.py"
+    "env_config.py",
+    "logging_config.py",
+    "priority_scheduler.py",
+    "runtime.py",
+    "schemas.py",
+    "settings.py",
+    "vectors.py"
   ]);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));

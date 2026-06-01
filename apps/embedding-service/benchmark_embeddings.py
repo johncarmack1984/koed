@@ -7,7 +7,9 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
+
+from vectors import extract_embedding_vectors, normalize_vector
 
 DEFAULT_SIZES = [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32000]
 
@@ -86,13 +88,6 @@ def fit_text_to_tokens(llm: Any, target_tokens: int) -> tuple[str, int]:
     return best_text, count_tokens(best_text)
 
 
-def normalize_vector(vector: list[float]) -> list[float]:
-    norm = math.sqrt(sum(value * value for value in vector))
-    if norm == 0:
-        raise ValueError("model returned a zero vector")
-    return [value / norm for value in vector]
-
-
 def post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
@@ -164,8 +159,7 @@ def run_direct(args: argparse.Namespace) -> list[BenchmarkResult]:
 
     for _ in range(args.warmup_runs):
         result = llm.create_embedding("warmup", model=args.model_name)
-        embedding = cast(list[float], result["data"][0]["embedding"])
-        normalize_vector(list(embedding))
+        normalize_vector(extract_embedding_vectors(result)[0])
 
     results: list[BenchmarkResult] = []
     for size in args.sizes:
@@ -181,8 +175,7 @@ def run_direct(args: argparse.Namespace) -> list[BenchmarkResult]:
                 started = time.perf_counter()
                 result = llm.create_embedding(text, model=args.model_name)
                 elapsed_ms = (time.perf_counter() - started) * 1000
-                embedding = cast(list[float], result["data"][0]["embedding"])
-                vector = normalize_vector(list(embedding))
+                vector = normalize_vector(extract_embedding_vectors(result)[0])
                 dimensions = len(vector)
                 latencies.append(elapsed_ms)
             except Exception as exc:
