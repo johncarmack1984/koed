@@ -130,6 +130,8 @@ export interface MemoryAccessCheckResult extends AccessCheckResult {
     pushDelayMs: number;
     intervalMs: number;
     batchLimit: number;
+    titleBatchLimit: number;
+    titleMinUserEvents: number;
   };
   localLcmSummaryDiagnostics: {
     running: boolean;
@@ -396,6 +398,37 @@ export class MemoryApiClient {
     );
   }
 
+  async listPendingSessionTitles(
+    input: Record<string, unknown> = {}
+  ): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams();
+    if (typeof input.limit === "string" || typeof input.limit === "number") {
+      params.set("limit", String(input.limit));
+    }
+    if (
+      typeof input.minUserEvents === "string" ||
+      typeof input.minUserEvents === "number"
+    ) {
+      params.set("min_user_events", String(input.minUserEvents));
+    }
+    const query = params.toString();
+    return this.request(
+      "GET",
+      `/v1/memory/session-titles/pending${query ? `?${query}` : ""}`
+    );
+  }
+
+  async submitSessionTitle(
+    sessionId: string,
+    input: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      "POST",
+      `/v1/memory/session-titles/${encodeURIComponent(sessionId)}`,
+      input
+    );
+  }
+
   async submitLcmSummary(
     nodeId: string,
     input: Record<string, unknown>
@@ -572,7 +605,7 @@ export const memoryAccessCheck = async (
           "MCP recall is personal-only in this build. search_domain controls the search boundary (session, project, or global).",
           "Low-level memory_search/memory_expand tools are hidden by default so the main agent delegates retrieval planning to the local memory-answer worker.",
           "Backend LLM provider configuration is unsupported in this build. The backend retrieves cited evidence with local semantic embeddings; the local MCP memory-answer worker can plan follow-up searches/expansions and synthesize the final answer through the user's Codex CLI subscription.",
-          "LCM summarisation is local-only: backend workers create pending LCM nodes, while the MCP background LCM summary service runs Codex on the user's machine and submits summaries back for embedding.",
+          "Local memory processing: backend workers create pending title and LCM summary work, while the MCP background service runs Codex on the user's machine and submits results back for storage and embedding.",
           "When answering from memory, cite each source."
         ]
       : []
