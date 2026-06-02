@@ -81,6 +81,12 @@ Start from `.env.example`. Important values:
   `MEMORY_LCM_FRESH_EVENT_TAIL`, `MEMORY_LCM_DEPTH1_FANOUT`: LCM placeholder
   cadence controls for Codex capture traffic.
 - `MEMORY_LCM_SUMMARY_MAX_PROMPT_TOKENS`: local Codex summary prompt budget.
+- `MEMORY_LOG_LEVEL`: JSON log level for the local MCP server and answer bridge
+  (`trace`, `debug`, `info`, `warn`, `error`, `fatal`, or `silent`).
+- `MEMORY_LOG_FILE`: optional log file for MCP server and answer bridge logs.
+  Leave blank to log to stderr.
+- `MEMORY_LOG_DESTINATION`: optional `stderr`, `file`, or `both`. If
+  `MEMORY_LOG_FILE` is set and this is blank, logs go to the file.
 
 Do not commit `.env`, `.env.production`, API tokens, peppers, encryption keys, or private deployment details. Server-side LLM synthesis and backend LLM provider configuration are unsupported in this self-hosted build.
 
@@ -88,10 +94,10 @@ Do not commit `.env`, `.env.production`, API tokens, peppers, encryption keys, o
 
 Codex is currently the only supported AI client. Other clients will need their own setup guides as they are added.
 
-1. Create an API token named `Client Integration`:
+1. Create an API Token:
 
 ```bash
-pnpm api-token:create --owner-email local@koed.ai --name "Client Integration"
+pnpm api-token:create --owner-email local@koed.ai --name "<name>"
 ```
 
 2. Build the MCP server and Capture Hook:

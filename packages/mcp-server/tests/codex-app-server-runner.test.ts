@@ -9,7 +9,7 @@ import {
   listCodexAppServerModels,
   resolveCodexAppServerBinary,
   runCodexAppServerTurn
-} from "./codex-app-server-runner.js";
+} from "../src/codex-app-server-runner.js";
 
 const writeFakeAppServer = (
   directory: string,

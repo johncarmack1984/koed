@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import http from "node:http";
 import { z } from "zod";
@@ -29,9 +29,11 @@ import {
   persistRawConversationItems,
   projectRawConversationItems
 } from "./raw-conversation-items.js";
+import { answerBridgeLogger } from "./logger.js";
 
 export const host = process.env.MEMORY_ANSWER_BRIDGE_HOST ?? "0.0.0.0";
 export const DEFAULT_ANSWER_BRIDGE_PORT = 3210;
+export const DEFAULT_EXISTING_ANSWER_BRIDGE_PROBE_TIMEOUT_MS = 1_500;
 export const parseAnswerBridgePort = (value?: string): number | null => {
   const candidate = (value ?? String(DEFAULT_ANSWER_BRIDGE_PORT)).trim();
   if (!/^\d+$/.test(candidate)) {
@@ -54,6 +56,106 @@ const allowedOrigins = new Set(
     .map((origin) => origin.trim().replace(/\/+$/, ""))
     .filter(Boolean)
 );
+const answerBridgeStartedAt = new Date().toISOString();
+
+interface BridgeRequestContext {
+  id: string;
+  method?: string;
+  path?: string;
+  queryKeys: string[];
+  startedAt: number;
+}
+
+const requestContexts = new WeakMap<
+  http.IncomingMessage,
+  BridgeRequestContext
+>();
+
+const requestIdPattern = /^[A-Za-z0-9._~:-]{1,128}$/;
+
+const firstHeaderValue = (
+  value: string | string[] | undefined
+): string | undefined => (Array.isArray(value) ? value[0] : value);
+
+const resolveRequestId = (request: http.IncomingMessage): string => {
+  const candidate = firstHeaderValue(request.headers["x-request-id"]);
+  return candidate && requestIdPattern.test(candidate)
+    ? candidate
+    : randomUUID();
+};
+
+const bridgeRequestContext = (
+  request: http.IncomingMessage
+): BridgeRequestContext => {
+  const existing = requestContexts.get(request);
+  if (existing) {
+    return existing;
+  }
+  let path: string | undefined;
+  let queryKeys: string[] = [];
+  try {
+    const parsed = new URL(request.url ?? "/", "http://koed.local");
+    path = parsed.pathname;
+    queryKeys = [...new Set([...parsed.searchParams.keys()])].sort();
+  } catch {
+    path = request.url?.split("?")[0] ?? request.url;
+  }
+  const context: BridgeRequestContext = {
+    id: resolveRequestId(request),
+    method: request.method,
+    path,
+    queryKeys,
+    startedAt: Date.now()
+  };
+  requestContexts.set(request, context);
+  return context;
+};
+
+const logBridgeResponse = (
+  request: http.IncomingMessage,
+  status: number
+): void => {
+  const context = bridgeRequestContext(request);
+  const level =
+    status >= 500
+      ? "error"
+      : status >= 400
+        ? "warn"
+        : status === 200
+          ? "info"
+          : "debug";
+  answerBridgeLogger[level](
+    {
+      request: {
+        id: context.id,
+        method: context.method,
+        path: context.path,
+        ...(context.queryKeys.length > 0
+          ? { query_keys: context.queryKeys }
+          : {})
+      },
+      http: {
+        duration_ms: Date.now() - context.startedAt
+      },
+      response: {
+        status_code: status
+      }
+    },
+    "memory answer bridge request completed"
+  );
+};
+
+const healthProbeHost = (value: string): string => {
+  if (value === "0.0.0.0" || value === "::") {
+    return "127.0.0.1";
+  }
+  return value.includes(":") && !value.startsWith("[") ? `[${value}]` : value;
+};
+
+export const answerBridgeHealthUrl = (
+  bridgeHost: string,
+  bridgePort: number
+): string => `http://${healthProbeHost(bridgeHost)}:${bridgePort}/health`;
 
 const requestSchema = z
   .object({
@@ -141,6 +243,35 @@ interface PendingQuestionAnswerServiceHandle {
   }>;
 }
 
+interface AnswerBridgeShutdownOptions {
+  clearTimeoutFn?: typeof clearTimeout;
+  exit?: (code: number) => void;
+  forceCloseDelayMs?: number;
+  log?: typeof answerBridgeLogger;
+  processLike?: {
+    once(signal: "SIGINT" | "SIGTERM", listener: () => void): unknown;
+  };
+  setTimeoutFn?: typeof setTimeout;
+}
+
+interface StandaloneAnswerBridgeOptions {
+  createServer?: typeof createAnswerBridgeServer;
+  exit?: (code: number) => void;
+  existingBridgeProbeTimeoutMs?: number;
+  fetchFn?: typeof fetch;
+  host?: string;
+  installShutdownHandlers?: typeof installAnswerBridgeShutdownHandlers;
+  log?: typeof answerBridgeLogger;
+  port?: number | null;
+}
+
+interface ExistingAnswerBridgeProbeResult {
+  ok: boolean;
+  healthUrl: string;
+  payload?: Record<string, unknown>;
+  error?: string;
+}
+
 const answerLocalLeaseSeconds = () =>
   z.coerce
     .number()
@@ -188,6 +319,7 @@ const sendJson = (
   applyCors(request, response);
   response.writeHead(status, { "content-type": "application/json" });
   response.end(JSON.stringify(body));
+  logBridgeResponse(request, status);
 };
 
 const readJsonBody = async (
@@ -368,6 +500,9 @@ const evidenceFromAnswer = (answer: MemoryAnswerWorkerResponse) =>
 const citationsFromAnswer = (answer: MemoryAnswerWorkerResponse) =>
   answer.citations;
 
+const itemCount = (value: unknown): number =>
+  Array.isArray(value) ? value.length : 0;
+
 const retrievalFromAnswer = (answer: MemoryAnswerWorkerResponse) =>
   answer.evidenceBundle?.retrieval ?? answer.retrieval;
 
@@ -378,8 +513,12 @@ const stripAppServerEvents = <T>(value: T): T => {
   if (Array.isArray(value)) {
     return value.map(stripAppServerEvents) as T;
   }
-  const { appServerEvents, ...rest } = value as Record<string, unknown>;
+  const { appServerEvents, rawEvents, ...rest } = value as Record<
+    string,
+    unknown
+  >;
   void appServerEvents;
+  void rawEvents;
   return Object.fromEntries(
     Object.entries(rest).map(([key, entry]) => [
       key,
@@ -872,6 +1011,18 @@ export const answerClaimedMemoryQuestion = async (
     question.retrievalScope,
     options.fallbackRetrievalScope ?? "personal"
   );
+  answerBridgeLogger.info(
+    {
+      questionId: question.id,
+      attemptCount: question.attemptCount ?? 0,
+      searchDomain,
+      retrievalScope,
+      hasWorkspaceId: Boolean(question.workspaceId),
+      hasSessionId: Boolean(question.sessionId),
+      queryLength: question.query.length
+    },
+    "answering claimed memory question"
+  );
   const workerConfig = resolveManualMemoryAnswerWorkerConfig(
     process.env,
     workerOverridesFromConfig(question.localMemoryWorkerConfig)
@@ -910,6 +1061,18 @@ export const answerClaimedMemoryQuestion = async (
       const updated = await (retryable
         ? releaseQuestionForRetry(client, question, message, diagnostics)
         : updateQuestionWithError(client, question, message, diagnostics));
+      answerBridgeLogger[retryable ? "warn" : "error"](
+        {
+          questionId: question.id,
+          attemptCount: question.attemptCount ?? 0,
+          maxAttempts: questionAnswerMaxAttempts(),
+          retryable,
+          skippedReason: answer.localMemoryWorker.skippedReason
+        },
+        retryable
+          ? "memory question synthesis failed; released for retry"
+          : "memory question synthesis failed permanently"
+      );
       return {
         ok: false,
         question: questionFromResponse(updated),
@@ -919,16 +1082,29 @@ export const answerClaimedMemoryQuestion = async (
     try {
       await persistAnswerAppServerEvents(client, question, answer);
     } catch (error) {
-      console.warn(
-        `[answer-bridge] Failed to persist app-server telemetry for question ${question.id}; preserving synthesized answer.`,
-        error
+      answerBridgeLogger.warn(
+        {
+          err: error,
+          questionId: question.id
+        },
+        "failed to persist app-server telemetry; preserving synthesized answer"
       );
     }
     const updated = await updateQuestionWithAnswer(client, question, answer);
+    answerBridgeLogger.info(
+      {
+        questionId: question.id,
+        searchDomain,
+        markdownLength: answer.markdown?.length ?? 0,
+        evidenceCount: itemCount(evidenceFromAnswer(answer)),
+        citationCount: itemCount(citationsFromAnswer(answer))
+      },
+      "answered memory question"
+    );
     return {
       ok: true,
       question: questionFromResponse(updated),
-      answer
+      answer: stripAppServerEvents(answer)
     };
   } catch (error) {
     const message = errorMessage(error);
@@ -939,6 +1115,17 @@ export const answerClaimedMemoryQuestion = async (
         ? releaseQuestionForRetry(client, question, message)
         : updateQuestionWithError(client, question, message)
     ).catch(() => ({ question }));
+    answerBridgeLogger[retryable ? "warn" : "error"](
+      {
+        err: error,
+        questionId: question.id,
+        attemptCount: question.attemptCount ?? 0,
+        retryable
+      },
+      retryable
+        ? "memory question failed; released for retry"
+        : "memory question failed permanently"
+    );
     return {
       ok: false,
       question: questionFromResponse(updated),
@@ -1009,11 +1196,18 @@ export const startPendingQuestionAnswerService = (
   };
 
   const run = async (reason = "manual") => {
-    void reason;
     if (stopped) {
+      answerBridgeLogger.debug(
+        { reason },
+        "skipping memory question background run because service is stopped"
+      );
       return { ran: false, skippedReason: "stopped" as const };
     }
     if (running) {
+      answerBridgeLogger.debug(
+        { reason },
+        "skipping memory question background run because one is already active"
+      );
       return { ran: false, skippedReason: "already_running" as const };
     }
     if (timer) {
@@ -1021,12 +1215,27 @@ export const startPendingQuestionAnswerService = (
       timer = undefined;
     }
     running = true;
+    answerBridgeLogger.debug(
+      {
+        reason,
+        batchLimit: config.batchLimit,
+        leaseSeconds: config.leaseSeconds
+      },
+      "starting memory question background run"
+    );
     try {
       const claimed = questionsFromClaimResponse(
         await client.claimPendingQuestions({
           limit: config.batchLimit,
           lease_seconds: config.leaseSeconds
         })
+      );
+      answerBridgeLogger.info(
+        {
+          reason,
+          claimedCount: claimed.length
+        },
+        "claimed pending memory questions"
       );
       for (const question of claimed) {
         await answerClaimedMemoryQuestion(client, question, {
@@ -1036,6 +1245,13 @@ export const startPendingQuestionAnswerService = (
       }
       return { ran: true, processed: claimed.length };
     } catch (error) {
+      answerBridgeLogger.error(
+        {
+          err: error,
+          reason
+        },
+        "memory question background run failed"
+      );
       return { ran: true, error: errorMessage(error) };
     } finally {
       running = false;
@@ -1044,6 +1260,16 @@ export const startPendingQuestionAnswerService = (
   };
 
   schedule(config.initialDelayMs);
+  answerBridgeLogger.info(
+    {
+      initialDelayMs: config.initialDelayMs,
+      intervalMs: config.intervalMs,
+      batchLimit: config.batchLimit,
+      leaseSeconds: config.leaseSeconds,
+      answerLimit: config.answerLimit
+    },
+    "memory question background service started"
+  );
 
   return {
     stop() {
@@ -1051,6 +1277,7 @@ export const startPendingQuestionAnswerService = (
       if (timer) {
         clearTimeout(timer);
       }
+      answerBridgeLogger.info("memory question background service stopped");
     },
     trigger: run
   };
@@ -1060,13 +1287,30 @@ export const handleAnswerLocal = async (
   request: http.IncomingMessage,
   response: http.ServerResponse
 ) => {
+  const requestContext = bridgeRequestContext(request);
   const token = bearerToken(request);
   if (!token) {
+    answerBridgeLogger.warn(
+      { requestId: requestContext.id },
+      "memory answer bridge request missing bearer token"
+    );
     sendJson(request, response, 401, { error: "Bearer API token required" });
     return;
   }
 
   const input = requestSchema.parse(await readJsonBody(request));
+  answerBridgeLogger.debug(
+    {
+      requestId: requestContext.id,
+      hasQuestionId: Boolean(input.question_id),
+      searchDomain: input.search_domain,
+      hasWorkspaceId: Boolean(input.workspace_id),
+      hasSessionId: Boolean(input.session_id),
+      queryLength: input.query.length,
+      limit: input.limit
+    },
+    "received local memory answer request"
+  );
   const client = new MemoryApiClient({
     ...defaultConfig(),
     apiToken: token
@@ -1100,9 +1344,25 @@ export const handleAnswerLocal = async (
       lease_seconds: answerLocalLeaseSeconds()
     })
   )[0];
+  answerBridgeLogger.debug(
+    {
+      requestId: requestContext.id,
+      questionId,
+      claimed: Boolean(claimed)
+    },
+    "claimed local memory answer request question"
+  );
 
   if (!claimed) {
     const existing = questionFromResponse(await client.getQuestion(questionId));
+    answerBridgeLogger.info(
+      {
+        requestId: requestContext.id,
+        questionId,
+        status: existing.status
+      },
+      "local memory answer request returned existing question status"
+    );
     if (existing.status === "error") {
       sendJson(request, response, 200, {
         ok: false,
@@ -1138,6 +1398,17 @@ export const createAnswerBridgeServer = (options?: {
       "false";
   let backgroundService: PendingQuestionAnswerServiceHandle | null = null;
   const server = http.createServer((request, response) => {
+    const context = bridgeRequestContext(request);
+    answerBridgeLogger.debug(
+      {
+        request: {
+          id: context.id,
+          method: context.method,
+          path: context.path
+        }
+      },
+      "memory answer bridge request received"
+    );
     void (async () => {
       try {
         if (request.method === "OPTIONS") {
@@ -1151,7 +1422,10 @@ export const createAnswerBridgeServer = (options?: {
           sendJson(request, response, 200, {
             ok: true,
             service: "koed-memory-answer-bridge",
-            apiUrl: defaultConfig().apiUrl
+            apiUrl: defaultConfig().apiUrl,
+            pid: process.pid,
+            startedAt: answerBridgeStartedAt,
+            backgroundServiceRunning: Boolean(backgroundService)
           });
           return;
         }
@@ -1220,6 +1494,17 @@ export const createAnswerBridgeServer = (options?: {
 
         sendJson(request, response, 404, { error: "Not found" });
       } catch (error) {
+        answerBridgeLogger[errorStatus(error) >= 500 ? "error" : "warn"](
+          {
+            err: error,
+            request: {
+              id: context.id,
+              method: context.method,
+              path: context.path
+            }
+          },
+          "memory answer bridge request failed"
+        );
         sendJson(request, response, errorStatus(error), {
           error: errorMessage(error)
         });
@@ -1228,32 +1513,228 @@ export const createAnswerBridgeServer = (options?: {
   });
   server.on("listening", () => {
     if (shouldStartBackgroundService && !backgroundService) {
+      answerBridgeLogger.info(
+        {
+          apiUrl: backgroundClientConfig.apiUrl
+        },
+        "starting memory question background service"
+      );
       backgroundService = startPendingQuestionAnswerService(
         new MemoryApiClient(backgroundClientConfig)
+      );
+    } else if (!shouldStartBackgroundService) {
+      answerBridgeLogger.info(
+        {
+          hasApiToken: Boolean(backgroundClientConfig.apiToken),
+          disabled:
+            process.env.MEMORY_QUESTION_BACKGROUND_ENABLED?.trim().toLowerCase() ===
+            "false"
+        },
+        "memory question background service not started"
       );
     }
   });
   server.on("close", () => {
     backgroundService?.stop();
     backgroundService = null;
+    answerBridgeLogger.info("memory answer bridge closed");
+  });
+  return server;
+};
+
+export const installAnswerBridgeShutdownHandlers = (
+  server: http.Server,
+  options: AnswerBridgeShutdownOptions = {}
+): void => {
+  const processLike = options.processLike ?? process;
+  const log = options.log ?? answerBridgeLogger;
+  const exit = options.exit ?? ((code: number) => process.exit(code));
+  const setTimeoutFn = options.setTimeoutFn ?? setTimeout;
+  const clearTimeoutFn = options.clearTimeoutFn ?? clearTimeout;
+  const forceCloseDelayMs = options.forceCloseDelayMs ?? 5_000;
+  let shuttingDown = false;
+
+  const shutdown = (signal: NodeJS.Signals, exitCode: number) => {
+    if (shuttingDown) {
+      log.warn({ signal }, "memory answer bridge forced shutdown requested");
+      server.closeAllConnections?.();
+      exit(exitCode);
+      return;
+    }
+    shuttingDown = true;
+    log.info(
+      {
+        signal,
+        forceCloseDelayMs
+      },
+      "memory answer bridge shutdown requested"
+    );
+
+    const forceCloseTimer = setTimeoutFn(() => {
+      log.warn(
+        {
+          signal,
+          forceCloseDelayMs
+        },
+        "memory answer bridge forcing open connections closed"
+      );
+      server.closeAllConnections?.();
+      exit(exitCode);
+    }, forceCloseDelayMs);
+    forceCloseTimer.unref?.();
+
+    server.close((error) => {
+      clearTimeoutFn(forceCloseTimer);
+      if (error) {
+        log.error(
+          {
+            err: error,
+            signal
+          },
+          "memory answer bridge shutdown failed"
+        );
+        exit(1);
+        return;
+      }
+      log.info({ signal }, "memory answer bridge shutdown complete");
+      exit(exitCode);
+    });
+    server.closeIdleConnections?.();
+  };
+
+  processLike.once("SIGINT", () => shutdown("SIGINT", 130));
+  processLike.once("SIGTERM", () => shutdown("SIGTERM", 143));
+};
+
+export const probeExistingAnswerBridge = async (
+  bridgeHost: string,
+  bridgePort: number,
+  fetchFn: typeof fetch = fetch,
+  timeoutMs = DEFAULT_EXISTING_ANSWER_BRIDGE_PROBE_TIMEOUT_MS
+): Promise<ExistingAnswerBridgeProbeResult> => {
+  const healthUrl = answerBridgeHealthUrl(bridgeHost, bridgePort);
+  const abortController = new AbortController();
+  const timeout = setTimeout(() => {
+    abortController.abort();
+  }, timeoutMs);
+  timeout.unref?.();
+  try {
+    const response = await fetchFn(healthUrl, {
+      signal: abortController.signal
+    });
+    const payload = (await response.json().catch(() => ({}))) as Record<
+      string,
+      unknown
+    >;
+    return {
+      ok:
+        response.ok &&
+        payload.ok === true &&
+        payload.service === "koed-memory-answer-bridge",
+      healthUrl,
+      payload
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      healthUrl,
+      error: errorMessage(error)
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+export const startStandaloneAnswerBridge = (
+  options: StandaloneAnswerBridgeOptions = {}
+): http.Server | null => {
+  const log = options.log ?? answerBridgeLogger;
+  const exit = options.exit ?? ((code: number) => process.exit(code));
+  const configuredPort =
+    options.port ??
+    parseAnswerBridgePort(process.env.MEMORY_ANSWER_BRIDGE_PORT);
+  if (!configuredPort) {
+    log.error(
+      {
+        configuredPort: process.env.MEMORY_ANSWER_BRIDGE_PORT
+      },
+      "invalid MEMORY_ANSWER_BRIDGE_PORT; expected an integer from 1 to 65535"
+    );
+    exit(1);
+    return null;
+  }
+
+  const bridgeHost = options.host ?? host;
+  const createServer = options.createServer ?? createAnswerBridgeServer;
+  const installShutdownHandlers =
+    options.installShutdownHandlers ?? installAnswerBridgeShutdownHandlers;
+  const server = createServer();
+  installShutdownHandlers(server, {
+    exit,
+    log
+  });
+  server.once("error", (error: NodeJS.ErrnoException) => {
+    if (error.code !== "EADDRINUSE") {
+      log.error(
+        {
+          err: error,
+          host: bridgeHost,
+          port: configuredPort
+        },
+        "memory answer bridge failed"
+      );
+      exit(1);
+      return;
+    }
+
+    void (async () => {
+      const existing = await probeExistingAnswerBridge(
+        bridgeHost,
+        configuredPort,
+        options.fetchFn,
+        options.existingBridgeProbeTimeoutMs
+      );
+      if (existing.ok) {
+        log.info(
+          {
+            host: bridgeHost,
+            port: configuredPort,
+            healthUrl: existing.healthUrl,
+            apiUrl: existing.payload?.apiUrl
+          },
+          "memory answer bridge already running; using existing service"
+        );
+        exit(0);
+        return;
+      }
+
+      log.error(
+        {
+          err: error,
+          host: bridgeHost,
+          port: configuredPort,
+          healthUrl: existing.healthUrl,
+          existingService: existing.payload?.service,
+          probeError: existing.error
+        },
+        "memory answer bridge port already in use by an incompatible service"
+      );
+      exit(1);
+    })();
+  });
+  server.listen(configuredPort, bridgeHost, () => {
+    log.info(
+      {
+        host: bridgeHost,
+        port: configuredPort,
+        url: `http://${bridgeHost}:${configuredPort}`
+      },
+      "memory answer bridge listening"
+    );
   });
   return server;
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const configuredPort = parseAnswerBridgePort(
-    process.env.MEMORY_ANSWER_BRIDGE_PORT
-  );
-  if (!configuredPort) {
-    console.error(
-      `Invalid MEMORY_ANSWER_BRIDGE_PORT "${process.env.MEMORY_ANSWER_BRIDGE_PORT}". Expected an integer from 1 to 65535.`
-    );
-    process.exit(1);
-  }
-  const server = createAnswerBridgeServer();
-  server.listen(configuredPort, host, () => {
-    console.error(
-      `Koed memory answer bridge listening on http://${host}:${configuredPort}`
-    );
-  });
+  startStandaloneAnswerBridge();
 }

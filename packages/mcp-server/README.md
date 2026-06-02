@@ -32,6 +32,13 @@ node packages/mcp-server/dist/answer-bridge.js
 node packages/mcp-server/dist/capture-hook.js
 ```
 
+When the standalone answer bridge is run through `pnpm answer-bridge` or
+`node packages/mcp-server/dist/answer-bridge.js`, `Ctrl-C` gracefully closes the
+HTTP server and background question worker before exiting. If the configured
+port is already owned by another Koed answer bridge, standalone startup checks
+`/health`, logs the existing service, and exits successfully instead of
+crashing on the port conflict.
+
 ## MCP Setup
 
 Configure Codex with a custom stdio MCP server:
@@ -46,6 +53,9 @@ Environment:
   MEMORY_API_TOKEN=<koed-api-token>
   MEMORY_CODEX_APP_SERVER_BINARY=codex
   MEMORY_LCM_SUMMARY_MAX_PROMPT_TOKENS=48000
+  MEMORY_LOG_LEVEL=info
+  MEMORY_LOG_FILE=/absolute/path/to/koed-mcp.log
+  MEMORY_LOG_DESTINATION=file
 ```
 
 Run a quick health check from the package:
@@ -132,6 +142,7 @@ process for normal operation:
 Useful bridge settings:
 
 ```bash
+MEMORY_LOG_LEVEL=debug
 MEMORY_ANSWER_BRIDGE_ENABLED=true
 MEMORY_ANSWER_BRIDGE_HOST=0.0.0.0
 MEMORY_ANSWER_BRIDGE_PORT=3210
@@ -143,6 +154,13 @@ MEMORY_MANUAL_ANSWER_REASONING_EFFORT=
 MEMORY_MANUAL_ANSWER_TIMEOUT_MS=
 MEMORY_MANUAL_ANSWER_MAX_ATTEMPTS=
 ```
+
+The MCP server and answer bridge emit pino JSON logs to stderr so stdout remains
+reserved for MCP stdio traffic. Supported levels are `trace`, `debug`, `info`,
+`warn`, `error`, `fatal`, and `silent`. Configure this with
+`MEMORY_LOG_LEVEL`. To write logs to disk, set `MEMORY_LOG_FILE`; when a file
+path is set and `MEMORY_LOG_DESTINATION` is blank, logs go to the file. Set
+`MEMORY_LOG_DESTINATION=both` to mirror logs to stderr and the file.
 
 Check the bridge:
 
