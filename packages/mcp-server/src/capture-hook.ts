@@ -76,6 +76,17 @@ type RawConversationItemRequest = {
 interface CaptureState {
   seen: Record<string, true>;
   rawSeen: Record<string, true>;
+  immediatePrompts?: Record<
+    string,
+    {
+      sourceHash: string;
+      externalSessionId?: string;
+      externalTurnId?: string;
+      actor: "user" | "agent";
+      prompt: string;
+      capturedAt: number;
+    }
+  >;
   transcriptOffsets?: Record<
     string,
     {
@@ -1358,6 +1369,308 @@ const sourceHashForRawRecord = (input: {
       }
   });
 
+const immediatePromptActor = (
+  effectiveContext: EffectiveCaptureContext
+): "user" | "agent" => (effectiveContext.isSubagent ? "agent" : "user");
+
+const sourceHashForImmediatePrompt = (input: {
+  externalSessionId?: string;
+  turnId?: string;
+  actor: "user" | "agent";
+  prompt: string;
+}): string =>
+  hash({
+    externalSessionId: input.externalSessionId,
+    turnId: input.turnId,
+    actor: input.actor,
+    hookPrompt: input.prompt
+  });
+
+const isImmediateUserPromptSubmit = (
+  payload: HookPayload
+): payload is HookPayload & { prompt: string } =>
+  payload.hook_event_name === "UserPromptSubmit" &&
+  typeof payload.prompt === "string" &&
+  payload.prompt.trim().length > 0;
+
+const promptAlreadyRepresented = (
+  items: RawConversationItemRequest[],
+  hookPromptItem: RawConversationItemRequest
+): boolean => {
+  if (
+    items.some(
+      (item) =>
+        item.sourceHash === hookPromptItem.sourceHash ||
+        item.idempotencyKey === hookPromptItem.idempotencyKey
+    )
+  ) {
+    return true;
+  }
+
+  const hookPrompt = immediatePromptInfo(hookPromptItem);
+  if (!hookPrompt) {
+    return false;
+  }
+
+  const matchingTranscriptIndexes = items.flatMap((item, index) => {
+    const prompt = transcriptPromptInfo(item);
+    return prompt &&
+      prompt.externalSessionId === hookPrompt.externalSessionId &&
+      prompt.externalTurnId === hookPrompt.externalTurnId &&
+      prompt.actor === hookPrompt.actor &&
+      prompt.prompt === hookPrompt.prompt
+      ? [index]
+      : [];
+  });
+  return matchingTranscriptIndexes.at(-1) === items.length - 1;
+};
+
+const immediatePromptInfo = (
+  item: RawConversationItemRequest
+): {
+  externalSessionId?: string;
+  externalTurnId?: string;
+  actor: "user" | "agent";
+  prompt: string;
+} | null => {
+  if (
+    item.metadata?.immediateHookPrompt !== true ||
+    typeof item.rawText !== "string" ||
+    !item.rawText.trim()
+  ) {
+    return null;
+  }
+  return {
+    externalSessionId: item.externalSessionId,
+    externalTurnId: item.externalTurnId,
+    actor: item.metadata.threadKind === "subagent" ? "agent" : "user",
+    prompt: item.rawText
+  };
+};
+
+const transcriptPromptInfo = (
+  item: RawConversationItemRequest
+): {
+  externalSessionId?: string;
+  externalTurnId?: string;
+  actor: "user" | "agent";
+  prompt: string;
+} | null => {
+  if (
+    item.sourceRecordType === "hook_payload" ||
+    typeof item.rawText !== "string" ||
+    !item.rawText.trim()
+  ) {
+    return null;
+  }
+  const transcriptType =
+    typeof item.metadata?.transcriptType === "string"
+      ? item.metadata.transcriptType
+      : item.sourceEventType;
+  if (!/user/i.test(transcriptType ?? "")) {
+    return null;
+  }
+  return {
+    externalSessionId: item.externalSessionId,
+    externalTurnId: item.externalTurnId,
+    actor: item.metadata?.threadKind === "subagent" ? "agent" : "user",
+    prompt: item.rawText
+  };
+};
+
+const immediatePromptStateKey = (
+  stateScope: string,
+  input: {
+    externalSessionId?: string;
+    externalTurnId?: string;
+    actor: "user" | "agent";
+    prompt: string;
+  }
+): string =>
+  scopedStateKey(
+    stateScope,
+    hash({
+      externalSessionId: input.externalSessionId,
+      externalTurnId: input.externalTurnId,
+      actor: input.actor,
+      prompt: input.prompt
+    })
+  );
+
+const rememberImmediatePrompt = (
+  state: CaptureState,
+  stateScope: string,
+  item: RawConversationItemRequest
+): void => {
+  const prompt = immediatePromptInfo(item);
+  if (!prompt) {
+    return;
+  }
+  const key = immediatePromptStateKey(stateScope, prompt);
+  state.immediatePrompts = {
+    ...(state.immediatePrompts ?? {}),
+    [key]: {
+      sourceHash: item.sourceHash,
+      ...prompt,
+      capturedAt: Date.now()
+    }
+  };
+};
+
+const immediatePromptMatchesTranscript = (
+  immediate: NonNullable<CaptureState["immediatePrompts"]>[string],
+  transcript: NonNullable<ReturnType<typeof transcriptPromptInfo>>
+): boolean => {
+  if (
+    immediate.externalSessionId !== transcript.externalSessionId ||
+    immediate.actor !== transcript.actor ||
+    immediate.prompt !== transcript.prompt
+  ) {
+    return false;
+  }
+  if (immediate.externalTurnId && transcript.externalTurnId) {
+    return immediate.externalTurnId === transcript.externalTurnId;
+  }
+  return true;
+};
+
+export const filterTranscriptItemsAlreadyCapturedFromImmediatePrompts = (
+  state: CaptureState,
+  stateScope: string,
+  items: RawConversationItemRequest[]
+): RawConversationItemRequest[] => {
+  const immediatePrompts = Object.entries(state.immediatePrompts ?? {}).filter(
+    ([key]) => key.startsWith(`${stateScope}:`)
+  );
+  if (immediatePrompts.length === 0) {
+    return items;
+  }
+
+  const suppressedIndexes = new Set<number>();
+  for (const [, immediate] of immediatePrompts) {
+    const matchingIndexes = items.flatMap((item, index) => {
+      const transcript = transcriptPromptInfo(item);
+      return transcript &&
+        immediatePromptMatchesTranscript(immediate, transcript)
+        ? [index]
+        : [];
+    });
+    let index: number | undefined;
+    for (
+      let candidateIndex = matchingIndexes.length - 1;
+      candidateIndex >= 0;
+      candidateIndex -= 1
+    ) {
+      const candidate = matchingIndexes[candidateIndex];
+      if (candidate === undefined) {
+        continue;
+      }
+      if (!suppressedIndexes.has(candidate)) {
+        index = candidate;
+        break;
+      }
+    }
+    if (index !== undefined) {
+      suppressedIndexes.add(index);
+    }
+  }
+
+  return items.filter((_, index) => !suppressedIndexes.has(index));
+};
+
+const hookPromptMetadata = (
+  payload: HookPayload,
+  effectiveContext: EffectiveCaptureContext
+): Record<string, unknown> => ({
+  ...hookPayloadMetadata(payload, effectiveContext),
+  immediateHookPrompt: true
+});
+
+const buildRawHookConversationItem = (input: {
+  sessionId?: string;
+  effectiveContext: EffectiveCaptureContext;
+  payload: HookPayload;
+}): RawConversationItemRequest => {
+  const sourceHash = isImmediateUserPromptSubmit(input.payload)
+    ? sourceHashForImmediatePrompt({
+        externalSessionId: input.effectiveContext.externalSessionId,
+        turnId: input.payload.turn_id,
+        actor: immediatePromptActor(input.effectiveContext),
+        prompt: input.payload.prompt
+      })
+    : hash({
+        externalSessionId: input.effectiveContext.externalSessionId,
+        hookEventName: input.payload.hook_event_name,
+        turnId: input.payload.turn_id,
+        payload: input.payload
+      });
+  return {
+    sessionId: input.sessionId,
+    sourceKind: "codex",
+    sourceAdapterVersion: "codex-hook-v1",
+    sourceTransport: "hook",
+    externalSessionId: input.effectiveContext.externalSessionId,
+    externalThreadId: input.effectiveContext.externalSessionId,
+    externalTurnId: input.payload.turn_id,
+    sourceRecordType: "hook_payload",
+    sourceEventType: input.payload.hook_event_name ?? "hook_payload",
+    rawJson: input.payload,
+    rawText:
+      input.payload.prompt ?? input.payload.last_assistant_message ?? undefined,
+    sourceHash,
+    idempotencyKey: sourceHash,
+    projectionStatus: "pending",
+    projectionVersion: "codex-hook-v1",
+    metadata: isImmediateUserPromptSubmit(input.payload)
+      ? hookPromptMetadata(input.payload, input.effectiveContext)
+      : hookPayloadMetadata(input.payload, input.effectiveContext)
+  };
+};
+
+export const selectRawConversationItemsForHook = (input: {
+  transcriptRecords: unknown[];
+  indexOffset?: number;
+  sessionId?: string;
+  effectiveContext: EffectiveCaptureContext;
+  transcriptPath?: string;
+  payload: HookPayload;
+  mode: "foreground" | "catchup";
+}): RawConversationItemRequest[] => {
+  const transcriptItems =
+    input.transcriptRecords.length > 0
+      ? buildRawTranscriptConversationItems({
+          records: input.transcriptRecords,
+          indexOffset: input.indexOffset,
+          sessionId: input.sessionId,
+          effectiveContext: input.effectiveContext,
+          transcriptPath: input.transcriptPath,
+          payload: input.payload
+        })
+      : [];
+
+  if (input.mode !== "foreground") {
+    return transcriptItems;
+  }
+
+  const hookItem = buildRawHookConversationItem({
+    sessionId: input.sessionId,
+    effectiveContext: input.effectiveContext,
+    payload: input.payload
+  });
+
+  if (input.transcriptRecords.length === 0) {
+    return [hookItem];
+  }
+
+  if (!isImmediateUserPromptSubmit(input.payload)) {
+    return transcriptItems;
+  }
+
+  return promptAlreadyRepresented(transcriptItems, hookItem)
+    ? transcriptItems
+    : [...transcriptItems, hookItem];
+};
+
 export const buildRawTranscriptConversationItems = (input: {
   records: unknown[];
   indexOffset?: number;
@@ -1380,15 +1693,15 @@ export const buildRawTranscriptConversationItems = (input: {
 
   return input.records.map((record, index) => {
     const sourceSequence = safeSourceSequence(index + (input.indexOffset ?? 0));
+    const parsedItem = extractTranscriptItem(record, sourceSequence, {
+      preferEventMessages,
+      context
+    });
     const sourceHash = sourceHashForRawRecord({
       externalSessionId: input.effectiveContext.externalSessionId,
       transcriptPath: input.transcriptPath,
       index: sourceSequence,
       record
-    });
-    const parsedItem = extractTranscriptItem(record, sourceSequence, {
-      preferEventMessages,
-      context
     });
     return {
       sessionId: input.sessionId,
@@ -1421,38 +1734,6 @@ export const buildRawTranscriptConversationItems = (input: {
       }
     };
   });
-};
-
-const buildRawHookConversationItem = (input: {
-  sessionId?: string;
-  effectiveContext: EffectiveCaptureContext;
-  payload: HookPayload;
-}): RawConversationItemRequest => {
-  const sourceHash = hash({
-    externalSessionId: input.effectiveContext.externalSessionId,
-    hookEventName: input.payload.hook_event_name,
-    turnId: input.payload.turn_id,
-    payload: input.payload
-  });
-  return {
-    sessionId: input.sessionId,
-    sourceKind: "codex",
-    sourceAdapterVersion: "codex-hook-v1",
-    sourceTransport: "hook",
-    externalSessionId: input.effectiveContext.externalSessionId,
-    externalThreadId: input.effectiveContext.externalSessionId,
-    externalTurnId: input.payload.turn_id,
-    sourceRecordType: "hook_payload",
-    sourceEventType: input.payload.hook_event_name ?? "hook_payload",
-    rawJson: input.payload,
-    rawText:
-      input.payload.prompt ?? input.payload.last_assistant_message ?? undefined,
-    sourceHash,
-    idempotencyKey: sourceHash,
-    projectionStatus: "pending",
-    projectionVersion: "codex-hook-v1",
-    metadata: hookPayloadMetadata(input.payload, input.effectiveContext)
-  };
 };
 
 export const fallbackItems = (
@@ -1553,10 +1834,16 @@ const loadState = (): CaptureState => {
     return {
       seen: state.seen ?? {},
       rawSeen: state.rawSeen ?? {},
+      immediatePrompts: state.immediatePrompts ?? {},
       transcriptOffsets: state.transcriptOffsets ?? {}
     };
   } catch {
-    return { seen: {}, rawSeen: {}, transcriptOffsets: {} };
+    return {
+      seen: {},
+      rawSeen: {},
+      immediatePrompts: {},
+      transcriptOffsets: {}
+    };
   }
 };
 
@@ -1571,6 +1858,9 @@ const saveState = (state: CaptureState): void => {
         seen: Object.fromEntries(Object.entries(state.seen).slice(-5000)),
         rawSeen: Object.fromEntries(
           Object.entries(state.rawSeen).slice(-20_000)
+        ),
+        immediatePrompts: Object.fromEntries(
+          Object.entries(state.immediatePrompts ?? {}).slice(-5_000)
         ),
         transcriptOffsets: Object.fromEntries(
           Object.entries(state.transcriptOffsets ?? {}).slice(-2_000)
@@ -1940,24 +2230,19 @@ const runCapturePass = async (input: {
   }
 
   const rawItemsRequest =
-    transcriptRecords.length > 0
-      ? buildRawTranscriptConversationItems({
-          records: transcriptRecords,
-          indexOffset: transcriptFile.indexOffset,
-          sessionId: session?.session?.id,
-          effectiveContext,
-          transcriptPath: captureTranscriptPath,
-          payload
-        })
-      : mode === "foreground"
-        ? [
-            buildRawHookConversationItem({
-              sessionId: session?.session?.id,
-              effectiveContext,
-              payload
-            })
-          ]
-        : [];
+    filterTranscriptItemsAlreadyCapturedFromImmediatePrompts(
+      state,
+      stateScope,
+      selectRawConversationItemsForHook({
+        transcriptRecords,
+        indexOffset: transcriptFile.indexOffset,
+        sessionId: session?.session?.id,
+        effectiveContext,
+        transcriptPath: captureTranscriptPath,
+        payload,
+        mode
+      })
+    );
   const rawItemsToSend = rawItemsForCapture(
     rawItemsRequest,
     scopedRawSeen(state.rawSeen, stateScope, rawItemsRequest),
@@ -1979,6 +2264,9 @@ const runCapturePass = async (input: {
         );
   for (const item of rawItemsResponse) {
     state.rawSeen[scopedStateKey(stateScope, item.idempotencyKey)] = true;
+  }
+  for (const item of rawItemsToSend) {
+    rememberImmediatePrompt(state, stateScope, item);
   }
   if (!rawItemsResult.completed) {
     console.error(

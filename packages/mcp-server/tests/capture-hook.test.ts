@@ -8,6 +8,7 @@ import {
   captureTranscriptPathForPayload,
   effectiveCaptureContext,
   extractTranscriptSessionMetadata,
+  filterTranscriptItemsAlreadyCapturedFromImmediatePrompts,
   isRetryableTranscriptCatchupError,
   parseForegroundTranscriptFileRecords,
   parseTranscriptFileRecords,
@@ -15,6 +16,7 @@ import {
   rawItemBatches,
   rawItemsForCapture,
   rawItemRequestChunks,
+  selectRawConversationItemsForHook,
   selectCaptureItems,
   shouldReadTranscriptForHook,
   stateScopeKey,
@@ -958,6 +960,285 @@ describe("Codex capture hook transcript parsing", () => {
         content: "Capture this prompt",
         metadata: { externalSessionId: "session-b" }
       }
+    ]);
+  });
+
+  it("keeps UserPromptSubmit hook payloads when transcript backlog exists without the new prompt", () => {
+    const effectiveContext = effectiveCaptureContext({
+      session_id: "session-userprompt-backlog",
+      turn_id: "turn-1",
+      hook_event_name: "UserPromptSubmit",
+      prompt: "Immediate prompt from hook"
+    });
+    const items = selectRawConversationItemsForHook({
+      transcriptRecords: [
+        {
+          type: "event_msg",
+          payload: {
+            type: "agent_message",
+            message: "Older unread transcript backlog"
+          }
+        }
+      ],
+      payload: {
+        session_id: "session-userprompt-backlog",
+        turn_id: "turn-1",
+        hook_event_name: "UserPromptSubmit",
+        prompt: "Immediate prompt from hook"
+      },
+      effectiveContext,
+      mode: "foreground"
+    });
+
+    expect(items.map((item) => item.rawText)).toEqual([
+      "Older unread transcript backlog",
+      "Immediate prompt from hook"
+    ]);
+    expect(items[1]).toMatchObject({
+      sourceRecordType: "hook_payload",
+      sourceEventType: "UserPromptSubmit",
+      rawText: "Immediate prompt from hook"
+    });
+  });
+
+  it("does not duplicate UserPromptSubmit hook payloads already present in the transcript batch", () => {
+    const payload = {
+      session_id: "session-userprompt-present",
+      turn_id: "turn-2",
+      hook_event_name: "UserPromptSubmit",
+      prompt: "Prompt already in transcript"
+    };
+    const effectiveContext = effectiveCaptureContext(payload);
+    const items = selectRawConversationItemsForHook({
+      transcriptRecords: [
+        {
+          type: "event_msg",
+          payload: {
+            type: "user_message",
+            message: "Prompt already in transcript"
+          }
+        }
+      ],
+      payload,
+      effectiveContext,
+      mode: "foreground"
+    });
+
+    expect(items.map((item) => item.rawText)).toEqual([
+      "Prompt already in transcript"
+    ]);
+    expect(items).toHaveLength(1);
+  });
+
+  it("does not duplicate UserPromptSubmit hook payloads present after mixed transcript backlog", () => {
+    const payload = {
+      session_id: "session-userprompt-mixed-present",
+      turn_id: "turn-mixed-present",
+      hook_event_name: "UserPromptSubmit",
+      prompt: "Prompt already present after backlog"
+    };
+    const effectiveContext = effectiveCaptureContext(payload);
+    const items = selectRawConversationItemsForHook({
+      transcriptRecords: [
+        {
+          type: "event_msg",
+          payload: {
+            type: "agent_message",
+            message: "Older unread transcript backlog"
+          }
+        },
+        {
+          type: "event_msg",
+          payload: {
+            type: "user_message",
+            message: "Prompt already present after backlog"
+          }
+        }
+      ],
+      payload,
+      effectiveContext,
+      mode: "foreground"
+    });
+
+    expect(items.map((item) => item.rawText)).toEqual([
+      "Older unread transcript backlog",
+      "Prompt already present after backlog"
+    ]);
+    expect(items).toHaveLength(2);
+  });
+
+  it("does not suppress a repeated prompt when transcript backlog contains older matching text", () => {
+    const payload = {
+      session_id: "session-userprompt-repeat",
+      turn_id: "turn-repeat",
+      hook_event_name: "UserPromptSubmit",
+      prompt: "Repeated prompt"
+    };
+    const effectiveContext = effectiveCaptureContext(payload);
+    const items = selectRawConversationItemsForHook({
+      transcriptRecords: [
+        {
+          type: "event_msg",
+          payload: {
+            type: "user_message",
+            message: "Repeated prompt"
+          }
+        },
+        {
+          type: "event_msg",
+          payload: {
+            type: "agent_message",
+            message: "Older backlog after the repeated prompt"
+          }
+        }
+      ],
+      payload,
+      effectiveContext,
+      mode: "foreground"
+    });
+
+    expect(items.map((item) => item.rawText)).toEqual([
+      "Repeated prompt",
+      "Older backlog after the repeated prompt",
+      "Repeated prompt"
+    ]);
+    expect(items[2]).toMatchObject({
+      sourceRecordType: "hook_payload",
+      sourceEventType: "UserPromptSubmit"
+    });
+  });
+
+  it("deduplicates subagent UserPromptSubmit payloads already present in the transcript batch", () => {
+    const payload = {
+      session_id: "parent-thread",
+      agent_id: "subagent-thread",
+      turn_id: "subagent-turn",
+      hook_event_name: "UserPromptSubmit",
+      prompt: "Subagent prompt already in transcript"
+    };
+    const effectiveContext = effectiveCaptureContext(payload, {
+      threadKind: "subagent",
+      transcriptSessionId: "subagent-thread",
+      parentThreadId: "parent-thread",
+      transcriptMetadata: {}
+    });
+    const items = selectRawConversationItemsForHook({
+      transcriptRecords: [
+        {
+          type: "event_msg",
+          payload: {
+            type: "user_message",
+            message: "Subagent prompt already in transcript"
+          }
+        }
+      ],
+      payload,
+      effectiveContext,
+      mode: "foreground"
+    });
+
+    expect(items.map((item) => item.rawText)).toEqual([
+      "Subagent prompt already in transcript"
+    ]);
+    expect(items).toHaveLength(1);
+  });
+
+  it("keeps transcript raw identity stable between foreground and catch-up reads", () => {
+    const payload = {
+      session_id: "session-userprompt-later",
+      turn_id: "turn-3",
+      hook_event_name: "UserPromptSubmit",
+      prompt: "Prompt later appears in transcript"
+    };
+    const effectiveContext = effectiveCaptureContext(payload);
+    const record = {
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: "Prompt later appears in transcript"
+      }
+    };
+    const foregroundTranscript = buildRawTranscriptConversationItems({
+      records: [record],
+      payload,
+      effectiveContext
+    });
+    const catchupTranscript = buildRawTranscriptConversationItems({
+      records: [record],
+      payload: {
+        session_id: "session-userprompt-later",
+        hook_event_name: "UserPromptSubmit"
+      },
+      effectiveContext
+    });
+
+    expect(foregroundTranscript[0]?.sourceHash).toBe(
+      catchupTranscript[0]?.sourceHash
+    );
+    expect(foregroundTranscript[0]?.idempotencyKey).toBe(
+      catchupTranscript[0]?.idempotencyKey
+    );
+  });
+
+  it("deduplicates detached catch-up transcript prompts without suppressing older repeated backlog", () => {
+    const stateScope = "scope-detached-prompt";
+    const prompt = "Repeated detached prompt";
+    const payload = {
+      session_id: "session-detached-prompt",
+      hook_event_name: "PostToolUse"
+    };
+    const effectiveContext = effectiveCaptureContext(payload);
+    const transcriptItems = buildRawTranscriptConversationItems({
+      records: [
+        {
+          type: "event_msg",
+          payload: {
+            type: "user_message",
+            message: prompt
+          }
+        },
+        {
+          type: "event_msg",
+          payload: {
+            type: "agent_message",
+            message: "Backlog between repeated prompts"
+          }
+        },
+        {
+          type: "event_msg",
+          payload: {
+            type: "user_message",
+            message: prompt
+          }
+        }
+      ],
+      payload,
+      effectiveContext
+    });
+
+    const filtered = filterTranscriptItemsAlreadyCapturedFromImmediatePrompts(
+      {
+        seen: {},
+        rawSeen: {},
+        immediatePrompts: {
+          [`${stateScope}:immediate-prompt-1`]: {
+            sourceHash: "immediate-source-hash",
+            externalSessionId: "session-detached-prompt",
+            externalTurnId: "turn-immediate-prompt",
+            actor: "user",
+            prompt,
+            capturedAt: Date.now()
+          }
+        },
+        transcriptOffsets: {}
+      },
+      stateScope,
+      transcriptItems
+    );
+
+    expect(filtered.map((item) => item.rawText)).toEqual([
+      prompt,
+      "Backlog between repeated prompts"
     ]);
   });
 
