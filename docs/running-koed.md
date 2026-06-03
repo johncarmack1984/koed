@@ -1,6 +1,11 @@
-# Self-Hosting
+# Running Koed
 
-Koed Self-Hosted runs API, worker, embedding service, and an optional history-browser frontend. Postgres with pgvector stores Users, API Tokens, Memory Events, Memory Nodes, embeddings, and Capture Policies. Redis backs BullMQ queues.
+> [!IMPORTANT]  
+> Only Codex is supported for knowledge capture. More agents to follow!
+
+Koed runs API, worker, embedding service, and an optional history-browser
+frontend. Postgres with pgvector stores Users, API Tokens, Memory Events, Memory
+Nodes, embeddings, and Capture Policies. Redis backs BullMQ queues.
 
 ## Local Run
 
@@ -23,7 +28,7 @@ Create a local API token after the API migrations have run:
 pnpm api-token:create --owner-email local@koed.ai --name "Client Integration"
 ```
 
-The history browser frontend is available at `http://localhost:5174`, or the host port you selected. Codex is the only supported AI client in the current build; other clients will need their own setup guides.
+The history browser frontend is available at `http://localhost:5174`, or the host port you selected.
 
 ## Production Notes
 

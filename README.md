@@ -1,23 +1,27 @@
-# Koed Self-Hosted
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/koed-logo-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/koed-logo.svg">
+  <img alt="Koed" src="docs/assets/koed-logo.svg" width="190" height="60">
+</picture>
+</p>
 
-Koed Self-Hosted is the AGPL-licensed backend distribution for running Koed memory capture, recall, and inspection on infrastructure you control. It is focused on Codex today: Codex is the only supported AI client/integration in this public distribution.
+## Make your AI remember the work
 
-This repository is not the hosted Koed SaaS product. It does not include Koed Cloud onboarding, billing, hosted account management, desktop companion builds, private deployment scripts, pricing pages, or marketing surfaces.
+Koed is a universal memory layer for AI clients. It captures project knowledge,
+coding sessions, decisions, debugging history, and remembered context, then makes
+that memory available through MCP recall.
 
-## Architecture
-
-- `apps/api`: Fastify API for auth, API tokens, capture policy, memory capture, recall, graph inspection, export, and diagnostics.
-- `apps/worker`: BullMQ worker for embedding and memory background jobs.
-- `apps/embedding-service`: local embedding/reranking HTTP service.
-- `apps/history-browser`: wrapper package and Docker integration that fetches and builds the separate `koed-labs/koed-history-browser` frontend.
-- `packages/db`: Postgres repository and migrations.
-- `packages/core`: memory capture, retrieval, answer, and compaction logic.
-- `packages/mcp-server`: Koed MCP Server and TypeScript Codex Capture Hook.
-- `packages/shared`, `packages/evals`: retained runtime support and validation utilities.
-
-Postgres uses pgvector. Redis backs BullMQ. Koed Self-Hosted relies on the connected AI client for LLM synthesis; the backend stores memory, retrieves evidence, manages embeddings and ranking, and does not make server-side LLM calls in this build.
+- Automatic conversation capture with hooks.
+- Seamless recall for prior conversations, project history, and remembered context.
+- Explorer for inspecting captured Koed memory.
+- Postgres + pgvector storage under your control.
+- Local embedding, reranking, and Redis-backed memory processing.
 
 ## Quickstart
+
+> [!IMPORTANT]  
+> Only Codex is supported for knowledge capture. More agents to follow!
 
 Create the local environment file, then install and start the service:
 
@@ -30,15 +34,8 @@ docker compose up --build
 ```
 
 The history browser is pulled from the private `koed-labs/koed-history-browser`
-repository during local builds. Set
-`GITHUB_TOKEN` in `.env` to a GitHub token that can read that repository before
-running `docker compose up --build`.
-
-If the default ports are already in use, choose host ports before starting:
-
-```bash
-API_HOST_PORT=3300 HISTORY_WEB_HOST_PORT=5574 HISTORY_API_BASE_URL=http://localhost:3300 docker compose up --build
-```
+repository during local builds. Set `GITHUB_TOKEN` in `.env` to a GitHub token
+that can read that repository before running `docker compose up --build`.
 
 Create a local API token for your AI client:
 
@@ -46,141 +43,93 @@ Create a local API token for your AI client:
 pnpm api-token:create --owner-email local@koed.ai --name "Codex"
 ```
 
-List or revoke local API tokens with the same owner email:
-
-```bash
-pnpm api-token:list --owner-email local@koed.ai
-pnpm api-token:revoke --owner-email local@koed.ai --token-id <token-id>
-```
-
-The history browser runs beside it:
+The history browser runs beside the API:
 
 ```text
 http://localhost:5174
 ```
 
-If you changed `HISTORY_WEB_HOST_PORT`, open that port instead.
+## Connect Codex
 
-## Configuration
-
-Start from `.env.example`. Important values:
-
-- `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`: Postgres container settings.
-- `API_DATA_ENCRYPTION_KEY`: reserved 32-byte base64 key for encrypted server-side fields. In the current self-hosted build, memory payloads remain plaintext at the application layer in Postgres and must be protected with deployment-level database, volume, backup, and access controls.
-- `API_TOKEN_PEPPER`: server-side pepper for API token hashes.
-- `EMBEDDING_MODEL_KEY`: local embedding model setting. The embedding service only accepts supported model keys.
-- `EMBEDDING_RERANKER_KEY`: optional local reranker model key. Leave blank to keep reranking disabled; Docker Compose maps this to the app-local `RERANKER_KEY`.
-- `EMBEDDING_SERVICE_TOKEN`: shared internal token used by the API and worker when calling the private embedding service.
-- `DATABASE_URL`: local Postgres URL used by operator scripts such as `pnpm api-token:create`.
-- `API_CORS_ORIGINS`: include the local history-browser origin.
-- `GITHUB_TOKEN`: GitHub token used by Docker to fetch the private
-  `koed-labs/koed-history-browser` frontend repository.
-- `HISTORY_BROWSER_REPO`, `HISTORY_BROWSER_REF`: optional override for the
-  history-browser repository and branch/tag/SHA.
-- `MEMORY_LCM_LEAF_EVENT_THRESHOLD`, `MEMORY_LCM_LEAF_TOKEN_THRESHOLD`,
-  `MEMORY_LCM_FRESH_EVENT_TAIL`, `MEMORY_LCM_DEPTH1_FANOUT`: LCM placeholder
-  cadence controls for Codex capture traffic.
-- `MEMORY_LCM_SUMMARY_MAX_PROMPT_TOKENS`: local Codex summary prompt budget.
-- `WORKER_LOG_LEVEL`: JSON log level for the worker (`trace`, `debug`, `info`,
-  `warn`, `error`, `fatal`, or `silent`).
-- `WORKER_LOG_FILE`: optional log file for worker logs. Leave blank to log to
-  stderr.
-- `WORKER_LOG_DESTINATION`: optional `stderr`, `file`, or `both`. If
-  `WORKER_LOG_FILE` is set and this is blank, logs go to the file.
-- `MEMORY_LOG_LEVEL`: JSON log level for the local MCP server and answer bridge
-  (`trace`, `debug`, `info`, `warn`, `error`, `fatal`, or `silent`).
-- `MEMORY_LOG_FILE`: optional log file for MCP server and answer bridge logs.
-  Leave blank to log to stderr.
-- `MEMORY_LOG_DESTINATION`: optional `stderr`, `file`, or `both`. If
-  `MEMORY_LOG_FILE` is set and this is blank, logs go to the file.
-
-Do not commit `.env`, `.env.production`, API tokens, peppers, encryption keys, or private deployment details. Server-side LLM synthesis and backend LLM provider configuration are unsupported in this self-hosted build.
-
-## Codex Setup
-
-Codex is currently the only supported AI client. Other clients will need their own setup guides as they are added.
-
-1. Create an API Token:
+Set up the MCP Server and Capture Hook to enable recall and automatic capture in Codex.
 
 ```bash
-pnpm api-token:create --owner-email local@koed.ai --name "<name>"
+MEMORY_API_TOKEN=<token from pnpm api-token:create> pnpm codex:configure
 ```
 
-2. Build the MCP server and Capture Hook:
-
-```bash
-pnpm --filter @koed/mcp-server build
-```
-
-3. In Codex Desktop, add a custom MCP server:
-
-```text
-Name: koed-selfhost
-Transport: STDIO
-Command: node
-Argument: /path/to/koed-self-hosted/packages/mcp-server/dist/cli.js
-MEMORY_API_URL: http://localhost:3000
-MEMORY_API_TOKEN: <token from pnpm api-token:create>
-Working directory: /path/to/koed-self-hosted
-```
-
-If you changed `API_HOST_PORT`, use that port in `MEMORY_API_URL`.
-
-4. Configure the Capture Hook with the same `MEMORY_API_URL` and `MEMORY_API_TOKEN`. This is the supported automatic capture path; MCP by itself is recall-only and does not automatically record full conversations.
-   Install it for Codex `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `SubagentStart`, and `SubagentStop` events.
-
-5. Verify the Capture Hook:
+Verify setup with:
 
 ```bash
 MEMORY_API_URL=http://localhost:3000 MEMORY_API_TOKEN=<token from pnpm api-token:create> pnpm codex:verify-capture
 ```
 
-See [docs/codex-integration.md](docs/codex-integration.md) for MCP and Capture Hook details.
+See [docs/codex-integration.md](docs/codex-integration.md) for
+manual setup and deeper Codex integration details.
 
-## History Browser
+## Configuration
 
-The history browser is a separate frontend for inspecting captured Koed memory
-history. Its implementation lives in the private `koed-labs/koed-history-browser`
-repository. This self-hosted repository only keeps the wrapper scripts and Docker
-integration that fetch that repository into
-`apps/history-browser/koed-history-browser` when needed. Run it locally with:
+Start from `.env.example`:
 
 ```bash
-GITHUB_TOKEN=<token with access to koed-labs/koed-history-browser>
-pnpm history:dev
+pnpm env:setup
 ```
 
-It talks to the same API and accepts bearer API tokens created with `pnpm api-token:create`.
+For local Docker builds, set `GITHUB_TOKEN` if you want the history browser to be
+fetched from `koed-labs/koed-history-browser`.
 
-## Security Model
+See [Configuration](docs/configuration.md) for all environment variables,
+embedding settings, logging options, AI client values, and production notes.
 
-Self-hosted Koed assumes the operator controls the deployment. The API supports bearer API tokens for AI-client integrations. Local operators create tokens with `pnpm api-token:create`, which uses trusted database access and stores only token hashes. Postgres and Redis should stay on private Docker/internal networks in production deployments. See [docs/security.md](docs/security.md).
+## Architecture
+
+Koed is composed of the following primary services:
+
+| Path                     | Role                                                                                            |
+| ------------------------ | ----------------------------------------------------------------------------------------------- |
+| `apps/api`               | API for auth, capture policy, memory capture, recall, graph inspection, export, and diagnostics |
+| `apps/worker`            | Background memory and embedding jobs                                                            |
+| `apps/embedding-service` | Local embedding and reranking service                                                           |
+| `apps/history-browser`   | History browser wrapper and Docker integration                                                  |
+| `packages/mcp-server`    | MCP Server, local answer bridge, and Codex Capture Hook                                         |
+| `packages/db`            | Postgres repositories, migrations, and operator scripts                                         |
+
+## Security Notes
+
+Koed assumes the operator controls the deployment. The API supports bearer API
+tokens for AI-client integrations. Local operators create tokens with
+`pnpm api-token:create`, which uses trusted database access and stores only token
+hashes. Postgres and Redis should stay on private Docker/internal networks in
+production deployments. See [docs/security.md](docs/security.md).
+
+Memory payloads remain plaintext at the application layer in Postgres in the
+current build. Protect the database, volumes, backups, and administrator access
+with deployment-level controls.
 
 Report suspected vulnerabilities privately. See [SECURITY.md](SECURITY.md) for
 supported versions, the reporting channel, and guidance on not disclosing user
 Memory data publicly.
 
-## Backups, Upgrades, Migrations
+## Operations
 
-Use normal Postgres backups and restore into the same Koed version before upgrading. Run migrations during API startup or manually with:
+Use normal Postgres backups and restore into the same Koed version before
+upgrading. Run migrations during API startup or manually with:
 
 ```bash
 pnpm --filter @koed/db migrate:up
 ```
 
-See [docs/backup-restore.md](docs/backup-restore.md) and [docs/upgrades.md](docs/upgrades.md).
+See [docs/backup-restore.md](docs/backup-restore.md) and
+[docs/upgrades.md](docs/upgrades.md).
 
 ## License
 
-Koed Self-Hosted is licensed under the GNU Affero General Public License version 3 only (`AGPL-3.0-only`). See [LICENSE](LICENSE).
+Koed is licensed under the GNU Affero General Public License version 3 only
+(`AGPL-3.0-only`). See [LICENSE](LICENSE), [CONTRIBUTING.md](CONTRIBUTING.md),
+and [docs/license.md](docs/license.md).
 
-The AGPL requires modified versions that interact with users over a network to offer those users access to the corresponding source code. Koed Labs may also offer separate commercial licenses for organizations that need different terms, including for proprietary modified SaaS products.
+## Learn More
 
-External code contributions require contributor terms that preserve Koed Labs' ability to dual-license the project. See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/license.md](docs/license.md).
-
-## More Docs
-
-- [Self-hosting](docs/self-hosting.md)
+- [Running Koed](docs/running-koed.md)
 - [Configuration](docs/configuration.md)
 - [Security](docs/security.md)
 - [Backup and restore](docs/backup-restore.md)
