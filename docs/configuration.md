@@ -78,11 +78,15 @@ These values are copied into the AI Client configuration and are not consumed au
 - `MEMORY_API_TOKEN`: API Token created with `pnpm api-token:create` for the User. Operators can inspect and revoke local token records with `pnpm api-token:list` and `pnpm api-token:revoke`.
 - `MEMORY_HOOK_STRICT`: when `true`, Capture Hook failures exit non-zero.
 - `MEMORY_RAW_INGEST_BATCH_BYTES`: target maximum request size for Capture Hook raw-ingestion batches. Default `180000`.
-- `MEMORY_API_REQUEST_TIMEOUT_MS`: timeout for local MCP and Capture Hook API calls. Default `60_000`.
+- `MEMORY_API_REQUEST_TIMEOUT_MS`: timeout for local MCP Server API calls. Default `60_000`.
+- `MEMORY_HOOK_API_REQUEST_TIMEOUT_MS`: short timeout for Supported Capture Hook API calls. Default `1500`.
+- `MEMORY_HOOK_BREAKER_FAILURE_THRESHOLD`: consecutive retryable foreground Capture Hook API failures before local latency protection opens. Default `3`.
+- `MEMORY_HOOK_BREAKER_COOLDOWN_MS`: cooldown before an open Capture Hook breaker retries `/v1/access/check` as its health signal. Default `60000`.
 - `MEMORY_HOOK_DEADLINE_MS`: soft deadline used by Capture Hooks to stop optional work before Codex kills the hook process. Default `8500`.
 - `MEMORY_HOOK_TRANSCRIPT_TAIL_BYTES`: maximum sequential Codex transcript bytes processed by one background catch-up pass. The hook checkpoints transcript offsets only after raw rows are stored durably. Default `1000000`.
 - `MEMORY_HOOK_FOREGROUND_TRANSCRIPT_TAIL_BYTES`: maximum latest Codex transcript bytes inspected by a foreground PostToolUse, Stop, or SubagentStop hook when a resumed transcript has a larger unread backlog. This keeps new messages visible while background catch-up drains older unread rows. Default `128000`.
 - `MEMORY_HOOK_TRIGGER_TRANSCRIPT_CATCHUP`: when `true`, foreground hooks start a detached local transcript catch-up process when unread transcript backlog remains. Default `true`.
+- `MEMORY_TRANSCRIPT_CATCHUP_API_REQUEST_TIMEOUT_MS`: API request timeout used by detached transcript catch-up. This stays longer than the foreground hook timeout so recovery can complete durable raw ingestion after the hook process has returned. Default `60000`.
 - `MEMORY_TRANSCRIPT_CATCHUP_PASS_DEADLINE_MS`: soft deadline for one background transcript catch-up API pass. Default `60000`.
 - `MEMORY_TRANSCRIPT_CATCHUP_MAX_RUNTIME_MS`: maximum runtime for one detached transcript catch-up process before the next hook may resume it. Default `300000`.
 - `MEMORY_TRANSCRIPT_CATCHUP_LOCK_TTL_MS`: stale lock age for detached transcript catch-up workers. Default `600000`.
