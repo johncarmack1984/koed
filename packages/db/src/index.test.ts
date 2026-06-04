@@ -117,6 +117,27 @@ describe("memory presentation helpers", () => {
 
     expect(text).toBe("Can you please find out what is missing on the setup?");
   });
+
+  it("hides image-only Codex requests instead of exposing prompt context", () => {
+    const text = presentMemoryText(
+      [
+        "# Context from my IDE setup:",
+        "",
+        "## Active file: koed-self-hosted/SECURITY.md",
+        "",
+        "## Open tabs:",
+        "- SECURITY.md: koed-self-hosted/SECURITY.md",
+        "",
+        "## My request for Codex:",
+        "<image name=[Image #1]>raw image metadata</image>"
+      ].join("\n"),
+      provenance
+    );
+
+    expect(text).toBe("Captured memory.");
+    expect(text).not.toContain("Context from my IDE setup");
+    expect(text).not.toContain("Open tabs");
+  });
 });
 
 describe("local embedding status", () => {
@@ -4207,6 +4228,449 @@ describeDb("memory repository visibility", () => {
     );
     expect(rawStatuses.rows).toEqual([
       { projection_status: "projected", count: String(rows.length) }
+    ]);
+  });
+
+  it("preserves VS Code IDE context only as supporting evidence", async () => {
+    const previousFreshTail = process.env.MEMORY_LCM_FRESH_EVENT_TAIL;
+    const previousLeafEventThreshold =
+      process.env.MEMORY_LCM_LEAF_EVENT_THRESHOLD;
+    process.env.MEMORY_LCM_FRESH_EVENT_TAIL = "0";
+    process.env.MEMORY_LCM_LEAF_EVENT_THRESHOLD = "1";
+    try {
+      const alice = await repo.createUser({
+        email: `alice-ide-context-${randomUUID()}@example.com`
+      });
+      const workspaceId = randomUUID();
+      await pool.query(
+        `
+	          insert into workspaces (id, owner_user_id, visibility, name)
+	          values ($1, $2, 'personal', 'IDE Context Project')
+	        `,
+        [workspaceId, alice.id]
+      );
+      const session = await repo.createCapturedSession(
+        { userId: alice.id },
+        {
+          workspaceId,
+          externalSessionId: `ide-context-session-${randomUUID()}`,
+          sourceRuntime: "codex",
+          idempotencyKey: `ide-context-session-${randomUUID()}`,
+          metadata: { workspaceId }
+        }
+      );
+      const contextHash = `ide-context-${randomUUID()}`;
+      const userHash = `ide-context-user-${randomUUID()}`;
+      const agentHash = `ide-context-agent-${randomUUID()}`;
+      const marker = `IDE_CONTEXT_ONLY_${randomUUID()}`;
+      const primaryRowContextMarker = `PRIMARY_ROW_CONTEXT_ONLY_${randomUUID()}`;
+      await repo.createConversationItems(
+        { userId: alice.id },
+        {
+          items: [
+            {
+              sessionId: session.id,
+              sourceKind: "codex",
+              sourceAdapterVersion: "codex-transcript-v1",
+              sourceTransport: "hook",
+              externalTurnId: "turn-with-ide-context",
+              sourceRecordType: "turn_start",
+              sourceEventType: "turn_start",
+              sourceSequence: 0,
+              rawJson: {
+                type: "turn_start",
+                payload: {
+                  type: "turn_start",
+                  additionalContext: {
+                    vscode: {
+                      kind: "application",
+                      value: `Selected file contains ${marker}`
+                    }
+                  }
+                }
+              },
+              sourceHash: contextHash,
+              idempotencyKey: contextHash,
+              metadata: {
+                workspaceId,
+                transcriptType: "ide_context",
+                contextKind: "ide_client_context",
+                contextSource: "vscode_codex",
+                sourceRole: "supporting_context"
+              }
+            },
+            {
+              sessionId: session.id,
+              sourceKind: "codex",
+              sourceAdapterVersion: "codex-transcript-v1",
+              sourceTransport: "hook",
+              externalTurnId: "turn-with-ide-context",
+              sourceRecordType: "event_msg",
+              sourceEventType: "user_message",
+              sourceSequence: 1,
+              rawJson: {
+                type: "event_msg",
+                payload: {
+                  type: "user_message",
+                  message:
+                    "Please explain why the capture path used editor context.",
+                  additionalContext: {
+                    vscode: {
+                      kind: "application",
+                      value: `Primary raw row retained ${primaryRowContextMarker}`
+                    }
+                  }
+                }
+              },
+              rawText:
+                "Please explain why the capture path used editor context.",
+              sourceHash: userHash,
+              idempotencyKey: userHash,
+              metadata: { workspaceId, transcriptType: "user_message" }
+            },
+            {
+              sessionId: session.id,
+              sourceKind: "codex",
+              sourceAdapterVersion: "codex-transcript-v1",
+              sourceTransport: "hook",
+              externalTurnId: "turn-with-ide-context",
+              sourceRecordType: "event_msg",
+              sourceEventType: "agent_message",
+              sourceSequence: 2,
+              rawJson: {
+                type: "event_msg",
+                payload: {
+                  type: "agent_message",
+                  message:
+                    "The editor context explained the selected capture path."
+                }
+              },
+              rawText:
+                "The editor context explained the selected capture path.",
+              sourceHash: agentHash,
+              idempotencyKey: agentHash,
+              metadata: { workspaceId, transcriptType: "agent_message" }
+            },
+            {
+              sessionId: session.id,
+              sourceKind: "codex",
+              sourceAdapterVersion: "codex-transcript-v1",
+              sourceTransport: "hook",
+              externalTurnId: "turn-with-ide-context",
+              sourceRecordType: "event_msg",
+              sourceEventType: "user_message",
+              sourceSequence: 3,
+              rawJson: {
+                type: "event_msg",
+                payload: {
+                  type: "user_message",
+                  message:
+                    "This normal prompt mentions additionalContext but is user-authored."
+                }
+              },
+              rawText:
+                "This normal prompt mentions additionalContext but is user-authored.",
+              sourceHash: `ide-context-marker-prompt-${randomUUID()}`,
+              idempotencyKey: `ide-context-marker-prompt-${randomUUID()}`,
+              metadata: { workspaceId, transcriptType: "user_message" }
+            }
+          ]
+        }
+      );
+
+      const projection = await repo.projectPendingConversationItems(
+        { userId: alice.id },
+        { limit: 10 }
+      );
+      const messages = await pool.query<{ content: string }>(
+        "select content from messages order by created_at asc"
+      );
+      const events = await pool.query<{ id: string; content: string }>(
+        "select id, payload ->> 'content' as content from memory_events order by created_at asc"
+      );
+      const supportingLinks = await pool.query<{
+        source_role: string | null;
+        raw_text: string | null;
+      }>(
+        `
+	          select mes.source_role, ci.raw_text
+	          from memory_event_sources mes
+	          join conversation_items ci on ci.id = mes.conversation_item_id
+	          where mes.source_role = 'supporting_context'
+	        `
+      );
+      const contextSearch = await repo.searchMemoryNodes(
+        { userId: alice.id },
+        {
+          query: marker,
+          scope: "personal",
+          searchDomain: "project",
+          workspaceId,
+          retrievalStage: "lexical_search"
+        }
+      );
+      const embeddable = await repo.listSourcesNeedingEmbeddings(20);
+      const compacted = await repo.createLcmNodes(
+        { userId: alice.id },
+        { visibility: "personal" }
+      );
+      const expanded = await repo.expandMemoryNode(compacted.leafNodeIds[0]!, {
+        userId: alice.id
+      });
+
+      expect(projection.rawItemsProjected).toBe(4);
+      expect(projection.messagesCreated).toBe(3);
+      expect(projection.memoryEventsCreated).toBe(3);
+      expect(messages.rows.map((row) => row.content).join("\n")).not.toContain(
+        marker
+      );
+      expect(events.rows.map((row) => row.content).join("\n")).not.toContain(
+        marker
+      );
+      expect(messages.rows.map((row) => row.content).join("\n")).not.toContain(
+        primaryRowContextMarker
+      );
+      expect(events.rows.map((row) => row.content).join("\n")).not.toContain(
+        primaryRowContextMarker
+      );
+      expect(messages.rows.map((row) => row.content)).toContain(
+        "This normal prompt mentions additionalContext but is user-authored."
+      );
+      expect(supportingLinks.rows).toEqual([
+        {
+          source_role: "supporting_context",
+          raw_text: null
+        }
+      ]);
+      expect(contextSearch.results).toEqual([]);
+      expect(embeddable.some((source) => source.text.includes(marker))).toBe(
+        false
+      );
+      expect(
+        embeddable.some((source) =>
+          source.text.includes(primaryRowContextMarker)
+        )
+      ).toBe(false);
+      expect(
+        expanded.sourceItems
+          .flatMap((item) => item.supportingContext ?? [])
+          .map((item) => ({
+            sourceRole: item.sourceRole,
+            contextKind: item.contextKind,
+            label: item.label,
+            text: item.text
+          }))
+      ).toEqual([
+        {
+          sourceRole: "supporting_context",
+          contextKind: "ide_client_context",
+          label: "IDE/client context",
+          text: `vscode application\nSelected file contains ${marker}`
+        }
+      ]);
+      expect(
+        expanded.sourceItems
+          .flatMap((item) => item.supportingContext ?? [])
+          .map((item) => item.text)
+          .join("\n")
+      ).not.toContain(primaryRowContextMarker);
+      expect(
+        expanded.sourceItems.map((item) => item.text ?? "").join("\n")
+      ).not.toContain(marker);
+    } finally {
+      if (previousFreshTail === undefined) {
+        delete process.env.MEMORY_LCM_FRESH_EVENT_TAIL;
+      } else {
+        process.env.MEMORY_LCM_FRESH_EVENT_TAIL = previousFreshTail;
+      }
+      if (previousLeafEventThreshold === undefined) {
+        delete process.env.MEMORY_LCM_LEAF_EVENT_THRESHOLD;
+      } else {
+        process.env.MEMORY_LCM_LEAF_EVENT_THRESHOLD =
+          previousLeafEventThreshold;
+      }
+    }
+  });
+
+  it("attaches IDE context after a pending agent turn to the following user turn", async () => {
+    const alice = await repo.createUser({
+      email: `alice-ide-context-after-agent-${randomUUID()}@example.com`
+    });
+    const session = await repo.createCapturedSession(
+      { userId: alice.id },
+      {
+        externalSessionId: `ide-context-after-agent-${randomUUID()}`,
+        sourceRuntime: "codex",
+        idempotencyKey: `ide-context-after-agent-session-${randomUUID()}`
+      }
+    );
+    const marker = `FOLLOWING_USER_CONTEXT_${randomUUID()}`;
+    await repo.createConversationItems(
+      { userId: alice.id },
+      {
+        items: [
+          {
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-transcript-v1",
+            sourceTransport: "hook",
+            externalTurnId: "turn-after-agent",
+            sourceRecordType: "event_msg",
+            sourceEventType: "agent_message",
+            sourceSequence: 0,
+            rawJson: {
+              type: "event_msg",
+              payload: {
+                type: "agent_message",
+                message: "Previous assistant answer should not get context."
+              }
+            },
+            rawText: "Previous assistant answer should not get context.",
+            sourceHash: `ide-context-after-agent-reply-${randomUUID()}`,
+            idempotencyKey: `ide-context-after-agent-reply-${randomUUID()}`,
+            metadata: { transcriptType: "agent_message" }
+          },
+          {
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-transcript-v1",
+            sourceTransport: "hook",
+            externalTurnId: "turn-after-agent",
+            sourceRecordType: "event_msg",
+            sourceEventType: "user_message",
+            sourceSequence: 1,
+            rawJson: {
+              type: "event_msg",
+              payload: {
+                type: "user_message"
+              }
+            },
+            rawText: `vscode application\nSelected file contains ${marker}`,
+            sourceHash: `ide-context-after-agent-context-${randomUUID()}`,
+            idempotencyKey: `ide-context-after-agent-context-${randomUUID()}`,
+            metadata: {
+              transcriptType: "ide_context",
+              contextKind: "ide_client_context",
+              sourceRole: "supporting_context"
+            }
+          },
+          {
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-transcript-v1",
+            sourceTransport: "hook",
+            externalTurnId: "turn-after-agent",
+            sourceRecordType: "event_msg",
+            sourceEventType: "user_message",
+            sourceSequence: 2,
+            rawJson: {
+              type: "event_msg",
+              payload: {
+                type: "user_message",
+                message: "Please review the selected file."
+              }
+            },
+            rawText: "Please review the selected file.",
+            sourceHash: `ide-context-after-agent-user-${randomUUID()}`,
+            idempotencyKey: `ide-context-after-agent-user-${randomUUID()}`,
+            metadata: { transcriptType: "user_message" }
+          }
+        ]
+      }
+    );
+
+    const projection = await repo.projectPendingConversationItems(
+      { userId: alice.id },
+      { limit: 10 }
+    );
+    const supportingLinks = await pool.query<{
+      event_content: string;
+      context_text: string | null;
+    }>(
+      `
+        select me.payload ->> 'content' as event_content, ci.raw_text as context_text
+        from memory_event_sources mes
+        join memory_events me on me.id = mes.memory_event_id
+        join conversation_items ci on ci.id = mes.conversation_item_id
+        where mes.source_role = 'supporting_context'
+      `
+    );
+
+    expect(projection.memoryEventsCreated).toBe(2);
+    expect(projection.rawItemsProjected).toBe(3);
+    expect(supportingLinks.rows).toEqual([
+      {
+        event_content: "Please review the selected file.",
+        context_text: `vscode application\nSelected file contains ${marker}`
+      }
+    ]);
+  });
+
+  it("keeps unlinked IDE supporting context pending for retry", async () => {
+    const alice = await repo.createUser({
+      email: `alice-ide-context-pending-${randomUUID()}@example.com`
+    });
+    const session = await repo.createCapturedSession(
+      { userId: alice.id },
+      {
+        externalSessionId: `ide-context-pending-${randomUUID()}`,
+        sourceRuntime: "codex",
+        idempotencyKey: `ide-context-pending-session-${randomUUID()}`
+      }
+    );
+    const sourceHash = `ide-context-pending-context-${randomUUID()}`;
+    await repo.createConversationItems(
+      { userId: alice.id },
+      {
+        items: [
+          {
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-transcript-v1",
+            sourceTransport: "hook",
+            externalTurnId: "turn-pending-context",
+            sourceRecordType: "event_msg",
+            sourceEventType: "user_message",
+            sourceSequence: 0,
+            rawJson: {
+              type: "event_msg",
+              payload: {
+                type: "user_message"
+              }
+            },
+            rawText: "vscode application\nSelected file without prompt",
+            sourceHash,
+            idempotencyKey: sourceHash,
+            metadata: {
+              transcriptType: "ide_context",
+              contextKind: "ide_client_context",
+              sourceRole: "supporting_context"
+            }
+          }
+        ]
+      }
+    );
+
+    const projection = await repo.projectPendingConversationItems(
+      { userId: alice.id },
+      { limit: 10 }
+    );
+    const statuses = await pool.query<{
+      projection_status: string;
+      projection_error: string | null;
+    }>(
+      `
+        select projection_status, projection_error
+        from conversation_items
+        where source_hash = $1
+      `,
+      [sourceHash]
+    );
+
+    expect(projection.rawItemsScanned).toBe(1);
+    expect(projection.rawItemsProjected).toBe(0);
+    expect(statuses.rows).toEqual([
+      { projection_status: "pending", projection_error: null }
     ]);
   });
 

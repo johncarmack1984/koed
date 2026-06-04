@@ -27,6 +27,67 @@ export interface TokenCountResult extends TokenEncodingResolution {
 
 export const DEFAULT_CODEX_TOKEN_MODEL = "gpt-5.4-mini";
 
+export interface CodexIdePromptParts {
+  ideContext: string;
+  userPrompt: string;
+}
+
+const CODEX_IDE_CONTEXT_HEADER = /^#{0,6}\s*Context from my IDE setup:\s*$/i;
+const CODEX_IDE_REQUEST_HEADER = /^#{0,6}\s*My request for Codex:\s*$/gim;
+const CODEX_IDE_CONTEXT_SECTION =
+  /^#{0,6}\s*(Active file|Open tabs|Selected text|Selected file):.*$/im;
+const CODEX_IDE_IMAGE_TAG = /<image\b[\s\S]*?<\/image>/gi;
+const CODEX_IDE_IMAGE_TAGS_ONLY = /^(?:\s*<image\b[\s\S]*?<\/image>\s*)+$/i;
+const CODEX_ENVIRONMENT_CONTEXT_ONLY =
+  /^(?:<environment_context\b[^>]*>[\s\S]*?<\/environment_context>\s*)+$/i;
+
+const codexIdeContextStart = (value: string): number | null => {
+  let offset = 0;
+  for (const line of value.split("\n")) {
+    if (CODEX_IDE_CONTEXT_HEADER.test(line)) {
+      const prefix = value.slice(0, offset).trim();
+      return !prefix || CODEX_ENVIRONMENT_CONTEXT_ONLY.test(prefix)
+        ? offset
+        : null;
+    }
+    offset += line.length + 1;
+  }
+  return null;
+};
+
+export const splitCodexIdePrompt = (
+  value: string
+): CodexIdePromptParts | null => {
+  const normalized = value.replace(/\r\n?/g, "\n").trim();
+  const contextStart = codexIdeContextStart(normalized);
+  if (contextStart === null) {
+    return null;
+  }
+  const prompt = normalized.slice(contextStart);
+
+  const requestHeader = [...prompt.matchAll(CODEX_IDE_REQUEST_HEADER)].at(-1);
+  if (!requestHeader || requestHeader.index === undefined) {
+    return null;
+  }
+
+  const headerStart = requestHeader.index;
+  const headerEnd = headerStart + requestHeader[0].length;
+  const ideContext = prompt.slice(0, headerStart).trim();
+  if (!CODEX_IDE_CONTEXT_SECTION.test(ideContext)) {
+    return null;
+  }
+  const rawUserPrompt = prompt.slice(headerEnd).trim();
+  const userPrompt = CODEX_IDE_IMAGE_TAGS_ONLY.test(rawUserPrompt)
+    ? rawUserPrompt.replace(CODEX_IDE_IMAGE_TAG, "").trim()
+    : rawUserPrompt;
+  return ideContext && (userPrompt || rawUserPrompt)
+    ? { ideContext, userPrompt }
+    : null;
+};
+
+export const codexIdePromptUserText = (value: string): string =>
+  splitCodexIdePrompt(value)?.userPrompt ?? value;
+
 const explicitCodexModelEncodings = new Map<string, TokenizerEncoding>([
   ["gpt-5.5", "o200k_base"],
   ["gpt-5.4", "o200k_base"],
@@ -436,6 +497,14 @@ export interface ExpandedMemoryNode {
   sources: MemoryEventRecord[];
 }
 
+export interface SupportingContextItem {
+  sourceId: string;
+  sourceRole: "supporting_context";
+  contextKind: "ide_client_context";
+  label: string;
+  text: string;
+}
+
 export interface LcmSourceItem {
   kind: "memory_event" | "message" | "tool_event" | "lcm_child";
   sourceTable?: "memory_events" | "messages" | "tool_events";
@@ -447,6 +516,7 @@ export interface LcmSourceItem {
   createdAt?: string;
   text?: string;
   payload?: unknown;
+  supportingContext?: SupportingContextItem[];
   position: number;
 }
 
