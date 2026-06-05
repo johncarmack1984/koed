@@ -1378,7 +1378,7 @@ const createFakeRepository = (): MemorySourceRepository => {
 
       const limitedThreads = [...threadMap.values()]
         .sort((left, right) => right.latestAt.localeCompare(left.latestAt))
-        .slice(0, input.limit ?? 100);
+        .slice(input.offset ?? 0, (input.offset ?? 0) + (input.limit ?? 100));
       const limitedThreadIds = new Set(
         limitedThreads.map((thread) => `${thread.projectId}:${thread.id}`)
       );
@@ -3127,6 +3127,11 @@ describe("account and access flows", () => {
       url: "/v1/memory/graph/threads?limit=1&includeInvalidated=false",
       headers: { cookie }
     });
+    const offsetIndex = await app.inject({
+      method: "GET",
+      url: "/v1/memory/graph/threads?limit=1&offset=1&includeInvalidated=false",
+      headers: { cookie }
+    });
     const firstEventPage = await app.inject({
       method: "GET",
       url: "/v1/memory/graph/events?threadId=thread-index-a&limit=1&includeInvalidated=false",
@@ -3197,6 +3202,11 @@ describe("account and access flows", () => {
         (project) => project.threads
       )
     ).toHaveLength(1);
+    expect(
+      jsonBody<GraphThreadIndexResponse>(offsetIndex).projects.flatMap(
+        (project) => project.threads
+      )
+    ).toMatchObject([{ id: "thread-index-a" }]);
     expect(jsonBody<GraphEventsResponse>(secondEventPage).events).toHaveLength(
       1
     );
@@ -3321,7 +3331,7 @@ describe("account and access flows", () => {
     });
     const session = jsonBody<SessionResponse>(sessionResponse).session;
     for (const content of [
-      "Can we add early generated titles for history browser chats?",
+      "Can we add early generated titles for Explorer chats?",
       "Can those generated titles avoid waiting for LCM summaries?",
       "Please make manual renames keep winning over generated names."
     ]) {
@@ -3348,7 +3358,7 @@ describe("account and access flows", () => {
       url: `/v1/memory/session-titles/${session.id}`,
       headers,
       payload: {
-        title: "History Browser Titles",
+        title: "Explorer Titles",
         titleModel: "codex-app-server:test",
         titlePromptVersion: "session-title-codex-json-v1"
       }
@@ -3366,7 +3376,7 @@ describe("account and access flows", () => {
     ).toEqual([expect.objectContaining({ id: session.id })]);
     expect(submitted.statusCode).toBe(200);
     expect(jsonBody<{ title: string }>(submitted).title).toBe(
-      "History Browser Titles"
+      "Explorer Titles"
     );
     expect(
       jsonBody<{ sessions: Array<{ id: string }> }>(pendingAfterSubmit).sessions
