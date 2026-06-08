@@ -1,0 +1,35 @@
+name: Vouch Manage by Issue
+
+on:
+  issue_comment:
+    types:
+      - created
+
+concurrency:
+  group: vouch-manage
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: read
+
+jobs:
+  manage:
+    name: Manage trust list from issue comment
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update trust list
+        uses: mitchellh/vouch/action/manage-by-issue@v1
+        with:
+          repo: ${{ github.repository }}
+          issue-id: ${{ github.event.issue.number }}
+          comment-id: ${{ github.event.comment.id }}
+          vouched-file: .github/VOUCHED.td
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

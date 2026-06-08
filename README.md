@@ -142,4 +142,5 @@ and [docs/license.md](docs/license.md).
 - [Backup and restore](docs/backup-restore.md)
 - [Upgrades](docs/upgrades.md)
 - [Codex integration](docs/codex-integration.md)
+- [Contributor trust](docs/vouch.md)
 - [License](docs/license.md)

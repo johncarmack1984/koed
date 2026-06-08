@@ -17,6 +17,8 @@ terms.
 
 Do not submit code that you do not have the right to contribute.
 
+Koed uses Vouch for contributor trust. If your GitHub user is not vouched yet, open an issue first and ask a maintainer to vouch for you through the issue workflow. See [docs/vouch.md](docs/vouch.md).
+
 ## Contribution Process
 
 - Open an issue before starting large changes.
@@ -24,6 +26,7 @@ Do not submit code that you do not have the right to contribute.
 - Include tests or validation notes for behavior changes.
 - Do not include secrets, private deployment details, customer data, or captured
   memory data in issues, pull requests, logs, or screenshots.
+- Follow Vouch guidance in [docs/vouch.md](docs/vouch.md) before opening a PR.
 
 Koed Labs may decline or defer contributions that do not have the required
 contributor agreement in place.
