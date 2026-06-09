@@ -600,6 +600,81 @@ describe("KOE-103 performance architecture", () => {
     }
   });
 
+  it("uses only questionIds from coalesced event stream payloads", async () => {
+    const pendingQuestion = makeQuestion("question-1", {
+      status: "pending"
+    });
+    const updatedQuestion = makeQuestion("question-1", {
+      answerMarkdown: "The related event update refreshed this question.",
+      answerPreview: "The related event update refreshed this question.",
+      status: "answered",
+      updatedAt: "2026-01-01T00:00:02.000Z"
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/v1/memory/questions?")) {
+        return jsonResponse({ questions: [pendingQuestion] });
+      }
+      if (url.includes("/v1/memory/questions/question-1")) {
+        return jsonResponse({ question: updatedQuestion });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    let latestState: ReturnType<typeof useKoedMemoryQuestions> | undefined;
+    const setToast = vi.fn<(toast: ToastState | null) => void>();
+
+    function Harness() {
+      const state = useKoedMemoryQuestions({
+        apiToken: "token",
+        setToast
+      });
+      useEffect(() => {
+        latestState = state;
+      }, [state]);
+      return null;
+    }
+
+    try {
+      await act(async () => {
+        root.render(createElement(Harness));
+      });
+      await waitFor(() => latestState?.questions[0]?.status === "pending");
+      fetchMock.mockClear();
+
+      await act(async () => {
+        latestState?.refreshQuestionFromStream({
+          coalesced: true,
+          id: "event-1",
+          operation: "UPDATE",
+          questionIds: ["question-1"],
+          table: "memory_events"
+        });
+      });
+      await waitFor(() => latestState?.questions[0]?.status === "answered");
+
+      const urls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(
+        urls.filter((url) => url.includes("/v1/memory/questions/question-1"))
+      ).toHaveLength(1);
+      expect(
+        urls.some((url) => url.includes("/v1/memory/questions/event-1"))
+      ).toBe(false);
+      expect(urls.some((url) => url.includes("/v1/memory/questions?"))).toBe(
+        false
+      );
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+
   it("falls back to shell refresh for coalesced question deletes", async () => {
     const questions = [
       makeQuestion("question-1", { status: "answered" }),

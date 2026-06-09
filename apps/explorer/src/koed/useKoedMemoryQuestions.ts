@@ -93,7 +93,11 @@ function questionIdsFromStreamPayload(payload: GraphUpdatePayload) {
       }
     }
   }
-  if (typeof payload.id === "string" && payload.id) {
+  if (
+    payload.table === "memory_questions" &&
+    typeof payload.id === "string" &&
+    payload.id
+  ) {
     ids.add(payload.id);
   }
   return [...ids];
