@@ -2175,6 +2175,41 @@ describeDb("memory repository visibility", () => {
     );
     expect(retryReclaimed[0]?.lastErrorMessage).toBeNull();
 
+    const finalCreated = await repo.createFinalMemoryQuestion(
+      { userId: alice.id },
+      {
+        origin: "mcp_memory_answer",
+        query: "What did the MCP memory answer return?",
+        searchDomain: "global",
+        status: "answered",
+        answerMarkdown: "MCP memory answer completed.",
+        response: { markdown: "MCP memory answer completed." },
+        evidence: [{ id: "mcp-source-1" }],
+        retrieval: { mode: "app_server_dynamic_tools" },
+        localMemoryWorker: { usedFallback: false }
+      }
+    );
+    const finalClaimed = await repo.claimPendingMemoryQuestions(
+      { userId: alice.id },
+      {
+        questionId: finalCreated.id,
+        origin: "mcp_memory_answer",
+        limit: 1,
+        leaseSeconds: 120
+      }
+    );
+
+    expect(finalCreated).toMatchObject({
+      origin: "mcp_memory_answer",
+      status: "answered",
+      answerMarkdown: "MCP memory answer completed.",
+      processingStartedAt: null,
+      processingLeaseUntil: null,
+      evidenceCount: 1
+    });
+    expect(finalCreated.answeredAt).toBeTruthy();
+    expect(finalClaimed).toEqual([]);
+
     const updated = await repo.updateMemoryQuestion(
       { userId: alice.id },
       created.id,

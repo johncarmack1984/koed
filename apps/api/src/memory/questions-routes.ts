@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { ApiRouteContext } from "../server/context.js";
 import {
   claimMemoryQuestionsSchema,
+  finalMemoryQuestionSchema,
   memoryQuestionParamsSchema,
   memoryQuestionSchema,
   memoryQuestionsQuerySchema,
@@ -88,6 +89,59 @@ export const registerQuestionRoutes = (
         }
       );
       return { questions };
+    }
+  );
+
+  app.post(
+    "/v1/memory/questions/final",
+    { preHandler: memoryWriteRateLimit },
+    async (request) => {
+      const repo = requireRepository();
+      const user = await authenticate(request);
+      const input = finalMemoryQuestionSchema.parse(request.body);
+      const question = await repo.createFinalMemoryQuestion(
+        { userId: user.id },
+        input.status === "answered"
+          ? {
+              status: input.status,
+              query: input.query,
+              origin: input.origin,
+              retrievalScope: input.retrieval_scope,
+              searchDomain: input.search_domain,
+              workspaceId: input.workspace_id,
+              projectName: input.project_name,
+              projectPath: input.project_path,
+              sessionId: input.session_id,
+              threadId: input.thread_id,
+              threadName: input.thread_name,
+              attemptCount: input.attempt_count,
+              answerMarkdown: input.answer_markdown,
+              response: input.response,
+              evidence: input.evidence,
+              citations: input.citations,
+              retrieval: input.retrieval,
+              localMemoryWorker: input.local_memory_worker
+            }
+          : {
+              status: input.status,
+              query: input.query,
+              origin: input.origin,
+              retrievalScope: input.retrieval_scope,
+              searchDomain: input.search_domain,
+              workspaceId: input.workspace_id,
+              projectName: input.project_name,
+              projectPath: input.project_path,
+              sessionId: input.session_id,
+              threadId: input.thread_id,
+              threadName: input.thread_name,
+              attemptCount: input.attempt_count,
+              errorMessage: input.error_message,
+              response: input.response,
+              retrieval: input.retrieval,
+              localMemoryWorker: input.local_memory_worker
+            }
+      );
+      return { question };
     }
   );
 

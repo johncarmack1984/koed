@@ -29,6 +29,14 @@ import {
   persistRawConversationItems,
   projectRawConversationItems
 } from "./raw-conversation-items.js";
+import {
+  answerMarkdownFromAnswer,
+  citationsFromAnswer,
+  evidenceFromAnswer,
+  persistedAnswerResponse,
+  retrievalFromAnswer,
+  stripAppServerEvents
+} from "./memory-question-answer-persistence.js";
 import { answerBridgeLogger } from "./logger.js";
 
 export const host = process.env.MEMORY_ANSWER_BRIDGE_HOST ?? "0.0.0.0";
@@ -494,55 +502,8 @@ const updateQuestionWithError = async (
       : {})
   });
 
-const evidenceFromAnswer = (answer: MemoryAnswerWorkerResponse) =>
-  answer.evidenceBundle?.evidence ?? answer.evidence;
-
-const citationsFromAnswer = (answer: MemoryAnswerWorkerResponse) =>
-  answer.citations;
-
 const itemCount = (value: unknown): number =>
   Array.isArray(value) ? value.length : 0;
-
-const retrievalFromAnswer = (answer: MemoryAnswerWorkerResponse) =>
-  answer.evidenceBundle?.retrieval ?? answer.retrieval;
-
-const stripAppServerEvents = <T>(value: T): T => {
-  if (!value || typeof value !== "object") {
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return value.map(stripAppServerEvents) as T;
-  }
-  const { appServerEvents, rawEvents, ...rest } = value as Record<
-    string,
-    unknown
-  >;
-  void appServerEvents;
-  void rawEvents;
-  return Object.fromEntries(
-    Object.entries(rest).map(([key, entry]) => [
-      key,
-      stripAppServerEvents(entry)
-    ])
-  ) as T;
-};
-
-const persistedAnswerResponse = (
-  answer: MemoryAnswerWorkerResponse
-): MemoryAnswerWorkerResponse => {
-  const compact: Record<string, unknown> = {
-    markdown: answer.markdown,
-    retrieval: answer.retrieval,
-    localMemoryWorker: stripAppServerEvents(answer.localMemoryWorker)
-  };
-  if (answer.structuredAnswer !== undefined) {
-    compact.structuredAnswer = answer.structuredAnswer;
-  }
-  if (answer.citations !== undefined) {
-    compact.citations = answer.citations;
-  }
-  return compact as MemoryAnswerWorkerResponse;
-};
 
 const isRetryableSynthesisFallback = (answer: MemoryAnswerWorkerResponse) =>
   answer.localMemoryWorker.usedFallback === true &&
@@ -804,8 +765,7 @@ const updateQuestionWithAnswer = async (
   client.updateQuestion(question.id, {
     status: "answered",
     ...(question.attemptCount ? { attempt_count: question.attemptCount } : {}),
-    answer_markdown:
-      answer.markdown?.trim() || "No matching memory evidence found.",
+    answer_markdown: answerMarkdownFromAnswer(answer),
     response: persistedAnswerResponse(answer),
     evidence: evidenceFromAnswer(answer),
     citations: citationsFromAnswer(answer),

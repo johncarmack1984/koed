@@ -286,6 +286,12 @@ export class MemoryApiClient {
     return this.request("POST", "/v1/memory/questions", input);
   }
 
+  async createFinalQuestion(
+    input: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    return this.request("POST", "/v1/memory/questions/final", input);
+  }
+
   async getQuestion(questionId: string): Promise<Record<string, unknown>> {
     return this.request(
       "GET",

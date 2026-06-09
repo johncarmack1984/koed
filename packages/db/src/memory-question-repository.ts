@@ -28,6 +28,36 @@ export interface MemoryQuestionRepository {
       localMemoryWorkerConfig?: Record<string, unknown>;
     }
   ): Promise<MemoryQuestionDetailRecord>;
+  createFinalMemoryQuestion(
+    actor: ActorContext,
+    input: {
+      query: string;
+      origin?: MemoryQuestionOrigin;
+      retrievalScope?: MemoryQuestionRetrievalScope;
+      searchDomain: MemoryQuestionSearchDomain;
+      workspaceId?: string;
+      projectName?: string;
+      projectPath?: string;
+      sessionId?: string;
+      threadId?: string;
+      threadName?: string;
+      attemptCount?: number;
+      response?: Record<string, unknown>;
+      retrieval?: Record<string, unknown>;
+      localMemoryWorker?: Record<string, unknown>;
+    } & (
+      | {
+          status: "answered";
+          answerMarkdown: string;
+          evidence?: unknown[];
+          citations?: unknown[];
+        }
+      | {
+          status: "error";
+          errorMessage: string;
+        }
+    )
+  ): Promise<MemoryQuestionDetailRecord>;
   listMemoryQuestions(
     actor: ActorContext,
     input?: {
@@ -219,6 +249,83 @@ export const createMemoryQuestionRepository = (
         input.localMemoryWorkerConfig
           ? JSON.stringify(input.localMemoryWorkerConfig)
           : null
+      ]
+    );
+
+    return mapMemoryQuestionDetail(result.rows[0]!);
+  },
+
+  async createFinalMemoryQuestion(actor, input) {
+    const result = await pool.query<MemoryQuestionDetailRow>(
+      `
+        insert into memory_questions (
+          owner_user_id,
+          visibility,
+          origin,
+          retrieval_scope,
+          search_domain,
+          workspace_id,
+          project_name,
+          project_path,
+          session_id,
+          thread_id,
+          thread_name,
+          query,
+          status,
+          answer_markdown,
+          error_message,
+          response,
+          evidence,
+          citations,
+          retrieval,
+          local_memory_worker,
+          answered_at,
+          attempt_count,
+          last_error_message
+        )
+        values (
+          $1, 'personal', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+          $12::memory_question_status, $13, $14, $15::jsonb, $16::jsonb,
+          $17::jsonb, $18::jsonb, $19::jsonb, now(), $20, $21
+        )
+        returning
+          id, owner_user_id, visibility, origin, retrieval_scope, search_domain,
+          workspace_id, project_name, project_path, session_id, thread_id,
+          thread_name, query, answer_markdown, error_message, evidence,
+          citations, retrieval, local_memory_worker, local_memory_worker_config,
+          response, status, created_at, updated_at, answered_at,
+          processing_started_at, processing_lease_until, attempt_count,
+          last_error_message,
+          jsonb_array_length(coalesce(evidence, '[]'::jsonb)) as evidence_count
+      `,
+      [
+        actor.userId,
+        input.origin ?? "explorer",
+        input.retrievalScope ?? "personal",
+        input.searchDomain,
+        input.workspaceId ?? null,
+        input.projectName ?? null,
+        input.projectPath ?? null,
+        input.sessionId ?? null,
+        input.threadId ?? null,
+        input.threadName ?? null,
+        input.query,
+        input.status,
+        input.status === "answered" ? input.answerMarkdown : null,
+        input.status === "error" ? input.errorMessage : null,
+        input.response ? JSON.stringify(input.response) : null,
+        input.status === "answered" && input.evidence
+          ? JSON.stringify(input.evidence)
+          : null,
+        input.status === "answered" && input.citations
+          ? JSON.stringify(input.citations)
+          : null,
+        input.retrieval ? JSON.stringify(input.retrieval) : null,
+        input.localMemoryWorker
+          ? JSON.stringify(input.localMemoryWorker)
+          : null,
+        input.attemptCount ?? 1,
+        input.status === "error" ? input.errorMessage : null
       ]
     );
 

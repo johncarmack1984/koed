@@ -45,6 +45,53 @@ export const memoryQuestionSchema = z
     }
   });
 
+const finalMemoryQuestionBaseSchema = z.object({
+  query: z.string().min(1),
+  origin: z.literal("mcp_memory_answer"),
+  retrieval_scope: memoryQuestionRetrievalScopeSchema.default("personal"),
+  search_domain: searchDomainSchema.default("global"),
+  workspace_id: z.string().min(1).optional(),
+  project_name: z.string().min(1).optional(),
+  project_path: z.string().min(1).optional(),
+  session_id: z.string().uuid().optional(),
+  thread_id: z.string().min(1).optional(),
+  thread_name: z.string().min(1).optional(),
+  attempt_count: z.number().int().positive().optional(),
+  response: z.record(z.string(), z.unknown()).optional(),
+  retrieval: z.record(z.string(), z.unknown()).optional(),
+  local_memory_worker: z.record(z.string(), z.unknown()).optional()
+});
+
+export const finalMemoryQuestionSchema = z
+  .discriminatedUnion("status", [
+    finalMemoryQuestionBaseSchema.extend({
+      status: z.literal("answered"),
+      answer_markdown: z.string().min(1),
+      evidence: z.array(z.unknown()).optional(),
+      citations: z.array(z.unknown()).optional()
+    }),
+    finalMemoryQuestionBaseSchema.extend({
+      status: z.literal("error"),
+      error_message: z.string().min(1)
+    })
+  ])
+  .superRefine((input, context) => {
+    if (input.search_domain === "session" && !input.session_id) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["session_id"],
+        message: "session_id is required when search_domain is session"
+      });
+    }
+    if (input.search_domain === "project" && !input.workspace_id) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["workspace_id"],
+        message: "workspace_id is required when search_domain is project"
+      });
+    }
+  });
+
 export const memoryQuestionsQuerySchema = z.object({
   query: z.string().min(1).optional(),
   search_domain: searchDomainSchema.optional(),
