@@ -8,6 +8,7 @@ import type {
 } from "@koed/core";
 import type {
   ActorContext,
+  AuditEventRecord,
   ApiTokenRecord,
   CapturedSessionRecord,
   CreateMemoryNodeInput,
@@ -70,7 +71,13 @@ const jsonBody = <T>(response: { body: string }): T =>
 
 type TokenResponse = {
   token: string;
-  apiToken: { tokenPrefix: string };
+  apiToken: {
+    id: string;
+    ownerUserId: string;
+    name: string;
+    tokenPrefix: string;
+    scopes: string[];
+  };
 };
 
 type AccessResponse = {
@@ -169,6 +176,7 @@ const createFakeRepository = (): MemorySourceRepository => {
     updatedAt: string;
   }> = [];
   const capturedSessions = new Map<string, CapturedSessionRecord>();
+  const auditEvents: AuditEventRecord[] = [];
   const events: MemoryEventRecord[] = [];
   const eventIdempotencyKeys = new Map<string, string>();
   const eventSourceHashes = new Map<string, string>();
@@ -232,6 +240,24 @@ const createFakeRepository = (): MemorySourceRepository => {
         tokenHash: input.tokenHash
       };
       tokens.set(input.tokenHash, record);
+      if (input.audit) {
+        auditEvents.push({
+          id: randomUUID(),
+          actorUserId: input.audit.actorUserId ?? null,
+          ownerUserId: input.ownerUserId,
+          visibility: "personal",
+          action: "api_token.created",
+          targetTable: "api_tokens",
+          targetId: record.id,
+          metadata: {
+            actorType: input.audit.actorType,
+            name: record.name,
+            tokenPrefix: record.tokenPrefix,
+            scopes: record.scopes
+          },
+          createdAt: new Date().toISOString()
+        });
+      }
       return record;
     },
     async listApiTokens(userId: string) {
@@ -239,20 +265,58 @@ const createFakeRepository = (): MemorySourceRepository => {
         (token) => token.ownerUserId === userId && !token.revokedAt
       );
     },
-    async revokeApiToken(userId: string, tokenId: string) {
+    async revokeApiToken(userId: string, tokenId: string, audit) {
       const token = [...tokens.values()].find(
         (candidate) =>
           candidate.id === tokenId && candidate.ownerUserId === userId
       );
-      if (!token) {
+      if (!token || token.revokedAt) {
         return false;
       }
       token.revokedAt = new Date().toISOString();
+      if (audit) {
+        auditEvents.push({
+          id: randomUUID(),
+          actorUserId: audit.actorUserId ?? null,
+          ownerUserId: userId,
+          visibility: "personal",
+          action: "api_token.revoked",
+          targetTable: "api_tokens",
+          targetId: tokenId,
+          metadata: { actorType: audit.actorType },
+          createdAt: new Date().toISOString()
+        });
+      }
       return true;
     },
     async getApiTokenUser(tokenHash: string) {
       const token = tokens.get(tokenHash);
       return token ? (users.get(token.ownerUserId) ?? null) : null;
+    },
+    async recordAuditEvent(input) {
+      const record: AuditEventRecord = {
+        id: randomUUID(),
+        actorUserId: input.actorUserId ?? null,
+        ownerUserId: input.ownerUserId ?? null,
+        visibility: input.visibility ?? null,
+        action: input.action,
+        targetTable: input.targetTable ?? null,
+        targetId: input.targetId ?? null,
+        metadata: input.metadata ?? {},
+        createdAt: new Date().toISOString()
+      };
+      auditEvents.push(record);
+      return record;
+    },
+    async listAuditEvents(actor, input = {}) {
+      const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+      return auditEvents
+        .filter(
+          (event) =>
+            event.ownerUserId === actor.userId &&
+            (!input.action || event.action === input.action)
+        )
+        .slice(0, limit);
     },
     async createCapturedSession(actor: ActorContext, input) {
       const id = randomUUID();
@@ -1716,7 +1780,7 @@ describe("api health", () => {
       canReceiveGraphStreamPayload(
         { userId: outsiderId },
         {
-          table: "schema_migrations"
+          table: "drizzle.__drizzle_migrations"
         }
       )
     ).toBe(true);
@@ -2053,6 +2117,68 @@ describe("account and access flows", () => {
     );
     expect(authed.statusCode).toBe(200);
     expect(jsonBody<AccessResponse>(authed).ok).toBe(true);
+  });
+
+  it("audits API token lifecycle routes", async () => {
+    const repository = createFakeRepository();
+    const app = await buildServer({ repository });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "token-audit@example.com", password: "password123" }
+    });
+    const cookie = cookieHeader(registered);
+    const created = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie },
+      payload: { name: "Client Integration" }
+    });
+    const apiToken = jsonBody<TokenResponse>(created).apiToken;
+    const revoked = await app.inject({
+      method: "DELETE",
+      url: `/api-tokens/${apiToken.id}`,
+      headers: { cookie }
+    });
+    const notFound = await app.inject({
+      method: "DELETE",
+      url: `/api-tokens/${apiToken.id}`,
+      headers: { cookie }
+    });
+    const auditEvents = await repository.listAuditEvents({
+      userId: apiToken.ownerUserId
+    });
+    await app.close();
+
+    expect(created.statusCode).toBe(200);
+    expect(revoked.statusCode).toBe(200);
+    expect(notFound.statusCode).toBe(404);
+    expect(auditEvents.map((event) => event.action)).toEqual([
+      "api_token.created",
+      "api_token.revoked"
+    ]);
+    expect(auditEvents[0]).toMatchObject({
+      actorUserId: apiToken.ownerUserId,
+      ownerUserId: apiToken.ownerUserId,
+      visibility: "personal",
+      targetTable: "api_tokens",
+      targetId: apiToken.id,
+      metadata: {
+        actorType: "user",
+        name: "Client Integration",
+        tokenPrefix: apiToken.tokenPrefix,
+        scopes: []
+      }
+    });
+    expect(auditEvents[0]?.metadata).not.toHaveProperty("tokenHash");
+    expect(auditEvents[1]).toMatchObject({
+      actorUserId: apiToken.ownerUserId,
+      ownerUserId: apiToken.ownerUserId,
+      visibility: "personal",
+      action: "api_token.revoked",
+      targetId: apiToken.id,
+      metadata: { actorType: "user" }
+    });
   });
 
   it("rejects cross-origin browser-session writes without blocking bearer API tokens", async () => {

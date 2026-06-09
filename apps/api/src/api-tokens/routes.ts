@@ -24,7 +24,11 @@ export const registerApiTokenRoutes = (
       name: input.name,
       tokenHash: hashSecret(token),
       tokenPrefix: token.slice(0, 12),
-      scopes: []
+      scopes: [],
+      audit: {
+        actorUserId: user.id,
+        actorType: "user"
+      }
     });
 
     return { token, apiToken: record };
@@ -41,7 +45,10 @@ export const registerApiTokenRoutes = (
     const repo = requireRepository();
     const user = await authenticateSession(request);
     const params = z.object({ id: z.string().uuid() }).parse(request.params);
-    const deleted = await repo.revokeApiToken(user.id, params.id);
+    const deleted = await repo.revokeApiToken(user.id, params.id, {
+      actorUserId: user.id,
+      actorType: "user"
+    });
 
     return reply.status(deleted ? 200 : 404).send({ ok: deleted });
   });

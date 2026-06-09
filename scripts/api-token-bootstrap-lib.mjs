@@ -311,7 +311,11 @@ export const createApiTokenBootstrap = async ({
     name: args.name,
     tokenHash: hashApiToken(environment.API_TOKEN_PEPPER, token),
     tokenPrefix: token.slice(0, 12),
-    scopes: []
+    scopes: [],
+    audit: {
+      actorUserId: null,
+      actorType: "local_operator_script"
+    }
   });
 
   return {
@@ -362,7 +366,10 @@ export const revokeApiTokenBootstrap = async ({ repo, environment, argv }) => {
     throw new UsageError(`Owner user not found: ${args.ownerEmail}`);
   }
 
-  const revoked = await repo.revokeApiToken(owner.id, args.tokenId);
+  const revoked = await repo.revokeApiToken(owner.id, args.tokenId, {
+    actorUserId: null,
+    actorType: "local_operator_script"
+  });
   if (!revoked) {
     throw new UsageError(
       `API token not found or already revoked: ${args.tokenId}`
