@@ -1217,6 +1217,7 @@ function MemoryQuestionMenu({
             <span className="min-w-0">
               <span className="block truncate text-sm">{question.query}</span>
               <span className="block truncate text-muted-foreground text-xs">
+                {memoryQuestionOriginLabel(question)} -{" "}
                 {formatDate(question.createdAt)} - {question.retrievalScope}
               </span>
               <span className="block truncate text-muted-foreground/75 text-xs">
@@ -1242,6 +1243,12 @@ function MemoryQuestionStatusIcon({
     return <CircleAlertIcon className="mt-0.5 size-4 text-destructive" />;
   }
   return <SparklesIcon className="mt-0.5 size-4 text-primary" />;
+}
+
+function memoryQuestionOriginLabel(question: MemoryQuestionRecord) {
+  return question.origin === "mcp_memory_answer"
+    ? "MCP memory answer"
+    : "Explorer ask";
 }
 
 const memoryQuestionPendingPhrases = [
@@ -1315,7 +1322,9 @@ export function MemoryQuestionDetail({
       </div>
       <div className="min-w-0">
         <div className="mb-1.5 flex flex-wrap items-center gap-2 text-muted-foreground text-xs">
-          <span className="font-medium text-foreground">memory question</span>
+          <span className="font-medium text-foreground">
+            {memoryQuestionOriginLabel(question)}
+          </span>
           <span>{question.searchDomain}</span>
           <span>{question.retrievalScope}</span>
           <span>{formatDate(question.createdAt)}</span>

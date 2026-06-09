@@ -4,6 +4,7 @@ export type RetrievalScope = "personal";
 export type SearchDomain = "session" | "project" | "global";
 export type SidebarMode = "chats" | "questions";
 export type MemoryQuestionStatus = "pending" | "answered" | "error";
+export type MemoryQuestionOrigin = "explorer" | "mcp_memory_answer";
 export type ThemePreference = "system" | "light" | "dark";
 export type AiClient = "codex";
 
@@ -241,6 +242,7 @@ export interface MemoryQuestionRecord {
   id: string;
   ownerUserId?: string;
   visibility?: Visibility;
+  origin?: MemoryQuestionOrigin;
   query: string;
   searchDomain: SearchDomain;
   retrievalScope: RetrievalScope;

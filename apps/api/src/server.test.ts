@@ -570,6 +570,7 @@ const createFakeRepository = (): MemorySourceRepository => {
         id: randomUUID(),
         ownerUserId: actor.userId,
         visibility: "personal",
+        origin: input.origin ?? "explorer",
         retrievalScope: input.retrievalScope ?? "personal",
         searchDomain: input.searchDomain,
         workspaceId: input.workspaceId ?? null,
@@ -3919,6 +3920,7 @@ describe("account and access flows", () => {
       headers,
       payload: {
         query: "What did we decide about rate limits?",
+        origin: "mcp_memory_answer",
         search_domain: "project",
         workspace_id: "project-1",
         project_name: "Koed",
@@ -3983,6 +3985,9 @@ describe("account and access flows", () => {
     expect(jsonBody<MemoryQuestionResponse>(created).question.status).toBe(
       "pending"
     );
+    expect(jsonBody<MemoryQuestionResponse>(created).question.origin).toBe(
+      "mcp_memory_answer"
+    );
     expect(
       jsonBody<MemoryQuestionResponse>(created).question.retrievalScope
     ).toBe("personal");
@@ -4015,6 +4020,7 @@ describe("account and access flows", () => {
     expect(jsonBody<MemoryQuestionsResponse>(listed).questions).toHaveLength(1);
     expect(jsonBody<MemoryQuestionResponse>(detail).question).toMatchObject({
       id: questionId,
+      origin: "mcp_memory_answer",
       answerMarkdown: "Use the documented read and write limits.",
       evidenceCount: 1,
       localMemoryWorkerConfig: {

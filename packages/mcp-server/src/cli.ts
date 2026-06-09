@@ -6,6 +6,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import {
   answerWithMemoryWorker,
+  compactMemoryAnswerPayload,
+  type MemoryAnswerResponseDetail,
+  type MemoryAnswerWorkerResponse,
   resolveMemoryAnswerWorkerConfig
 } from "./answer-worker.js";
 import { startAnswerBridgeWithRetry } from "./answer-bridge-lifecycle.js";
@@ -110,6 +113,108 @@ const jsonResponse = (payload: unknown) => ({
     }
   ]
 });
+
+type McpMemoryQuestion = {
+  id: string;
+  attemptCount?: number | null;
+};
+
+const questionFromResponse = (response: Record<string, unknown>) => {
+  const question = response.question;
+  if (
+    question &&
+    typeof question === "object" &&
+    typeof (question as { id?: unknown }).id === "string"
+  ) {
+    return question as McpMemoryQuestion;
+  }
+  throw new Error("Memory question response did not include question detail");
+};
+
+const questionsFromClaimResponse = (
+  response: Record<string, unknown>
+): McpMemoryQuestion[] => {
+  const questions = response.questions;
+  if (!Array.isArray(questions)) {
+    throw new Error("Memory question claim response did not include questions");
+  }
+  return questions.filter(
+    (question): question is McpMemoryQuestion =>
+      Boolean(question) &&
+      typeof question === "object" &&
+      typeof (question as { id?: unknown }).id === "string"
+  );
+};
+
+const evidenceFromAnswer = (answer: MemoryAnswerWorkerResponse) =>
+  answer.evidenceBundle?.evidence ?? answer.evidence;
+
+const citationsFromAnswer = (answer: MemoryAnswerWorkerResponse) =>
+  answer.citations;
+
+const retrievalFromAnswer = (answer: MemoryAnswerWorkerResponse) =>
+  answer.evidenceBundle?.retrieval ?? answer.retrieval;
+
+const stripAppServerEvents = <T>(value: T): T => {
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(stripAppServerEvents) as T;
+  }
+  const { appServerEvents, rawEvents, ...rest } = value as Record<
+    string,
+    unknown
+  >;
+  void appServerEvents;
+  void rawEvents;
+  return Object.fromEntries(
+    Object.entries(rest).map(([key, entry]) => [
+      key,
+      stripAppServerEvents(entry)
+    ])
+  ) as T;
+};
+
+const persistedAnswerResponse = (answer: MemoryAnswerWorkerResponse) =>
+  stripAppServerEvents({
+    ...answer,
+    localMemoryWorker: answer.localMemoryWorker
+  });
+
+const updateMcpMemoryQuestionWithAnswer = async (
+  question: McpMemoryQuestion,
+  answer: MemoryAnswerWorkerResponse
+) =>
+  client.updateQuestion(question.id, {
+    status: "answered",
+    ...(question.attemptCount ? { attempt_count: question.attemptCount } : {}),
+    answer_markdown:
+      answer.markdown?.trim() || "No matching memory evidence found.",
+    response: persistedAnswerResponse(answer),
+    evidence: evidenceFromAnswer(answer),
+    citations: citationsFromAnswer(answer),
+    retrieval: retrievalFromAnswer(answer),
+    local_memory_worker: stripAppServerEvents(answer.localMemoryWorker)
+  });
+
+const updateMcpMemoryQuestionWithError = async (
+  question: McpMemoryQuestion,
+  message: string,
+  answer?: MemoryAnswerWorkerResponse
+) =>
+  client.updateQuestion(question.id, {
+    status: "error",
+    error_message: message,
+    ...(question.attemptCount ? { attempt_count: question.attemptCount } : {}),
+    ...(answer
+      ? {
+          response: persistedAnswerResponse(answer),
+          retrieval: retrievalFromAnswer(answer),
+          local_memory_worker: stripAppServerEvents(answer.localMemoryWorker)
+        }
+      : {})
+  });
 
 const searchDomainSchema = z.enum(["global", "project", "session"]);
 const memoryAnswerResponseDetailSchema = z.enum([
@@ -333,12 +438,12 @@ server.registerTool(
     }
   },
   async (input) => {
+    const requestedResponseDetail: MemoryAnswerResponseDetail =
+      input.include_evidence ? "with_evidence" : input.response_detail;
     logger.info(
       {
         searchDomain: input.search_domain,
-        responseDetail: input.include_evidence
-          ? "with_evidence"
-          : input.response_detail,
+        responseDetail: requestedResponseDetail,
         hasWorkspaceId: Boolean(input.workspace_id),
         hasSessionId: Boolean(input.session_id),
         hasRecentDays: input.recent_days !== undefined,
@@ -350,6 +455,8 @@ server.registerTool(
       "memory_answer tool call started"
     );
     const { include_evidence, response_detail, ...answerInput } = input;
+    void include_evidence;
+    void response_detail;
     const retrieval_scope = defaultAnswerScope(await client.accessCheck());
     const localAgentSettings = await client
       .listLocalMemoryAgentSettings()
@@ -365,6 +472,26 @@ server.registerTool(
       input.search_domain === "project"
         ? normalizeToolWorkspaceId(input.workspace_id)
         : input.workspace_id;
+    const createdQuestion = questionFromResponse(
+      await client.createQuestion({
+        query: answerInput.query,
+        origin: "mcp_memory_answer",
+        retrieval_scope,
+        search_domain: input.search_domain,
+        workspace_id,
+        session_id: input.session_id
+      })
+    );
+    const claimedQuestion = questionsFromClaimResponse(
+      await client.claimPendingQuestions({
+        question_id: createdQuestion.id,
+        limit: 1,
+        lease_seconds: 300
+      })
+    )[0];
+    if (!claimedQuestion) {
+      throw new Error("Could not claim persisted MCP memory answer question");
+    }
     const evidence = {
       markdown: "",
       evidenceBundle: {
@@ -386,11 +513,23 @@ server.registerTool(
       sourceAfter: input.source_after,
       sourceBefore: input.source_before,
       limit: input.limit,
-      responseDetail: include_evidence ? "with_evidence" : response_detail
+      responseDetail: "with_evidence"
     });
+    if (answer.localMemoryWorker.usedFallback) {
+      await updateMcpMemoryQuestionWithError(
+        claimedQuestion,
+        answer.localMemoryWorker.errorMessage ??
+          answer.localMemoryWorker.skippedReason ??
+          "Memory answer worker failed.",
+        answer
+      );
+    } else {
+      await updateMcpMemoryQuestionWithAnswer(claimedQuestion, answer);
+    }
     logger.info(
       {
         jobId: answer.localMemoryWorker.jobId,
+        questionId: claimedQuestion.id,
         memoryStatus: answer.localMemoryWorker.memoryStatus,
         usedFallback: answer.localMemoryWorker.usedFallback,
         skippedReason: answer.localMemoryWorker.skippedReason,
@@ -420,6 +559,7 @@ server.registerTool(
           await client.recordTokenUsage({
             workflowType: "mcp_memory_answer",
             workflowId: answer.localMemoryWorker.jobId,
+            questionId: claimedQuestion.id,
             answerJobId: answer.localMemoryWorker.jobId,
             sessionId: input.session_id,
             sourceRuntime: "codex",
@@ -442,6 +582,7 @@ server.registerTool(
               appServerThreadId:
                 execution.primaryThreadId ?? execution.threadId,
               appServerTurnId: execution.turnId,
+              questionId: claimedQuestion.id,
               answerJobId: answer.localMemoryWorker.jobId,
               primaryAppServerThreadId: execution.primaryThreadId,
               executionThreadId: execution.threadId,
@@ -467,7 +608,9 @@ server.registerTool(
         "koed memory_answer token telemetry skipped"
       );
     }
-    return jsonResponse(answer);
+    return jsonResponse(
+      compactMemoryAnswerPayload(answer, requestedResponseDetail)
+    );
   }
 );
 

@@ -1037,6 +1037,7 @@ export const memoryQuestions = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     visibility: visibilityScope("visibility").notNull().default("personal"),
+    origin: text("origin").notNull().default("explorer"),
     retrievalScope: text("retrieval_scope").notNull().default("personal"),
     searchDomain: memorySearchDomain("search_domain").notNull(),
     workspaceId: text("workspace_id"),
@@ -1098,6 +1099,10 @@ export const memoryQuestions = pgTable(
     check(
       "memory_questions_personal_owner_check",
       sql`${table.visibility} = 'personal' and ${table.ownerUserId} is not null`
+    ),
+    check(
+      "memory_questions_origin_check",
+      sql`${table.origin} in ('explorer', 'mcp_memory_answer')`
     ),
     check(
       "memory_questions_retrieval_scope_check",

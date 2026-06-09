@@ -460,6 +460,86 @@ describe("KOE-103 performance architecture", () => {
     }
   });
 
+  it("retries a streamed pending question detail until the answer is visible", async () => {
+    const pendingQuestion = makeQuestion("question-1", {
+      createdAt: "2026-01-01T00:00:00.000Z",
+      status: "pending",
+      updatedAt: "2026-01-01T00:00:01.000Z"
+    });
+    const claimedQuestion = makeQuestion("question-1", {
+      createdAt: "2026-01-01T00:00:00.000Z",
+      status: "pending",
+      updatedAt: "2026-01-01T00:00:02.000Z"
+    });
+    const answeredQuestion = makeQuestion("question-1", {
+      answerMarkdown: "The MCP answer is ready.",
+      answerPreview: "The MCP answer is ready.",
+      status: "answered",
+      updatedAt: "2026-01-01T00:00:03.000Z"
+    });
+    let detailLoads = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/v1/memory/questions?")) {
+        return jsonResponse({ questions: [pendingQuestion] });
+      }
+      if (url.includes("/v1/memory/questions/question-1")) {
+        detailLoads += 1;
+        return jsonResponse({
+          question: detailLoads === 1 ? claimedQuestion : answeredQuestion
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    let latestState: ReturnType<typeof useKoedMemoryQuestions> | undefined;
+    const setToast = vi.fn<(toast: ToastState | null) => void>();
+
+    function Harness() {
+      const state = useKoedMemoryQuestions({
+        apiToken: "token",
+        setToast
+      });
+      useEffect(() => {
+        latestState = state;
+      }, [state]);
+      return null;
+    }
+
+    try {
+      await act(async () => {
+        root.render(createElement(Harness));
+      });
+      await waitFor(() => latestState?.questions[0]?.status === "pending");
+      fetchMock.mockClear();
+
+      await act(async () => {
+        latestState?.refreshQuestionFromStream({
+          id: "question-1",
+          operation: "UPDATE",
+          table: "memory_questions"
+        });
+      });
+      await waitFor(() => latestState?.questions[0]?.status === "answered");
+
+      expect(detailLoads).toBe(2);
+      expect(
+        fetchMock.mock.calls.some(([input]) =>
+          String(input).includes("/v1/memory/questions?")
+        )
+      ).toBe(false);
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+
   it("falls back to shell refresh for coalesced question deletes", async () => {
     const questions = [
       makeQuestion("question-1", { status: "answered" }),

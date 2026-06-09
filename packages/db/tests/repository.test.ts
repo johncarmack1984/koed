@@ -2059,6 +2059,7 @@ describeDb("memory repository visibility", () => {
     );
 
     expect(created.status).toBe("pending");
+    expect(created.origin).toBe("explorer");
     expect(created.answerMarkdown).toBeNull();
     expect(created.processingLeaseUntil).toBeNull();
 
@@ -2113,6 +2114,7 @@ describeDb("memory repository visibility", () => {
     const retryCreated = await repo.createMemoryQuestion(
       { userId: alice.id },
       {
+        origin: "mcp_memory_answer",
         query: "Can a failed local answer retry later?",
         searchDomain: "global"
       }
@@ -2143,6 +2145,7 @@ describeDb("memory repository visibility", () => {
 
     expect(retryReleased).toMatchObject({
       id: retryCreated.id,
+      origin: "mcp_memory_answer",
       status: "pending",
       answerMarkdown: null,
       errorMessage: null,
@@ -2193,6 +2196,7 @@ describeDb("memory repository visibility", () => {
     });
     expect(detail).toMatchObject({
       id: created.id,
+      origin: "explorer",
       answerMarkdown: "Memory questions are persisted separately.",
       localMemoryWorkerConfig: {
         provider: "codex",

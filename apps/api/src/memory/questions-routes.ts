@@ -55,6 +55,7 @@ export const registerQuestionRoutes = (
         { userId: user.id },
         {
           query: input.query,
+          origin: input.origin,
           retrievalScope: input.retrieval_scope,
           searchDomain: input.search_domain,
           workspaceId: input.workspace_id,

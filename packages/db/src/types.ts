@@ -22,6 +22,8 @@ export type CapturePolicyTarget = "global" | "project" | "thread";
 
 export type MemoryQuestionStatus = "pending" | "answered" | "error";
 
+export type MemoryQuestionOrigin = "explorer" | "mcp_memory_answer";
+
 export type MemoryQuestionSearchDomain = "global" | "project" | "session";
 
 export type MemoryQuestionRetrievalScope = "personal";
@@ -566,6 +568,7 @@ export interface MemoryQuestionShellRecord {
   id: string;
   ownerUserId: string;
   visibility: Visibility;
+  origin: MemoryQuestionOrigin;
   retrievalScope: MemoryQuestionRetrievalScope;
   searchDomain: MemoryQuestionSearchDomain;
   workspaceId: string | null;

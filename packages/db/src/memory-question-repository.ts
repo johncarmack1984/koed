@@ -3,6 +3,7 @@ import { truncateDisplayText } from "./value-helpers.js";
 import type {
   ActorContext,
   MemoryQuestionDetailRecord,
+  MemoryQuestionOrigin,
   MemoryQuestionRetrievalScope,
   MemoryQuestionSearchDomain,
   MemoryQuestionShellRecord,
@@ -15,6 +16,7 @@ export interface MemoryQuestionRepository {
     actor: ActorContext,
     input: {
       query: string;
+      origin?: MemoryQuestionOrigin;
       retrievalScope?: MemoryQuestionRetrievalScope;
       searchDomain: MemoryQuestionSearchDomain;
       workspaceId?: string;
@@ -89,6 +91,7 @@ type MemoryQuestionShellRow = {
   id: string;
   owner_user_id: string;
   visibility: Visibility;
+  origin: MemoryQuestionOrigin;
   retrieval_scope: MemoryQuestionRetrievalScope;
   search_domain: MemoryQuestionSearchDomain;
   workspace_id: string | null;
@@ -131,6 +134,7 @@ const mapMemoryQuestionShell = (
   id: row.id,
   ownerUserId: row.owner_user_id,
   visibility: row.visibility,
+  origin: row.origin,
   retrievalScope: row.retrieval_scope,
   searchDomain: row.search_domain,
   workspaceId: row.workspace_id,
@@ -176,6 +180,7 @@ export const createMemoryQuestionRepository = (
         insert into memory_questions (
           owner_user_id,
           visibility,
+          origin,
           retrieval_scope,
           search_domain,
           workspace_id,
@@ -187,9 +192,9 @@ export const createMemoryQuestionRepository = (
           query,
           local_memory_worker_config
         )
-        values ($1, 'personal', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        values ($1, 'personal', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         returning
-          id, owner_user_id, visibility, retrieval_scope, search_domain,
+          id, owner_user_id, visibility, origin, retrieval_scope, search_domain,
           workspace_id, project_name, project_path, session_id, thread_id,
           thread_name, query, answer_markdown, error_message, evidence,
           citations, retrieval, local_memory_worker, local_memory_worker_config,
@@ -200,6 +205,7 @@ export const createMemoryQuestionRepository = (
       `,
       [
         actor.userId,
+        input.origin ?? "explorer",
         input.retrievalScope ?? "personal",
         input.searchDomain,
         input.workspaceId ?? null,
@@ -224,7 +230,7 @@ export const createMemoryQuestionRepository = (
     const result = await pool.query<MemoryQuestionShellRow>(
       `
         select
-          id, owner_user_id, visibility, retrieval_scope, search_domain,
+          id, owner_user_id, visibility, origin, retrieval_scope, search_domain,
           workspace_id, project_name, project_path, session_id, thread_id,
           thread_name, query, left(answer_markdown, 280) as answer_preview,
           error_message, status, created_at, updated_at, answered_at,
@@ -298,7 +304,7 @@ export const createMemoryQuestionRepository = (
         where question.id = candidates.id
         returning
           question.id, question.owner_user_id,
-          question.visibility, question.retrieval_scope, question.search_domain,
+          question.visibility, question.origin, question.retrieval_scope, question.search_domain,
           question.workspace_id, question.project_name, question.project_path,
           question.session_id, question.thread_id, question.thread_name,
           question.query, question.answer_markdown, question.error_message,
@@ -320,7 +326,7 @@ export const createMemoryQuestionRepository = (
     const result = await pool.query<MemoryQuestionDetailRow>(
       `
         select
-          id, owner_user_id, visibility, retrieval_scope, search_domain,
+          id, owner_user_id, visibility, origin, retrieval_scope, search_domain,
           workspace_id, project_name, project_path, session_id, thread_id,
           thread_name, query, answer_markdown, error_message, evidence,
           citations, retrieval, local_memory_worker, local_memory_worker_config,
@@ -377,7 +383,7 @@ export const createMemoryQuestionRepository = (
             or ($11::int is null and processing_lease_until is null)
           )
         returning
-          id, owner_user_id, visibility, retrieval_scope, search_domain,
+          id, owner_user_id, visibility, origin, retrieval_scope, search_domain,
           workspace_id, project_name, project_path, session_id, thread_id,
           thread_name, query, answer_markdown, error_message, evidence,
           citations, retrieval, local_memory_worker, local_memory_worker_config,
