@@ -285,6 +285,7 @@ const mapLcmGraphEvent = (row: {
   thread_name: string | null;
   source_event_time: Date | null;
   source_sequence: number | string | null;
+  source_hash: string | null;
   captured_at: Date;
   created_at: Date;
   visibility: Visibility;
@@ -321,6 +322,7 @@ const mapLcmGraphEvent = (row: {
     timestamp,
     sourceEventTime: row.source_event_time?.toISOString() ?? null,
     sourceSequence: Number.isFinite(sourceSequence) ? sourceSequence : null,
+    sourceHash: row.source_hash,
     capturedAt: row.captured_at.toISOString(),
     createdAt: row.created_at.toISOString(),
     visibility: row.visibility,
@@ -4094,6 +4096,7 @@ export const createMemorySourceRepository = (
             coalesce(s.metadata ->> 'threadName', me.payload #>> '{metadata,threadName}', s.external_session_id, s.id::text, 'Untitled conversation') as thread_name,
             me.source_event_time,
             me.source_sequence,
+            me.source_hash,
             me.captured_at,
             me.created_at,
             coalesce(me.source_event_time, me.captured_at) as order_at,
@@ -4179,6 +4182,7 @@ export const createMemorySourceRepository = (
                 then msg.transcript_item_id::bigint
               else null::bigint
             end as source_sequence,
+            msg.source_hash,
             msg.captured_at,
             msg.created_at,
             msg.captured_at as order_at,
@@ -4289,6 +4293,7 @@ export const createMemorySourceRepository = (
                 then te.transcript_item_id::bigint
               else null::bigint
             end as source_sequence,
+            te.source_hash,
             te.captured_at,
             te.created_at,
             te.captured_at as order_at,

@@ -78,6 +78,7 @@ const makeEvent = (threadKey: string, index: number): GraphEvent => ({
   timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
   sourceEventTime: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
   sourceSequence: index,
+  sourceHash: null,
   capturedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
   createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
   visibility: "personal",

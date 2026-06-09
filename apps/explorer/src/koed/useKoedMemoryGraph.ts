@@ -70,7 +70,11 @@ export interface GraphUpdatePayload {
   threadId?: unknown;
 }
 
-type StreamEventRefreshResult = "failed" | "merged" | "not-selected";
+type StreamEventRefreshResult =
+  | "failed"
+  | "ignored"
+  | "merged"
+  | "not-selected";
 
 interface StreamEventRef {
   id: string;
@@ -146,14 +150,33 @@ export function mergeEventDetail(
   return merged;
 }
 
+const graphEventMergeKey = (event: GraphEvent): string =>
+  event.sourceHash ? `source:${event.sourceHash}` : `id:${event.id}`;
+
+const graphEventSourceTable = (event: GraphEvent): string | undefined => {
+  const sourceTable = event.metadata.sourceTable;
+  return typeof sourceTable === "string" ? sourceTable : undefined;
+};
+
+function isThreadPageEvent(event: GraphEvent): boolean {
+  const sourceTable = graphEventSourceTable(event);
+  if (sourceTable === "messages" || sourceTable === "tool_events") {
+    return true;
+  }
+  return !event.sessionId || event.captureMethod === "api";
+}
+
 export function mergeThreadEvents(
   existingEvents: GraphEvent[],
   nextEvents: GraphEvent[]
 ): GraphEvent[] {
-  const merged = new Map(existingEvents.map((event) => [event.id, event]));
+  const merged = new Map(
+    existingEvents.map((event) => [graphEventMergeKey(event), event])
+  );
   for (const event of nextEvents) {
-    const existing = merged.get(event.id);
-    merged.set(event.id, existing ? mergeEventDetail(existing, event) : event);
+    const key = graphEventMergeKey(event);
+    const existing = merged.get(key);
+    merged.set(key, existing ? mergeEventDetail(existing, event) : event);
   }
   return [...merged.values()].sort(compareGraphEventChronology);
 }
@@ -738,11 +761,22 @@ export function useKoedMemoryGraph({
         if (!selectedThread) {
           return "failed";
         }
-        const existingEventIds = new Set(
-          entry?.events.map((cachedEvent) => cachedEvent.id) ?? []
+        if (!isThreadPageEvent(event)) {
+          koedDebug("stream.eventIgnored", {
+            eventId,
+            reason: "not-in-thread-page",
+            captureMethod: event.captureMethod,
+            sessionId: event.sessionId ?? null
+          });
+          return "ignored";
+        }
+        const existingEventKeys = new Set(
+          entry?.events.map((cachedEvent) => graphEventMergeKey(cachedEvent)) ??
+            []
         );
         const liveShellEvents =
-          options.countShellEvent === true && !existingEventIds.has(event.id)
+          options.countShellEvent === true &&
+          !existingEventKeys.has(graphEventMergeKey(event))
             ? [event]
             : [];
         const wasComplete = isCompleteThreadDetail(entry);

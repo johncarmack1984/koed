@@ -128,7 +128,8 @@ function makePatchEvent(sourceText = patchText): GraphEvent {
     threadId: "thread-1",
     threadName: "thread-1",
     sourceEventTime: new Date().toISOString(),
-    sourceSequence: 1
+    sourceSequence: 1,
+    sourceHash: null
   } as GraphEvent;
 }
 

@@ -263,6 +263,7 @@ export interface LcmGraphEvent {
   timestamp: string;
   sourceEventTime: string | null;
   sourceSequence: number | null;
+  sourceHash: string | null;
   capturedAt: string;
   createdAt: string;
   visibility: Visibility;

@@ -1276,6 +1276,10 @@ const createFakeRepository = (): MemorySourceRepository => {
             timestamp: event.createdAt,
             sourceEventTime: null,
             sourceSequence: null,
+            sourceHash:
+              typeof event.metadata.sourceHash === "string"
+                ? event.metadata.sourceHash
+                : null,
             capturedAt: event.createdAt,
             createdAt: event.createdAt,
             visibility: event.visibility,
@@ -1628,7 +1632,10 @@ const createFakeRepository = (): MemorySourceRepository => {
         actor: input.actor as MemoryActor,
         eventType: input.rawEventType,
         content: input.content,
-        metadata: input.metadata ?? {},
+        metadata: {
+          ...(input.metadata ?? {}),
+          ...(input.sourceHash ? { sourceHash: input.sourceHash } : {})
+        },
         visibility: input.visibility,
         ownerUserId: actor.userId,
         createdAt: new Date(Date.now() + events.length).toISOString()

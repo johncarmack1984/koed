@@ -119,6 +119,7 @@ const makeEvent = (
   timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
   sourceEventTime: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
   sourceSequence: index,
+  sourceHash: `${threadKey(thread)}-source-${index}`,
   capturedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
   createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
   visibility: "personal",
@@ -1485,6 +1486,34 @@ describe("KOE-103 performance architecture", () => {
     expect(merged[1]?.content).toBe("Refreshed second event");
   });
 
+  it("merges thread events by source hash when projected rows change id", () => {
+    const [project] = makeProjects(1, 1);
+    const thread = project!.threads[0]!;
+    const existing = {
+      ...makeEvent(thread, 0),
+      content: "Original source content",
+      contentPreview: "Original source preview",
+      id: "source-row-before-projection",
+      sourceHash: "stable-source-hash"
+    };
+    const refreshed = {
+      ...existing,
+      content: "Refreshed source content",
+      contentPreview: "Refreshed source preview",
+      id: "source-row-after-projection"
+    };
+
+    const merged = mergeThreadEvents([existing], [refreshed]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      id: refreshed.id,
+      content: "Refreshed source content",
+      contentPreview: "Refreshed source preview",
+      sourceHash: "stable-source-hash"
+    });
+  });
+
   it("keeps merged thread events in source chronology order", () => {
     const [project] = makeProjects(1, 1);
     const thread = project!.threads[0]!;
@@ -1722,6 +1751,11 @@ describe("KOE-103 performance architecture", () => {
       id: "live-event-1",
       contentPreview: "live event"
     };
+    const duplicateSourceLiveEvent = {
+      ...liveEvent,
+      id: "duplicate-source-live-event",
+      contentPreview: "live event duplicate row"
+    };
     const streamControllerRef: {
       current: ReadableStreamDefaultController<Uint8Array> | null;
     } = { current: null };
@@ -1744,6 +1778,11 @@ describe("KOE-103 performance architecture", () => {
       }
       if (url.includes("/v1/memory/graph/events?")) {
         return jsonResponse({ events: [initialEvent] });
+      }
+      if (
+        url.includes(`/v1/memory/graph/events/${duplicateSourceLiveEvent.id}`)
+      ) {
+        return jsonResponse({ event: duplicateSourceLiveEvent });
       }
       if (url.includes(`/v1/memory/graph/events/${liveEvent.id}`)) {
         return jsonResponse({ event: liveEvent });
@@ -1844,6 +1883,161 @@ describe("KOE-103 performance architecture", () => {
 
       expect(latestState?.threadEvents).toHaveLength(2);
       expect(latestState?.selectedThread?.eventCount).toBe(2);
+
+      fetchMock.mockClear();
+      await act(async () => {
+        streamControllerRef.current?.enqueue(
+          new TextEncoder().encode(
+            `event: graph_update\ndata: ${JSON.stringify({
+              id: duplicateSourceLiveEvent.id,
+              table: "memory_events",
+              operation: "INSERT",
+              eventRefs: [
+                {
+                  id: duplicateSourceLiveEvent.id,
+                  projectId: selectedThread.projectId,
+                  threadId: selectedThread.id
+                }
+              ]
+            })}\n\n`
+          )
+        );
+      });
+      await waitFor(
+        () =>
+          fetchMock.mock.calls.filter(([input]) =>
+            String(input).includes(
+              `/v1/memory/graph/events/${duplicateSourceLiveEvent.id}`
+            )
+          ).length === 1
+      );
+
+      expect(latestState?.threadEvents).toHaveLength(2);
+      expect(latestState?.threadEvents.at(-1)?.id).toBe(
+        duplicateSourceLiveEvent.id
+      );
+      expect(latestState?.selectedThread?.eventCount).toBe(2);
+    } finally {
+      streamControllerRef.current?.close();
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+
+  it("ignores selected stream events excluded from thread pages", async () => {
+    const [project] = makeProjects(1, 1);
+    const selectedThread = {
+      ...project!.threads[0]!,
+      eventCount: 1,
+      sessionId: "11111111-1111-4111-8111-111111111111"
+    };
+    const selectedThreadId = threadSelectionKey(selectedThread);
+    const initialEvent = {
+      ...makeEvent(selectedThread, 0),
+      id: "message-row",
+      captureMethod: "hook" as const,
+      sessionId: selectedThread.sessionId,
+      sourceHash: "message:quiz-question",
+      metadata: { sourceTable: "messages" }
+    };
+    const projectedMemoryEvent = {
+      ...makeEvent(selectedThread, 1),
+      id: "projected-memory-event",
+      captureMethod: "hook" as const,
+      sessionId: selectedThread.sessionId,
+      sourceHash: "projection:quiz-question",
+      metadata: {}
+    };
+    const streamControllerRef: {
+      current: ReadableStreamDefaultController<Uint8Array> | null;
+    } = { current: null };
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamControllerRef.current = controller;
+      }
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/v1/memory/graph/stream")) {
+        return new Response(stream, {
+          headers: { "content-type": "text/event-stream" }
+        });
+      }
+      if (url.includes("/v1/memory/graph/threads")) {
+        return jsonResponse({
+          projects: [{ ...project!, threads: [selectedThread] }]
+        });
+      }
+      if (url.includes("/v1/memory/graph/events?")) {
+        return jsonResponse({ events: [initialEvent] });
+      }
+      if (url.includes(`/v1/memory/graph/events/${projectedMemoryEvent.id}`)) {
+        return jsonResponse({ event: projectedMemoryEvent });
+      }
+      if (url.includes("/v1/memory/graph/nodes?")) {
+        return jsonResponse({ nodes: [] });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    let latestState: ReturnType<typeof useKoedMemoryGraph> | undefined;
+    const setToast = vi.fn<(toast: ToastState | null) => void>();
+
+    function Harness() {
+      const state = useKoedMemoryGraph({
+        apiToken: "token",
+        selectedThreadId,
+        setToast
+      });
+      useEffect(() => {
+        latestState = state;
+      }, [state]);
+      return null;
+    }
+
+    try {
+      await act(async () => {
+        root.render(createElement(Harness));
+      });
+      await waitFor(() => (latestState?.threadEvents.length ?? 0) === 1);
+      fetchMock.mockClear();
+
+      await act(async () => {
+        streamControllerRef.current?.enqueue(
+          new TextEncoder().encode(
+            `event: graph_update\ndata: ${JSON.stringify({
+              id: projectedMemoryEvent.id,
+              table: "memory_events",
+              operation: "INSERT",
+              eventRefs: [
+                {
+                  id: projectedMemoryEvent.id,
+                  projectId: selectedThread.projectId,
+                  threadId: selectedThread.id
+                }
+              ]
+            })}\n\n`
+          )
+        );
+      });
+      await waitFor(
+        () =>
+          fetchMock.mock.calls.filter(([input]) =>
+            String(input).includes(
+              `/v1/memory/graph/events/${projectedMemoryEvent.id}`
+            )
+          ).length === 1
+      );
+
+      expect(latestState?.threadEvents).toHaveLength(1);
+      expect(latestState?.threadEvents[0]?.id).toBe(initialEvent.id);
+      expect(latestState?.selectedThread?.eventCount).toBe(1);
     } finally {
       streamControllerRef.current?.close();
       await act(async () => {
