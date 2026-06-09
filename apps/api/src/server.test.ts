@@ -572,6 +572,7 @@ const createFakeRepository = (): MemorySourceRepository => {
         id: randomUUID(),
         ownerUserId: actor.userId,
         visibility: "personal",
+        origin: input.origin ?? "explorer",
         retrievalScope: input.retrievalScope ?? "personal",
         searchDomain: input.searchDomain,
         workspaceId: input.workspaceId ?? null,
@@ -599,6 +600,50 @@ const createFakeRepository = (): MemorySourceRepository => {
         attemptCount: 0,
         lastErrorMessage: null,
         evidenceCount: 0
+      };
+      memoryQuestions.set(record.id, record);
+      return record;
+    },
+    async createFinalMemoryQuestion(actor, input) {
+      const now = new Date().toISOString();
+      const record: MemoryQuestionDetailRecord = {
+        id: randomUUID(),
+        ownerUserId: actor.userId,
+        visibility: "personal",
+        origin: input.origin ?? "explorer",
+        retrievalScope: input.retrievalScope ?? "personal",
+        searchDomain: input.searchDomain,
+        workspaceId: input.workspaceId ?? null,
+        projectName: input.projectName ?? null,
+        projectPath: input.projectPath ?? null,
+        sessionId: input.sessionId ?? null,
+        threadId: input.threadId ?? null,
+        threadName: input.threadName ?? null,
+        query: input.query,
+        answerPreview:
+          input.status === "answered"
+            ? input.answerMarkdown.slice(0, 280)
+            : null,
+        answerMarkdown:
+          input.status === "answered" ? input.answerMarkdown : null,
+        errorMessage: input.status === "error" ? input.errorMessage : null,
+        evidence: input.status === "answered" ? (input.evidence ?? null) : null,
+        citations:
+          input.status === "answered" ? (input.citations ?? null) : null,
+        retrieval: input.retrieval ?? null,
+        localMemoryWorker: input.localMemoryWorker ?? null,
+        localMemoryWorkerConfig: null,
+        response: input.response ?? null,
+        status: input.status,
+        createdAt: now,
+        updatedAt: now,
+        answeredAt: now,
+        processingStartedAt: null,
+        processingLeaseUntil: null,
+        attemptCount: input.attemptCount ?? 1,
+        lastErrorMessage: input.status === "error" ? input.errorMessage : null,
+        evidenceCount:
+          input.status === "answered" ? (input.evidence?.length ?? 0) : 0
       };
       memoryQuestions.set(record.id, record);
       return record;
@@ -644,7 +689,8 @@ const createFakeRepository = (): MemorySourceRepository => {
         if (
           question.ownerUserId !== actor.userId ||
           question.status !== "pending" ||
-          (input.questionId && question.id !== input.questionId)
+          (input.questionId && question.id !== input.questionId) ||
+          (input.origin && question.origin !== input.origin)
         ) {
           continue;
         }
@@ -3921,6 +3967,7 @@ describe("account and access flows", () => {
       headers,
       payload: {
         query: "What did we decide about rate limits?",
+        origin: "explorer",
         search_domain: "project",
         workspace_id: "project-1",
         project_name: "Koed",
@@ -3936,11 +3983,27 @@ describe("account and access flows", () => {
       }
     });
     const questionId = jsonBody<MemoryQuestionResponse>(created).question.id;
+    const mismatchedClaim = await app.inject({
+      method: "POST",
+      url: "/v1/memory/questions/claim-pending",
+      headers,
+      payload: {
+        question_id: questionId,
+        origin: "mcp_memory_answer",
+        limit: 1,
+        lease_seconds: 120
+      }
+    });
     const claimed = await app.inject({
       method: "POST",
       url: "/v1/memory/questions/claim-pending",
       headers,
-      payload: { question_id: questionId, limit: 1, lease_seconds: 120 }
+      payload: {
+        question_id: questionId,
+        origin: "explorer",
+        limit: 1,
+        lease_seconds: 120
+      }
     });
     const secondClaim = await app.inject({
       method: "POST",
@@ -3985,6 +4048,9 @@ describe("account and access flows", () => {
     expect(jsonBody<MemoryQuestionResponse>(created).question.status).toBe(
       "pending"
     );
+    expect(jsonBody<MemoryQuestionResponse>(created).question.origin).toBe(
+      "explorer"
+    );
     expect(
       jsonBody<MemoryQuestionResponse>(created).question.retrievalScope
     ).toBe("personal");
@@ -3998,6 +4064,9 @@ describe("account and access flows", () => {
       max_attempts: 4
     });
     expect(claimed.statusCode).toBe(200);
+    expect(
+      jsonBody<MemoryQuestionsResponse>(mismatchedClaim).questions
+    ).toEqual([]);
     expect(jsonBody<MemoryQuestionsResponse>(claimed).questions).toHaveLength(
       1
     );
@@ -4017,6 +4086,7 @@ describe("account and access flows", () => {
     expect(jsonBody<MemoryQuestionsResponse>(listed).questions).toHaveLength(1);
     expect(jsonBody<MemoryQuestionResponse>(detail).question).toMatchObject({
       id: questionId,
+      origin: "explorer",
       answerMarkdown: "Use the documented read and write limits.",
       evidenceCount: 1,
       localMemoryWorkerConfig: {
@@ -4029,6 +4099,73 @@ describe("account and access flows", () => {
       searchDomain: "project",
       workspaceId: "project-1"
     });
+  });
+
+  it("records final MCP memory answer questions without a pending lease", async () => {
+    const app = await buildServer({ repository: createFakeRepository() });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "final-memory-question@example.com",
+        password: "password123"
+      }
+    });
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie: cookieHeader(registered) },
+      payload: { name: "Client Integration" }
+    });
+    const headers = {
+      authorization: `Bearer ${jsonBody<TokenResponse>(createdToken).token}`
+    };
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/memory/questions/final",
+      headers,
+      payload: {
+        query: "What did memory_answer find?",
+        origin: "mcp_memory_answer",
+        search_domain: "project",
+        workspace_id: "project-1",
+        status: "answered",
+        answer_markdown: "The answer came from recalled memory.",
+        attempt_count: 1,
+        response: {
+          markdown: "The answer came from recalled memory.",
+          retrieval: { evidenceCount: 1 },
+          localMemoryWorker: { usedFallback: false }
+        },
+        evidence: [{ id: "evidence-1", text: "large evidence payload" }],
+        retrieval: { mode: "app_server_dynamic_tools" },
+        local_memory_worker: { usedFallback: false }
+      }
+    });
+    const question = jsonBody<MemoryQuestionResponse>(created).question;
+    const claim = await app.inject({
+      method: "POST",
+      url: "/v1/memory/questions/claim-pending",
+      headers,
+      payload: {
+        question_id: question.id,
+        origin: "mcp_memory_answer",
+        limit: 1,
+        lease_seconds: 120
+      }
+    });
+    await app.close();
+
+    expect(created.statusCode).toBe(200);
+    expect(question).toMatchObject({
+      origin: "mcp_memory_answer",
+      status: "answered",
+      answerMarkdown: "The answer came from recalled memory.",
+      processingLeaseUntil: null,
+      evidenceCount: 1
+    });
+    expect(question.response).not.toHaveProperty("evidenceBundle");
+    expect(jsonBody<MemoryQuestionsResponse>(claim).questions).toEqual([]);
   });
 
   it("releases failed memory questions back to pending for retry", async () => {
@@ -4209,6 +4346,41 @@ describe("account and access flows", () => {
       payload: {
         query: "What did we decide about memory?",
         retrieval_scope: "shared"
+      }
+    });
+    await app.close();
+
+    expect(rejected.statusCode).toBe(400);
+    expect(rejected.json()).toMatchObject({
+      error: "Invalid request payload"
+    });
+  });
+
+  it("rejects MCP origin on pending memory question creation", async () => {
+    const app = await buildServer({ repository: createFakeRepository() });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "memory-question-mcp-pending@example.com",
+        password: "password123"
+      }
+    });
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie: cookieHeader(registered) },
+      payload: { name: "Client Integration" }
+    });
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/v1/memory/questions",
+      headers: {
+        authorization: `Bearer ${jsonBody<TokenResponse>(createdToken).token}`
+      },
+      payload: {
+        query: "What did memory_answer find?",
+        origin: "mcp_memory_answer"
       }
     });
     await app.close();

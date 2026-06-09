@@ -1389,7 +1389,9 @@ describe("local memory answer bridge", () => {
     service.stop();
 
     expect(result).toMatchObject({ ran: true, processed: 1 });
-    expect(claims).toEqual([{ limit: 1, lease_seconds: 180 }]);
+    expect(claims).toEqual([
+      { origin: "explorer", limit: 1, lease_seconds: 180 }
+    ]);
     expect(patches[0]).toMatchObject({
       status: "answered",
       attempt_count: 1,
@@ -1497,8 +1499,8 @@ describe("local memory answer bridge", () => {
     expect(firstRun).toMatchObject({ ran: true, processed: 1 });
     expect(secondRun).toMatchObject({ ran: true, processed: 1 });
     expect(claims).toEqual([
-      { limit: 1, lease_seconds: 180 },
-      { limit: 1, lease_seconds: 180 }
+      { origin: "explorer", limit: 1, lease_seconds: 180 },
+      { origin: "explorer", limit: 1, lease_seconds: 180 }
     ]);
     expect(patches[0]).toMatchObject({
       status: "pending",

@@ -2059,17 +2059,33 @@ describeDb("memory repository visibility", () => {
     );
 
     expect(created.status).toBe("pending");
+    expect(created.origin).toBe("explorer");
     expect(created.answerMarkdown).toBeNull();
     expect(created.processingLeaseUntil).toBeNull();
 
+    const mismatchedOriginClaim = await repo.claimPendingMemoryQuestions(
+      { userId: alice.id },
+      {
+        questionId: created.id,
+        origin: "mcp_memory_answer",
+        limit: 1,
+        leaseSeconds: 120
+      }
+    );
     const claimed = await repo.claimPendingMemoryQuestions(
       { userId: alice.id },
-      { questionId: created.id, limit: 1, leaseSeconds: 120 }
+      {
+        questionId: created.id,
+        origin: "explorer",
+        limit: 1,
+        leaseSeconds: 120
+      }
     );
     const claimedAgain = await repo.claimPendingMemoryQuestions(
       { userId: alice.id },
       { questionId: created.id, limit: 1, leaseSeconds: 120 }
     );
+    expect(mismatchedOriginClaim).toEqual([]);
     expect(claimed).toHaveLength(1);
     expect(claimed[0]).toMatchObject({
       id: created.id,
@@ -2113,6 +2129,7 @@ describeDb("memory repository visibility", () => {
     const retryCreated = await repo.createMemoryQuestion(
       { userId: alice.id },
       {
+        origin: "mcp_memory_answer",
         query: "Can a failed local answer retry later?",
         searchDomain: "global"
       }
@@ -2143,6 +2160,7 @@ describeDb("memory repository visibility", () => {
 
     expect(retryReleased).toMatchObject({
       id: retryCreated.id,
+      origin: "mcp_memory_answer",
       status: "pending",
       answerMarkdown: null,
       errorMessage: null,
@@ -2156,6 +2174,41 @@ describeDb("memory repository visibility", () => {
       retryClaimed[0]!.attemptCount + 1
     );
     expect(retryReclaimed[0]?.lastErrorMessage).toBeNull();
+
+    const finalCreated = await repo.createFinalMemoryQuestion(
+      { userId: alice.id },
+      {
+        origin: "mcp_memory_answer",
+        query: "What did the MCP memory answer return?",
+        searchDomain: "global",
+        status: "answered",
+        answerMarkdown: "MCP memory answer completed.",
+        response: { markdown: "MCP memory answer completed." },
+        evidence: [{ id: "mcp-source-1" }],
+        retrieval: { mode: "app_server_dynamic_tools" },
+        localMemoryWorker: { usedFallback: false }
+      }
+    );
+    const finalClaimed = await repo.claimPendingMemoryQuestions(
+      { userId: alice.id },
+      {
+        questionId: finalCreated.id,
+        origin: "mcp_memory_answer",
+        limit: 1,
+        leaseSeconds: 120
+      }
+    );
+
+    expect(finalCreated).toMatchObject({
+      origin: "mcp_memory_answer",
+      status: "answered",
+      answerMarkdown: "MCP memory answer completed.",
+      processingStartedAt: null,
+      processingLeaseUntil: null,
+      evidenceCount: 1
+    });
+    expect(finalCreated.answeredAt).toBeTruthy();
+    expect(finalClaimed).toEqual([]);
 
     const updated = await repo.updateMemoryQuestion(
       { userId: alice.id },
@@ -2193,6 +2246,7 @@ describeDb("memory repository visibility", () => {
     });
     expect(detail).toMatchObject({
       id: created.id,
+      origin: "explorer",
       answerMarkdown: "Memory questions are persisted separately.",
       localMemoryWorkerConfig: {
         provider: "codex",

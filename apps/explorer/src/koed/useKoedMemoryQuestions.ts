@@ -6,6 +6,8 @@ import type { GraphUpdatePayload } from "./useKoedMemoryGraph";
 
 const questionDetailCacheLimit = 32;
 const questionPrewarmLimit = 10;
+const streamQuestionRetryLimit = 4;
+const streamQuestionRetryDelayMs = 100;
 
 interface QuestionDetailCacheEntry {
   accessedAt: number;
@@ -69,6 +71,19 @@ function questionIsAtLeastAsNew(
   return questionTimestamp(incoming) >= questionTimestamp(existing);
 }
 
+function questionShouldReplace(
+  incoming: MemoryQuestionRecord,
+  existing: MemoryQuestionRecord
+) {
+  if (incoming.status !== "pending" && existing.status === "pending") {
+    return true;
+  }
+  if (incoming.status === "pending" && existing.status !== "pending") {
+    return false;
+  }
+  return questionIsAtLeastAsNew(incoming, existing);
+}
+
 function questionIdsFromStreamPayload(payload: GraphUpdatePayload) {
   const ids = new Set<string>();
   if (Array.isArray(payload.questionIds)) {
@@ -78,7 +93,11 @@ function questionIdsFromStreamPayload(payload: GraphUpdatePayload) {
       }
     }
   }
-  if (typeof payload.id === "string" && payload.id) {
+  if (
+    payload.table === "memory_questions" &&
+    typeof payload.id === "string" &&
+    payload.id
+  ) {
     ids.add(payload.id);
   }
   return [...ids];
@@ -96,6 +115,7 @@ export function useKoedMemoryQuestions({
   const apiTokenRef = useRef(apiToken.trim());
   const detailCacheRef = useRef(new Map<string, QuestionDetailCacheEntry>());
   const requestGenerationRef = useRef(0);
+  const streamRetryTimeoutsRef = useRef(new Set<number>());
 
   const requestIsCurrent = useCallback(
     (token: string, generation: number) =>
@@ -107,7 +127,7 @@ export function useKoedMemoryQuestions({
   const upsertQuestion = useCallback((question: MemoryQuestionRecord) => {
     const cached = detailCacheRef.current.get(question.id)?.question;
     const questionForCache =
-      cached && !questionIsAtLeastAsNew(question, cached)
+      cached && !questionShouldReplace(question, cached)
         ? cached
         : { ...cached, ...question };
     detailCacheRef.current.set(question.id, {
@@ -123,7 +143,7 @@ export function useKoedMemoryQuestions({
         return [questionForCache, ...current];
       }
       const existing = current[existingIndex];
-      if (!existing || !questionIsAtLeastAsNew(question, existing)) {
+      if (!existing || !questionShouldReplace(question, existing)) {
         return current;
       }
       const next = [...current];
@@ -230,14 +250,56 @@ export function useKoedMemoryQuestions({
     [loadQuestionDetail]
   );
 
+  const scheduleStreamQuestionRetry = useCallback(
+    (input: {
+      generation: number;
+      questionId: string;
+      retryAttempt: number;
+      token: string;
+    }) => {
+      if (input.retryAttempt >= streamQuestionRetryLimit) {
+        return;
+      }
+      const timeout = window.setTimeout(() => {
+        streamRetryTimeoutsRef.current.delete(timeout);
+        if (!requestIsCurrent(input.token, input.generation)) {
+          return;
+        }
+        void loadMemoryQuestionDetail(input.questionId, input.token)
+          .then((question) => {
+            if (!requestIsCurrent(input.token, input.generation)) {
+              return;
+            }
+            upsertQuestion(question);
+            if (question.status === "pending") {
+              scheduleStreamQuestionRetry({
+                ...input,
+                retryAttempt: input.retryAttempt + 1
+              });
+            }
+          })
+          .catch(() => {
+            if (requestIsCurrent(input.token, input.generation)) {
+              void loadQuestions({ silent: true });
+            }
+          });
+      }, streamQuestionRetryDelayMs);
+      streamRetryTimeoutsRef.current.add(timeout);
+    },
+    [loadQuestions, requestIsCurrent, upsertQuestion]
+  );
+
   const refreshQuestionFromStream = useCallback(
     (payload: GraphUpdatePayload) => {
-      if (payload.table !== "memory_questions" || !apiToken.trim()) {
+      const questionIds = questionIdsFromStreamPayload(payload);
+      if (
+        (payload.table !== "memory_questions" && questionIds.length === 0) ||
+        !apiToken.trim()
+      ) {
         return;
       }
       const token = apiToken.trim();
       const generation = requestGenerationRef.current;
-      const questionIds = questionIdsFromStreamPayload(payload);
       if (questionIds.length === 0) {
         void loadQuestions({ silent: true });
         return;
@@ -262,7 +324,19 @@ export function useKoedMemoryQuestions({
             .then((question) => {
               if (requestIsCurrent(token, generation)) {
                 upsertQuestion(question);
+                if (
+                  payload.operation === "UPDATE" &&
+                  question.status === "pending"
+                ) {
+                  scheduleStreamQuestionRetry({
+                    generation,
+                    questionId,
+                    retryAttempt: 0,
+                    token
+                  });
+                }
               }
+              return question;
             })
             .catch(() => null)
         )
@@ -275,14 +349,31 @@ export function useKoedMemoryQuestions({
         }
       });
     },
-    [apiToken, loadQuestions, removeQuestion, requestIsCurrent, upsertQuestion]
+    [
+      apiToken,
+      loadQuestions,
+      removeQuestion,
+      requestIsCurrent,
+      scheduleStreamQuestionRetry,
+      upsertQuestion
+    ]
   );
 
   useEffect(() => {
     apiTokenRef.current = apiToken.trim();
     requestGenerationRef.current += 1;
     detailCacheRef.current.clear();
+    for (const timeout of streamRetryTimeoutsRef.current) {
+      window.clearTimeout(timeout);
+    }
+    streamRetryTimeoutsRef.current.clear();
     setQuestions([]);
+    return () => {
+      for (const timeout of streamRetryTimeoutsRef.current) {
+        window.clearTimeout(timeout);
+      }
+      streamRetryTimeoutsRef.current.clear();
+    };
   }, [apiToken]);
 
   useEffect(() => {
