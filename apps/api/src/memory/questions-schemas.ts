@@ -61,6 +61,7 @@ export const memoryQuestionParamsSchema = z.object({
 
 export const claimMemoryQuestionsSchema = z.object({
   question_id: z.string().uuid().optional(),
+  origin: z.enum(["explorer", "mcp_memory_answer"]).optional(),
   limit: z.coerce.number().int().positive().max(10).default(1),
   lease_seconds: z.coerce.number().int().positive().max(3600).default(180)
 });

@@ -82,6 +82,7 @@ export const registerQuestionRoutes = (
         { userId: user.id },
         {
           questionId: input.question_id,
+          origin: input.origin,
           limit: input.limit,
           leaseSeconds: input.lease_seconds
         }

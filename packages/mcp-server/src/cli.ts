@@ -485,6 +485,7 @@ server.registerTool(
     const claimedQuestion = questionsFromClaimResponse(
       await client.claimPendingQuestions({
         question_id: createdQuestion.id,
+        origin: "mcp_memory_answer",
         limit: 1,
         lease_seconds: 300
       })

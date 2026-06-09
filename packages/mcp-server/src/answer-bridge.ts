@@ -1240,6 +1240,7 @@ export const startPendingQuestionAnswerService = (
     try {
       const claimed = questionsFromClaimResponse(
         await client.claimPendingQuestions({
+          origin: "explorer",
           limit: config.batchLimit,
           lease_seconds: config.leaseSeconds
         })

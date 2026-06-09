@@ -44,6 +44,7 @@ export interface MemoryQuestionRepository {
     actor: ActorContext,
     input?: {
       questionId?: string;
+      origin?: MemoryQuestionOrigin;
       limit?: number;
       leaseSeconds?: number;
     }
@@ -285,6 +286,7 @@ export const createMemoryQuestionRepository = (
             and visibility = 'personal'
             and status = 'pending'
             and ($2::uuid is null or id = $2)
+            and ($5::text is null or origin = $5)
             and (
               processing_lease_until is null
               or processing_lease_until < now()
@@ -316,7 +318,13 @@ export const createMemoryQuestionRepository = (
           question.attempt_count, question.last_error_message,
           jsonb_array_length(coalesce(question.evidence, '[]'::jsonb)) as evidence_count
       `,
-      [actor.userId, input.questionId ?? null, limit, leaseSeconds]
+      [
+        actor.userId,
+        input.questionId ?? null,
+        limit,
+        leaseSeconds,
+        input.origin ?? null
+      ]
     );
 
     return result.rows.map(mapMemoryQuestionDetail);

@@ -643,7 +643,8 @@ const createFakeRepository = (): MemorySourceRepository => {
         if (
           question.ownerUserId !== actor.userId ||
           question.status !== "pending" ||
-          (input.questionId && question.id !== input.questionId)
+          (input.questionId && question.id !== input.questionId) ||
+          (input.origin && question.origin !== input.origin)
         ) {
           continue;
         }
@@ -3936,11 +3937,27 @@ describe("account and access flows", () => {
       }
     });
     const questionId = jsonBody<MemoryQuestionResponse>(created).question.id;
+    const mismatchedClaim = await app.inject({
+      method: "POST",
+      url: "/v1/memory/questions/claim-pending",
+      headers,
+      payload: {
+        question_id: questionId,
+        origin: "explorer",
+        limit: 1,
+        lease_seconds: 120
+      }
+    });
     const claimed = await app.inject({
       method: "POST",
       url: "/v1/memory/questions/claim-pending",
       headers,
-      payload: { question_id: questionId, limit: 1, lease_seconds: 120 }
+      payload: {
+        question_id: questionId,
+        origin: "mcp_memory_answer",
+        limit: 1,
+        lease_seconds: 120
+      }
     });
     const secondClaim = await app.inject({
       method: "POST",
@@ -4001,6 +4018,9 @@ describe("account and access flows", () => {
       max_attempts: 4
     });
     expect(claimed.statusCode).toBe(200);
+    expect(
+      jsonBody<MemoryQuestionsResponse>(mismatchedClaim).questions
+    ).toEqual([]);
     expect(jsonBody<MemoryQuestionsResponse>(claimed).questions).toHaveLength(
       1
     );

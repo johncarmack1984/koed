@@ -2063,14 +2063,29 @@ describeDb("memory repository visibility", () => {
     expect(created.answerMarkdown).toBeNull();
     expect(created.processingLeaseUntil).toBeNull();
 
+    const mismatchedOriginClaim = await repo.claimPendingMemoryQuestions(
+      { userId: alice.id },
+      {
+        questionId: created.id,
+        origin: "mcp_memory_answer",
+        limit: 1,
+        leaseSeconds: 120
+      }
+    );
     const claimed = await repo.claimPendingMemoryQuestions(
       { userId: alice.id },
-      { questionId: created.id, limit: 1, leaseSeconds: 120 }
+      {
+        questionId: created.id,
+        origin: "explorer",
+        limit: 1,
+        leaseSeconds: 120
+      }
     );
     const claimedAgain = await repo.claimPendingMemoryQuestions(
       { userId: alice.id },
       { questionId: created.id, limit: 1, leaseSeconds: 120 }
     );
+    expect(mismatchedOriginClaim).toEqual([]);
     expect(claimed).toHaveLength(1);
     expect(claimed[0]).toMatchObject({
       id: created.id,
