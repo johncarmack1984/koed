@@ -4206,6 +4206,57 @@ export const createMemorySourceRepository = (
             and ($4::text is null or coalesce(s.metadata ->> 'workspaceId', s.workspace_id::text, s.cwd) = $4)
             and ($5::text is null or coalesce(s.metadata ->> 'externalSessionId', s.external_session_id, s.id::text) = $5)
             and ($6::uuid is null or msg.id = $6)
+            and (
+              $6::uuid is not null
+              or msg.turn_id is null
+              or not exists (
+                select 1
+                from messages preferred_msg
+                where preferred_msg.id <> msg.id
+                  and preferred_msg.session_id = msg.session_id
+                  and preferred_msg.turn_id = msg.turn_id
+                  and preferred_msg.owner_user_id = msg.owner_user_id
+                  and preferred_msg.visibility = msg.visibility
+                  and preferred_msg.role = msg.role
+                  and preferred_msg.content = msg.content
+                  and ($2::boolean = true or preferred_msg.invalidated_at is null)
+                  and (
+                    (
+                      preferred_msg.transcript_item_id is not null
+                      and msg.transcript_item_id is null
+                    )
+                    or (
+                      preferred_msg.transcript_item_id ~ '^[0-9]+$'
+                      and msg.transcript_item_id ~ '^[0-9]+$'
+                      and preferred_msg.transcript_item_id::bigint < msg.transcript_item_id::bigint
+                    )
+                    or (
+                      coalesce(
+                        case
+                          when preferred_msg.transcript_item_id ~ '^[0-9]+$'
+                            then preferred_msg.transcript_item_id::bigint
+                          else null::bigint
+                        end,
+                        9223372036854775807::bigint
+                      ) = coalesce(
+                        case
+                          when msg.transcript_item_id ~ '^[0-9]+$'
+                            then msg.transcript_item_id::bigint
+                          else null::bigint
+                        end,
+                        9223372036854775807::bigint
+                      )
+                      and (
+                        preferred_msg.captured_at < msg.captured_at
+                        or (
+                          preferred_msg.captured_at = msg.captured_at
+                          and preferred_msg.id < msg.id
+                        )
+                      )
+                    )
+                  )
+              )
+            )
             and ($7::text is null or msg.content ilike '%' || $7 || '%' or msg.id::text = $7)
             and (
               $8::timestamptz is null

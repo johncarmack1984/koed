@@ -2621,6 +2621,111 @@ describeDb("memory repository visibility", () => {
     });
   });
 
+  it("deduplicates same-turn duplicate message projections in graph events", async () => {
+    const alice = await repo.createUser({
+      email: `alice-duplicate-message-display-${randomUUID()}@example.com`
+    });
+    const workspaceId = randomUUID();
+    await pool.query(
+      `
+        insert into workspaces (id, owner_user_id, visibility, name)
+        values ($1, $2, 'personal', 'Duplicate Message Project')
+      `,
+      [workspaceId, alice.id]
+    );
+    const session = await repo.createCapturedSession(
+      { userId: alice.id },
+      {
+        workspaceId,
+        externalSessionId: `duplicate-message-${randomUUID()}`,
+        sourceRuntime: "codex-cli",
+        captureMethod: "hook",
+        idempotencyKey: `duplicate-message-session-${randomUUID()}`
+      }
+    );
+    await repo.createConversationItems(
+      { userId: alice.id },
+      {
+        items: [
+          {
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-hook-v1",
+            sourceTransport: "hook",
+            externalSessionId: session.externalSessionId ?? undefined,
+            externalThreadId: session.externalSessionId ?? undefined,
+            externalTurnId: "duplicate-turn",
+            sourceRecordType: "hook_payload",
+            sourceEventType: "UserPromptSubmit",
+            rawJson: {
+              hook_event_name: "UserPromptSubmit",
+              prompt: "home"
+            },
+            rawText: "home",
+            sourceHash: `duplicate-hook-${randomUUID()}`,
+            idempotencyKey: `duplicate-hook-${randomUUID()}`,
+            projectionStatus: "pending",
+            metadata: { projectName: "Duplicate Message Project" }
+          },
+          {
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-transcript-v1",
+            sourceTransport: "hook",
+            externalSessionId: session.externalSessionId ?? undefined,
+            externalThreadId: session.externalSessionId ?? undefined,
+            externalTurnId: "duplicate-turn",
+            sourceRecordType: "event_msg",
+            sourceEventType: "user_message",
+            sourceSequence: 2,
+            eventTime: "2026-04-01T12:00:00.000Z",
+            rawJson: {
+              type: "event_msg",
+              payload: {
+                type: "user_message",
+                message: "home"
+              }
+            },
+            rawText: "home",
+            sourceHash: `duplicate-transcript-${randomUUID()}`,
+            idempotencyKey: `duplicate-transcript-${randomUUID()}`,
+            projectionStatus: "pending",
+            metadata: {
+              projectName: "Duplicate Message Project",
+              transcriptType: "user_message"
+            }
+          }
+        ]
+      }
+    );
+
+    await repo.projectPendingConversationItems(
+      { userId: alice.id },
+      { limit: 10 }
+    );
+    const messageRows = await pool.query<{
+      content: string;
+      transcript_item_id: string | null;
+    }>(
+      "select content, transcript_item_id from messages order by transcript_item_id asc nulls last"
+    );
+    const events = await repo.listLcmGraphEvents(
+      { userId: alice.id },
+      {
+        projectId: workspaceId,
+        threadId: session.externalSessionId ?? undefined,
+        limit: 10
+      }
+    );
+
+    expect(messageRows.rows.map((row) => row.content)).toEqual([
+      "home",
+      "home"
+    ]);
+    expect(events.map((event) => event.contentPreview)).toEqual(["home"]);
+    expect(events[0]?.sourceSequence).toBe(2);
+  });
+
   it("renders projected display sources while semantic bundles stay memory-only", async () => {
     const alice = await repo.createUser({
       email: `alice-display-sources-${randomUUID()}@example.com`
