@@ -343,6 +343,66 @@ describe("KOE-103 performance architecture", () => {
     ).toBe(true);
   });
 
+  it("accepts a final question detail over a newer pending refresh", async () => {
+    const pendingQuestion = makeQuestion("question-1", {
+      createdAt: "2026-01-01T00:00:00.000Z",
+      status: "pending",
+      updatedAt: "2026-01-01T00:00:03.000Z"
+    });
+    const answeredQuestion = makeQuestion("question-1", {
+      answerMarkdown: "The selected answer landed.",
+      answerPreview: "The selected answer landed.",
+      status: "answered",
+      updatedAt: "2026-01-01T00:00:02.000Z"
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/v1/memory/questions?")) {
+        return jsonResponse({ questions: [pendingQuestion] });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    let latestState: ReturnType<typeof useKoedMemoryQuestions> | undefined;
+    const setToast = vi.fn<(toast: ToastState | null) => void>();
+
+    function Harness() {
+      const state = useKoedMemoryQuestions({
+        apiToken: "token",
+        setToast
+      });
+      useEffect(() => {
+        latestState = state;
+      }, [state]);
+      return null;
+    }
+
+    try {
+      await act(async () => {
+        root.render(createElement(Harness));
+      });
+      await waitFor(() => latestState?.questions[0]?.status === "pending");
+
+      await act(async () => {
+        latestState?.upsertQuestion(answeredQuestion);
+      });
+
+      expect(latestState?.questions[0]).toMatchObject({
+        answerMarkdown: "The selected answer landed.",
+        status: "answered"
+      });
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+
   it("keeps retryable question fallback evidence out of visible answer text", async () => {
     const fallbackText =
       "Evidence bundle returned for Codex synthesis, but Codex failed.";
@@ -1836,6 +1896,155 @@ describe("KOE-103 performance architecture", () => {
           String(input).includes("/v1/memory/graph/threads")
         )
       ).toBe(false);
+    } finally {
+      streamControllerRef.current?.close();
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+
+  it("processes coalesced question updates without dropping selected event refs", async () => {
+    const [project] = makeProjects(1, 1);
+    const selectedThread = project!.threads[0]!;
+    const selectedThreadId = threadSelectionKey(selectedThread);
+    const initialEvent = makeEvent(selectedThread, 0);
+    const liveEvent = {
+      ...makeEvent(selectedThread, 1),
+      id: "coalesced-live-event",
+      contentPreview: "coalesced live event"
+    };
+    const streamControllerRef: {
+      current: ReadableStreamDefaultController<Uint8Array> | null;
+    } = { current: null };
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamControllerRef.current = controller;
+      }
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/v1/memory/graph/stream")) {
+        return new Response(stream, {
+          headers: { "content-type": "text/event-stream" }
+        });
+      }
+      if (url.includes("/v1/memory/graph/threads")) {
+        return jsonResponse({
+          projects: [{ ...project!, threads: [selectedThread] }]
+        });
+      }
+      if (url.includes("/v1/memory/graph/events?")) {
+        return jsonResponse({ events: [initialEvent] });
+      }
+      if (url.includes(`/v1/memory/graph/events/${liveEvent.id}`)) {
+        return jsonResponse({ event: liveEvent });
+      }
+      if (url.includes("/v1/memory/graph/nodes?")) {
+        return jsonResponse({ nodes: [] });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    let latestState: ReturnType<typeof useKoedMemoryGraph> | undefined;
+    const setToast = vi.fn<(toast: ToastState | null) => void>();
+    const onMemoryQuestionUpdate = vi.fn();
+
+    function Harness() {
+      const state = useKoedMemoryGraph({
+        apiToken: "token",
+        onMemoryQuestionUpdate,
+        selectedThreadId,
+        setToast
+      });
+      useEffect(() => {
+        latestState = state;
+      }, [state]);
+      return null;
+    }
+
+    try {
+      await act(async () => {
+        root.render(createElement(Harness));
+      });
+      await waitFor(() => (latestState?.threadEvents.length ?? 0) === 1);
+      await waitFor(() => onMemoryQuestionUpdate.mock.calls.length >= 1);
+      fetchMock.mockClear();
+      onMemoryQuestionUpdate.mockClear();
+
+      await act(async () => {
+        streamControllerRef.current?.enqueue(
+          new TextEncoder().encode(
+            `event: graph_update\ndata: ${JSON.stringify({
+              coalesced: true,
+              id: "question-1",
+              operation: "UPDATE",
+              questionIds: ["question-1"],
+              table: "memory_questions",
+              eventRefs: [
+                {
+                  id: liveEvent.id,
+                  projectId: selectedThread.projectId,
+                  threadId: selectedThread.id
+                }
+              ]
+            })}\n\n`
+          )
+        );
+      });
+
+      await waitFor(() => onMemoryQuestionUpdate.mock.calls.length === 1);
+      await waitFor(() =>
+        latestState?.threadEvents.some((event) => event.id === liveEvent.id)
+      );
+
+      expect(onMemoryQuestionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          questionIds: ["question-1"],
+          table: "memory_questions"
+        })
+      );
+      expect(
+        fetchMock.mock.calls.some(([input]) =>
+          String(input).includes(`/v1/memory/graph/events/${liveEvent.id}`)
+        )
+      ).toBe(true);
+
+      fetchMock.mockClear();
+      onMemoryQuestionUpdate.mockClear();
+      await act(async () => {
+        streamControllerRef.current?.enqueue(
+          new TextEncoder().encode(
+            `event: graph_update\ndata: ${JSON.stringify({
+              coalesced: true,
+              id: liveEvent.id,
+              operation: "UPDATE",
+              questionIds: ["question-2"],
+              table: "memory_events",
+              eventRefs: [
+                {
+                  id: liveEvent.id,
+                  projectId: selectedThread.projectId,
+                  threadId: selectedThread.id
+                }
+              ]
+            })}\n\n`
+          )
+        );
+      });
+
+      await waitFor(() => onMemoryQuestionUpdate.mock.calls.length === 1);
+      expect(onMemoryQuestionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          questionIds: ["question-2"],
+          table: "memory_events"
+        })
+      );
     } finally {
       streamControllerRef.current?.close();
       await act(async () => {

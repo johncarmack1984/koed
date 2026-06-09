@@ -71,6 +71,19 @@ function questionIsAtLeastAsNew(
   return questionTimestamp(incoming) >= questionTimestamp(existing);
 }
 
+function questionShouldReplace(
+  incoming: MemoryQuestionRecord,
+  existing: MemoryQuestionRecord
+) {
+  if (incoming.status !== "pending" && existing.status === "pending") {
+    return true;
+  }
+  if (incoming.status === "pending" && existing.status !== "pending") {
+    return false;
+  }
+  return questionIsAtLeastAsNew(incoming, existing);
+}
+
 function questionIdsFromStreamPayload(payload: GraphUpdatePayload) {
   const ids = new Set<string>();
   if (Array.isArray(payload.questionIds)) {
@@ -110,7 +123,7 @@ export function useKoedMemoryQuestions({
   const upsertQuestion = useCallback((question: MemoryQuestionRecord) => {
     const cached = detailCacheRef.current.get(question.id)?.question;
     const questionForCache =
-      cached && !questionIsAtLeastAsNew(question, cached)
+      cached && !questionShouldReplace(question, cached)
         ? cached
         : { ...cached, ...question };
     detailCacheRef.current.set(question.id, {
@@ -126,7 +139,7 @@ export function useKoedMemoryQuestions({
         return [questionForCache, ...current];
       }
       const existing = current[existingIndex];
-      if (!existing || !questionIsAtLeastAsNew(question, existing)) {
+      if (!existing || !questionShouldReplace(question, existing)) {
         return current;
       }
       const next = [...current];
@@ -274,12 +287,15 @@ export function useKoedMemoryQuestions({
 
   const refreshQuestionFromStream = useCallback(
     (payload: GraphUpdatePayload) => {
-      if (payload.table !== "memory_questions" || !apiToken.trim()) {
+      const questionIds = questionIdsFromStreamPayload(payload);
+      if (
+        (payload.table !== "memory_questions" && questionIds.length === 0) ||
+        !apiToken.trim()
+      ) {
         return;
       }
       const token = apiToken.trim();
       const generation = requestGenerationRef.current;
-      const questionIds = questionIdsFromStreamPayload(payload);
       if (questionIds.length === 0) {
         void loadQuestions({ silent: true });
         return;

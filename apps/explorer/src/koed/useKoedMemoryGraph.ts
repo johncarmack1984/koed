@@ -1138,10 +1138,12 @@ export function useKoedMemoryGraph({
             if (eventName === "graph_update") {
               const payload = parseGraphUpdateFrame(frame);
               koedDebug("stream.graphUpdate", { frame, payload });
-              if (payload?.table === "memory_questions") {
+              const hasMemoryQuestionUpdate =
+                payload?.table === "memory_questions" ||
+                (Array.isArray(payload?.questionIds) &&
+                  payload.questionIds.length > 0);
+              if (hasMemoryQuestionUpdate) {
                 onMemoryQuestionUpdate?.(payload);
-                boundary = buffer.indexOf("\n\n");
-                continue;
               }
               const selectedKey = selectedThreadKeyRef.current;
               const eventRefs = Array.isArray(payload?.eventRefs)
@@ -1221,6 +1223,10 @@ export function useKoedMemoryGraph({
               } else if (payload?.table === "memory_embeddings") {
                 koedDebug("stream.graphUpdateIgnored", {
                   reason: "embedding-index-update"
+                });
+              } else if (hasMemoryQuestionUpdate) {
+                koedDebug("stream.graphUpdateIgnored", {
+                  reason: "memory-question-update"
                 });
               } else {
                 scheduleRefresh({
