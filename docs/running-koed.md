@@ -9,10 +9,16 @@ Nodes, embeddings, and Capture Policies. Redis backs BullMQ queues.
 
 ## Local Run
 
+For the guided zero-to-verified path, run:
+
+```bash
+pnpm clients:bootstrap
+```
+
+If you want to manage the services manually:
+
 ```bash
 pnpm env:setup
-pnpm install
-pnpm build
 docker compose up --build
 ```
 
@@ -22,11 +28,16 @@ If ports conflict with another local app:
 API_HOST_PORT=3300 EXPLORER_WEB_HOST_PORT=5574 EXPLORER_API_BASE_URL=http://localhost:3300 docker compose up --build
 ```
 
-Create a local API token after the API migrations have run:
+Finish the Codex integration after the API migrations have run; `pnpm codex:bootstrap`
+creates or reuses the API token, builds `@koed/db` and `@koed/mcp-server`, and
+verifies capture plus doctor health automatically:
 
 ```bash
-pnpm api-token:create --owner-email local@koed.ai --name "Client Integration"
+pnpm codex:bootstrap
 ```
+
+Use `pnpm explorer:bootstrap` after `pnpm codex:bootstrap` if you want to refresh the
+Explorer token config separately.
 
 The Explorer frontend is available at `http://localhost:5174`, or the host port you selected.
 

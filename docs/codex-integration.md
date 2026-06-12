@@ -2,6 +2,19 @@
 
 Codex is currently the only supported AI Client for Koed.
 
+## Recommended Setup
+
+From a Koed checkout, run the guided bootstrap path:
+
+```bash
+pnpm clients:bootstrap
+```
+
+This command prepares the environment, starts the backend services, creates or
+reuses the local API token, writes it into Explorer local config, refreshes the
+Docker-built Explorer, writes the Codex MCP and Capture Hook configuration,
+verifies capture, and finishes with a doctor check.
+
 ## API Token
 
 Create a local API token and copy it immediately. Full token values are shown once.
@@ -9,6 +22,9 @@ Create a local API token and copy it immediately. Full token values are shown on
 ```bash
 pnpm api-token:create --owner-email local@koed.ai --name "Client Integration"
 ```
+
+Use `pnpm explorer:bootstrap` if you already have a token and just want to write
+it into Explorer local config.
 
 ## MCP Server
 
@@ -26,7 +42,7 @@ Name: koed-selfhost
 Command: node
 Argument: /path/to/koed/packages/mcp-server/dist/cli.js
 Environment:
-  MEMORY_API_URL=http://localhost:3000
+  MEMORY_API_URL=http://localhost:3300
   MEMORY_API_TOKEN=<token>
   MEMORY_LCM_SUMMARY_MAX_PROMPT_TOKENS=48000
 Working directory: /path/to/koed
@@ -115,7 +131,7 @@ not a macOS-style or Windows-only path.
 Verify the local Capture Hook from the checkout:
 
 ```bash
-MEMORY_API_URL=http://localhost:3000 MEMORY_API_TOKEN=<token> pnpm codex:verify-capture
+MEMORY_API_URL=http://localhost:3300 MEMORY_API_TOKEN=<token> pnpm codex:verify-capture
 ```
 
 This command enables personal capture, invokes the same TypeScript Capture Hook
@@ -133,10 +149,10 @@ conversation, and uses global search only for broad cross-project or
 personal-history recall. It returns a compact answer by default so normal Codex
 sessions are not filled with large evidence bundles. Use its explicit
 evidence/detail option only when debugging retrieval. Setup checks should use
-`node packages/mcp-server/dist/cli.js doctor`; optional MCP diagnostic tools
-such as `memory_access_check`, `memory_search`, and `memory_expand` require
-explicit development/operator environment flags and are not part of the normal
-agent-facing surface.
+`pnpm codex:bootstrap` or `pnpm codex:doctor`;
+optional MCP diagnostic tools such as `memory_access_check`, `memory_search`,
+and `memory_expand` require explicit development/operator environment flags and
+are not part of the normal agent-facing surface.
 
 Captured-session titles and LCM summaries are processed by the MCP-local
 background service through Codex app-server mode. If that local service is
