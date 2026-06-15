@@ -126,6 +126,12 @@ export const registerTeamRoutes = (
       const repo = requireRepository();
       const input = acceptTeamInviteSchema.parse(request.body);
       const sessionUser = await authenticateOptionalSession(request);
+      const inviteTokenHash = hashSecret(input.inviteToken);
+      const pendingInvite =
+        await repo.getPendingTeamInviteByTokenHash(inviteTokenHash);
+      if (!pendingInvite) {
+        throw badRequest("Invalid or expired team invite");
+      }
       let passwordHash: string | undefined;
 
       if (!sessionUser) {
@@ -134,7 +140,10 @@ export const registerTeamRoutes = (
             "Email and password are required when accepting an invite without a session"
           );
         }
-        const existingUser = await repo.findUserByEmail(input.email);
+        if (input.email.toLowerCase() !== pendingInvite.email.toLowerCase()) {
+          throw badRequest("Invite email does not match");
+        }
+        const existingUser = await repo.findUserByEmail(pendingInvite.email);
         if (
           existingUser?.passwordHash &&
           !(await argon2.verify(existingUser.passwordHash, input.password))
@@ -151,7 +160,7 @@ export const registerTeamRoutes = (
       }
 
       const accepted = await repo.acceptTeamInvite({
-        tokenHash: hashSecret(input.inviteToken),
+        tokenHash: inviteTokenHash,
         userId: sessionUser?.id,
         email: sessionUser ? undefined : input.email,
         displayName: input.displayName,

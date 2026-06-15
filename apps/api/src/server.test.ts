@@ -403,6 +403,18 @@ const createFakeRepository = (): MemorySourceRepository => {
 
       return invite;
     },
+    async getPendingTeamInviteByTokenHash(tokenHash) {
+      const invite = teamInvites.get(tokenHash);
+      if (
+        !invite ||
+        invite.acceptedAt ||
+        invite.revokedAt ||
+        new Date(invite.expiresAt).getTime() <= Date.now()
+      ) {
+        return null;
+      }
+      return invite;
+    },
     async acceptTeamInvite(input) {
       const invite = teamInvites.get(input.tokenHash);
       if (
@@ -2667,6 +2679,69 @@ describe("account and access flows", () => {
     expect(jsonBody<{ error: string }>(rejected).error).toBe(
       "Session cookie required"
     );
+  });
+
+  it("verifies the invited email before issuing an invite session", async () => {
+    const app = await buildServer({ repository: createFakeRepository() });
+    const ownerRegistered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "invite-owner@example.com", password: "password123" }
+    });
+    await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "invitee@example.com", password: "password456" }
+    });
+    const createdTeam = await app.inject({
+      method: "POST",
+      url: "/v1/teams",
+      headers: { cookie: cookieHeader(ownerRegistered) },
+      payload: { name: "Invite Boundary" }
+    });
+    const team = jsonBody<TeamResponse>(createdTeam).team;
+    const createdInvite = await app.inject({
+      method: "POST",
+      url: `/v1/teams/${team.id}/invites`,
+      headers: { cookie: cookieHeader(ownerRegistered) },
+      payload: {
+        email: "invitee@example.com",
+        role: "member"
+      }
+    });
+    const invite = jsonBody<TeamInviteResponse>(createdInvite);
+
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/v1/team-invites/accept",
+      payload: {
+        inviteToken: invite.inviteToken,
+        email: "attacker@example.com",
+        password: "password456"
+      }
+    });
+    const accepted = await app.inject({
+      method: "POST",
+      url: "/v1/team-invites/accept",
+      payload: {
+        inviteToken: invite.inviteToken,
+        email: "invitee@example.com",
+        password: "password456"
+      }
+    });
+    await app.close();
+
+    expect(rejected.statusCode).toBe(400);
+    expect(cookieHeader(rejected)).toBe("");
+    expect(jsonBody<{ error: string }>(rejected).error).toBe(
+      "Invite email does not match"
+    );
+    expect(accepted.statusCode).toBe(200);
+    expect(cookieHeader(accepted)).toMatch(/^cm_session=/);
+    expect(jsonBody<TeamInviteAcceptResponse>(accepted)).toMatchObject({
+      createdUser: false,
+      user: { email: "invitee@example.com" }
+    });
   });
 
   it("audits API token lifecycle routes", async () => {
