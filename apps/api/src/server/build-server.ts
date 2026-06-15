@@ -42,6 +42,7 @@ import {
   registerRecallRoutes,
   shouldIgnoreGraphStreamPayload
 } from "../memory/index.js";
+import { registerTeamRoutes } from "../team/index.js";
 import { resolveApiServerConfig } from "./config.js";
 import {
   apiLogSchemaVersion,
@@ -391,6 +392,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 
   registerAuthRoutes(app, routeContext);
   registerApiTokenRoutes(app, routeContext);
+  registerTeamRoutes(app, routeContext);
   registerCaptureRoutes(app, routeContext);
   registerRawConversationRoutes(app, routeContext);
   registerRecallRoutes(app, routeContext);

@@ -91,6 +91,32 @@ type AccessResponse = {
   auth?: string;
   providerConfigSupported?: boolean;
 };
+type TeamResponse = {
+  team: { id: string; name: string };
+};
+type TeamInviteResponse = {
+  invite: { id: string; teamId: string; email: string; role: string };
+  inviteToken: string;
+};
+type TeamInviteAcceptResponse = {
+  membership: { teamId: string; userId: string; status: string; role: string };
+  user: { id: string; email: string };
+  createdUser: boolean;
+};
+type TeamWorkspaceResponse = {
+  teamWorkspace: { id: string; teamId: string; name: string };
+};
+type TeamWorkspaceAccessResponse = {
+  access: {
+    teamWorkspaceId: string;
+    teamId: string;
+    userId: string;
+    access: string;
+    canManageWorkspace: boolean;
+    canRecall: boolean;
+    canCreateShare: boolean;
+  };
+};
 
 type CaptureResponse = {
   event: {
@@ -2494,6 +2520,153 @@ describe("account and access flows", () => {
     );
     expect(authed.statusCode).toBe(200);
     expect(jsonBody<AccessResponse>(authed).ok).toBe(true);
+  });
+
+  it("exposes session-only team management APIs", async () => {
+    const app = await buildServer({ repository: createFakeRepository() });
+    const ownerRegistered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "team-owner@example.com", password: "password123" }
+    });
+    const ownerCookie = cookieHeader(ownerRegistered);
+
+    const createdTeam = await app.inject({
+      method: "POST",
+      url: "/v1/teams",
+      headers: { cookie: ownerCookie },
+      payload: { name: "A-Team" }
+    });
+    const team = jsonBody<TeamResponse>(createdTeam).team;
+
+    const createdWorkspace = await app.inject({
+      method: "POST",
+      url: "/v1/team-workspaces",
+      headers: { cookie: ownerCookie },
+      payload: { teamId: team.id, name: "Launch Workspace" }
+    });
+    const teamWorkspace =
+      jsonBody<TeamWorkspaceResponse>(createdWorkspace).teamWorkspace;
+
+    const createdInvite = await app.inject({
+      method: "POST",
+      url: `/v1/teams/${team.id}/invites`,
+      headers: { cookie: ownerCookie },
+      payload: {
+        email: "team-member@example.com",
+        role: "member",
+        ttlHours: 24
+      }
+    });
+    const invite = jsonBody<TeamInviteResponse>(createdInvite);
+
+    const acceptedInvite = await app.inject({
+      method: "POST",
+      url: "/v1/team-invites/accept",
+      payload: {
+        inviteToken: invite.inviteToken,
+        email: "team-member@example.com",
+        password: "password123",
+        displayName: "Team Member"
+      }
+    });
+    const accepted = jsonBody<TeamInviteAcceptResponse>(acceptedInvite);
+    const memberCookie = cookieHeader(acceptedInvite);
+
+    const grantedAccess = await app.inject({
+      method: "PUT",
+      url: `/v1/team-workspaces/${teamWorkspace.id}/access`,
+      headers: { cookie: ownerCookie },
+      payload: { userId: accepted.user.id, access: "read" }
+    });
+
+    const memberAccess = await app.inject({
+      method: "GET",
+      url: `/v1/team-workspaces/${teamWorkspace.id}/access`,
+      headers: { cookie: memberCookie }
+    });
+
+    const rejectedMemberInvite = await app.inject({
+      method: "POST",
+      url: `/v1/teams/${team.id}/invites`,
+      headers: { cookie: memberCookie },
+      payload: {
+        email: "other-member@example.com",
+        role: "member"
+      }
+    });
+    await app.close();
+
+    expect(createdTeam.statusCode).toBe(200);
+    expect(team).toMatchObject({ name: "A-Team" });
+    expect(createdWorkspace.statusCode).toBe(200);
+    expect(teamWorkspace).toMatchObject({
+      teamId: team.id,
+      name: "Launch Workspace"
+    });
+    expect(createdInvite.statusCode).toBe(200);
+    expect(invite.invite).toMatchObject({
+      teamId: team.id,
+      email: "team-member@example.com",
+      role: "member"
+    });
+    expect(invite.inviteToken).toMatch(/^kti_/);
+    expect(acceptedInvite.statusCode).toBe(200);
+    expect(accepted).toMatchObject({
+      createdUser: true,
+      membership: { teamId: team.id, status: "enabled", role: "member" },
+      user: { email: "team-member@example.com" }
+    });
+    expect(memberCookie).toMatch(/^cm_session=/);
+    expect(grantedAccess.statusCode).toBe(200);
+    expect(
+      jsonBody<TeamWorkspaceAccessResponse>(grantedAccess).access
+    ).toMatchObject({
+      teamWorkspaceId: teamWorkspace.id,
+      userId: accepted.user.id,
+      access: "read",
+      canManageWorkspace: false,
+      canRecall: true,
+      canCreateShare: false
+    });
+    expect(memberAccess.statusCode).toBe(200);
+    expect(
+      jsonBody<TeamWorkspaceAccessResponse>(memberAccess).access
+    ).toMatchObject({
+      teamWorkspaceId: teamWorkspace.id,
+      userId: accepted.user.id,
+      access: "read",
+      canRecall: true
+    });
+    expect(rejectedMemberInvite.statusCode).toBe(403);
+  });
+
+  it("does not grant API-token access to team management routes", async () => {
+    const app = await buildServer({ repository: createFakeRepository() });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "team-token@example.com", password: "password123" }
+    });
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie: cookieHeader(registered) },
+      payload: { name: "Client Integration" }
+    });
+    const token = jsonBody<TokenResponse>(createdToken).token;
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/v1/teams",
+      headers: { authorization: `Bearer ${token}` },
+      payload: { name: "Bearer Team" }
+    });
+    await app.close();
+
+    expect(rejected.statusCode).toBe(401);
+    expect(jsonBody<{ error: string }>(rejected).error).toBe(
+      "Session cookie required"
+    );
   });
 
   it("audits API token lifecycle routes", async () => {
