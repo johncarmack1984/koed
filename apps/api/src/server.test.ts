@@ -2879,11 +2879,40 @@ describe("account and access flows", () => {
       headers: { origin: "http://evil.example.test" },
       payload: { email: "allowed-origin@example.com", password: "password123" }
     });
+    const createdTeam = await app.inject({
+      method: "POST",
+      url: "/v1/teams",
+      headers: { cookie: cookieHeader(allowedRegister) },
+      payload: { name: "Origin Guard Team" }
+    });
+    const team = jsonBody<TeamResponse>(createdTeam).team;
+    const createdInvite = await app.inject({
+      method: "POST",
+      url: `/v1/teams/${team.id}/invites`,
+      headers: { cookie: cookieHeader(allowedRegister) },
+      payload: {
+        email: "origin-invite@example.com",
+        role: "member"
+      }
+    });
+    const invite = jsonBody<TeamInviteResponse>(createdInvite);
+    const rejectedInviteAccept = await app.inject({
+      method: "POST",
+      url: "/v1/team-invites/accept",
+      headers: { origin: "http://evil.example.test" },
+      payload: {
+        inviteToken: invite.inviteToken,
+        email: "origin-invite@example.com",
+        password: "password123"
+      }
+    });
     await app.close();
 
     expect(rejectedRegister.statusCode).toBe(403);
     expect(allowedRegister.statusCode).toBe(200);
     expect(rejectedLogin.statusCode).toBe(403);
+    expect(rejectedInviteAccept.statusCode).toBe(403);
+    expect(cookieHeader(rejectedInviteAccept)).toBe("");
   });
 
   it("does not treat root-level API_CORS_ORIGINS as an API process setting", async () => {

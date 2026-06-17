@@ -86,7 +86,8 @@ const originFromReferer = (referer: string | undefined): string | null => {
 const sessionEstablishingWritePaths = new Set([
   "/auth/setup",
   "/auth/register",
-  "/auth/login"
+  "/auth/login",
+  "/v1/team-invites/accept"
 ]);
 
 const requestPathname = (request: FastifyRequest): string => {
