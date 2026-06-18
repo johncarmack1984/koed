@@ -42,6 +42,7 @@ import {
   registerRecallRoutes,
   shouldIgnoreGraphStreamPayload
 } from "../memory/index.js";
+import { registerTeamRoutes } from "../team/index.js";
 import { resolveApiServerConfig } from "./config.js";
 import {
   apiLogSchemaVersion,
@@ -85,7 +86,8 @@ const originFromReferer = (referer: string | undefined): string | null => {
 const sessionEstablishingWritePaths = new Set([
   "/auth/setup",
   "/auth/register",
-  "/auth/login"
+  "/auth/login",
+  "/v1/team-invites/accept"
 ]);
 
 const requestPathname = (request: FastifyRequest): string => {
@@ -391,6 +393,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 
   registerAuthRoutes(app, routeContext);
   registerApiTokenRoutes(app, routeContext);
+  registerTeamRoutes(app, routeContext);
   registerCaptureRoutes(app, routeContext);
   registerRawConversationRoutes(app, routeContext);
   registerRecallRoutes(app, routeContext);

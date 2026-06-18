@@ -725,6 +725,9 @@ export interface MemorySourceRepository
       expiresAt: Date;
     }
   ): Promise<TeamInviteRecord | null>;
+  getPendingTeamInviteByTokenHash(
+    tokenHash: string
+  ): Promise<TeamInviteRecord | null>;
   acceptTeamInvite(input: {
     tokenHash: string;
     userId?: string;

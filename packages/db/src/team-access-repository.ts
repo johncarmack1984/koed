@@ -510,6 +510,25 @@ export const createTeamAccessRepository = (db: KoedDb) => {
       });
     },
 
+    async getPendingTeamInviteByTokenHash(
+      tokenHash: string
+    ): Promise<TeamInviteRecord | null> {
+      const rows = await db
+        .select()
+        .from(teamInvites)
+        .where(
+          and(
+            eq(teamInvites.tokenHash, tokenHash),
+            isNull(teamInvites.acceptedAt),
+            isNull(teamInvites.revokedAt),
+            gt(teamInvites.expiresAt, sql`now()`)
+          )
+        )
+        .limit(1);
+
+      return rows[0] ? mapInviteRecord(rows[0]) : null;
+    },
+
     async acceptTeamInvite(input: {
       tokenHash: string;
       userId?: string;
