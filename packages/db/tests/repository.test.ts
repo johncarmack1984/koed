@@ -782,6 +782,36 @@ describeDb("memory repository visibility", () => {
       canRecall: true,
       canCreateShare: true
     });
+    await repo.setTeamWorkspaceAccess(
+      { userId: owner.id },
+      {
+        teamWorkspaceId: workspace!.id,
+        userId: existingUser.id,
+        access: "disabled"
+      }
+    );
+    await expect(
+      repo.getTeamWorkspaceAccess({ userId: existingUser.id }, workspace!.id)
+    ).resolves.toMatchObject({
+      access: "disabled",
+      canRecall: false,
+      canCreateShare: false
+    });
+    await repo.setTeamWorkspaceAccess(
+      { userId: owner.id },
+      {
+        teamWorkspaceId: workspace!.id,
+        userId: existingUser.id,
+        access: "read"
+      }
+    );
+    await expect(
+      repo.getTeamWorkspaceAccess({ userId: existingUser.id }, workspace!.id)
+    ).resolves.toMatchObject({
+      access: "read",
+      canRecall: true,
+      canCreateShare: false
+    });
 
     const staleInviteHash = `stale-${randomUUID()}-${randomUUID()}`;
     await repo.createTeamInvite(
@@ -912,12 +942,13 @@ describeDb("memory repository visibility", () => {
     const auditRows = await pool.query<{
       action: string;
       metadata: Record<string, unknown>;
+      audit_sequence: string;
     }>(
       `
-        select action, metadata
+        select action, metadata, audit_sequence
         from audit_events
         where action like 'team.%'
-        order by created_at asc, id asc
+        order by created_at asc, audit_sequence asc
       `
     );
     expect(auditRows.rows.map((row) => row.action)).toEqual(
@@ -925,15 +956,99 @@ describeDb("memory repository visibility", () => {
         "team.invite.created",
         "team.invite.accepted",
         "team.member.enabled",
-        "team.member.disabled"
+        "team.member.disabled",
+        "team.workspace.created",
+        "team.workspace_access.created",
+        "team.workspace_access.removed"
       ])
     );
+    expect(
+      auditRows.rows.find(
+        (row) => row.action === "team.workspace_access.created"
+      )?.metadata
+    ).toMatchObject({
+      teamId: team.id,
+      teamWorkspaceId: workspace!.id,
+      userId: existingUser.id,
+      access: "write",
+      previousAccess: "disabled"
+    });
+    expect(
+      auditRows.rows.find(
+        (row) => row.action === "team.workspace_access.removed"
+      )?.metadata
+    ).toMatchObject({
+      teamId: team.id,
+      teamWorkspaceId: workspace!.id,
+      userId: existingUser.id,
+      access: "disabled",
+      previousAccess: "write"
+    });
+    const accessEvents = auditRows.rows.filter(
+      (row) =>
+        row.metadata.teamWorkspaceId === workspace!.id &&
+        row.metadata.userId === existingUser.id
+    );
+    expect(accessEvents.map((row) => row.action)).toEqual([
+      "team.workspace_access.created",
+      "team.workspace_access.removed",
+      "team.workspace_access.created"
+    ]);
+    expect(accessEvents.at(-1)?.metadata).toMatchObject({
+      teamId: team.id,
+      teamWorkspaceId: workspace!.id,
+      userId: existingUser.id,
+      access: "read",
+      previousAccess: "disabled"
+    });
+    const acceptedAuditIndex = auditRows.rows.findIndex(
+      (row) =>
+        row.action === "team.invite.accepted" &&
+        row.metadata.userId === acceptedNewUser!.user.id
+    );
+    const enabledAuditIndex = auditRows.rows.findIndex(
+      (row) =>
+        row.action === "team.member.enabled" &&
+        row.metadata.userId === acceptedNewUser!.user.id
+    );
+    expect(acceptedAuditIndex).toBeGreaterThanOrEqual(0);
+    expect(enabledAuditIndex).toBeGreaterThan(acceptedAuditIndex);
     for (const row of auditRows.rows) {
       expect(JSON.stringify(row.metadata)).not.toContain(existingTokenHash);
       expect(JSON.stringify(row.metadata)).not.toContain(newUserTokenHash);
       expect(JSON.stringify(row.metadata)).not.toContain("hashed-password");
       expect(JSON.stringify(row.metadata)).not.toContain("raw memory");
+      expect(JSON.stringify(row.metadata)).not.toContain("Launch Workspace");
     }
+    const teamAuditEvents = await repo.listTeamAuditEvents(
+      { userId: owner.id },
+      { teamId: team.id }
+    );
+    const removedAccessAudit = teamAuditEvents?.find(
+      (event) => event.action === "team.workspace_access.removed"
+    );
+    expect(teamAuditEvents?.[0]).toMatchObject({
+      action: "team.member.enabled"
+    });
+    expect(removedAccessAudit).toMatchObject({
+      action: "team.workspace_access.removed"
+    });
+    expect(removedAccessAudit?.metadata).toMatchObject({
+      teamId: team.id,
+      teamWorkspaceId: workspace!.id,
+      userId: existingUser.id
+    });
+    await expect(
+      repo.listTeamAuditEvents(
+        { userId: owner.id },
+        { teamId: team.id, action: "team.invite.created", limit: 1 }
+      )
+    ).resolves.toEqual([
+      expect.objectContaining({ action: "team.invite.created" })
+    ]);
+    await expect(
+      repo.listTeamAuditEvents({ userId: existingUser.id }, { teamId: team.id })
+    ).resolves.toBeNull();
   });
 
   it("rolls back API token lifecycle changes when audit insertion fails", async () => {
