@@ -83,7 +83,10 @@ export const users = pgTable("users", {
   passwordHash: text("password_hash"),
   createdAt: now(),
   updatedAt: updatedNow(),
-  disabledAt: timestamp("disabled_at", { withTimezone: true })
+  disabledAt: timestamp("disabled_at", { withTimezone: true }),
+  disabledReason: text("disabled_reason"),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  deletionReason: text("deletion_reason")
 });
 
 export const teams = pgTable(
@@ -117,7 +120,8 @@ export const teamMemberships = pgTable(
     createdAt: now(),
     updatedAt: updatedNow(),
     acceptedAt: timestamp("accepted_at", { withTimezone: true }),
-    disabledAt: timestamp("disabled_at", { withTimezone: true })
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    disabledReason: text("disabled_reason")
   },
   (table) => [
     unique("team_memberships_team_user_unique").on(table.teamId, table.userId),
@@ -160,6 +164,8 @@ export const teamWorkspaceAccessGrants = pgTable(
     grantedByUserId: uuid("granted_by_user_id").references(() => users.id, {
       onDelete: "set null"
     }),
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    disabledReason: text("disabled_reason"),
     createdAt: now(),
     updatedAt: updatedNow()
   },
@@ -219,9 +225,7 @@ export const workspaces = pgTable(
   "workspaces",
   {
     id: id(),
-    ownerUserId: uuid("owner_user_id").references(() => users.id, {
-      onDelete: "cascade"
-    }),
+    ownerUserId: uuid("owner_user_id").references(() => users.id),
     visibility: visibilityScope("visibility").notNull(),
     name: text("name").notNull(),
     rootPath: text("root_path"),
@@ -242,9 +246,7 @@ export const sessions = pgTable(
   "sessions",
   {
     id: id(),
-    ownerUserId: uuid("owner_user_id").references(() => users.id, {
-      onDelete: "cascade"
-    }),
+    ownerUserId: uuid("owner_user_id").references(() => users.id),
     workspaceId: uuid("workspace_id").references(() => workspaces.id, {
       onDelete: "set null"
     }),
@@ -283,6 +285,14 @@ export const sessions = pgTable(
       .defaultNow(),
     createdAt: now(),
     updatedAt: updatedNow(),
+    personalDeletedAt: timestamp("personal_deleted_at", {
+      withTimezone: true
+    }),
+    personalDeletedByUserId: uuid("personal_deleted_by_user_id").references(
+      () => users.id,
+      { onDelete: "set null" }
+    ),
+    personalDeletionReason: text("personal_deletion_reason"),
     invalidatedAt: timestamp("invalidated_at", { withTimezone: true }),
     invalidationReason: text("invalidation_reason")
   },
@@ -307,9 +317,7 @@ export const turns = pgTable(
     sessionId: uuid("session_id")
       .notNull()
       .references(() => sessions.id, { onDelete: "cascade" }),
-    ownerUserId: uuid("owner_user_id").references(() => users.id, {
-      onDelete: "cascade"
-    }),
+    ownerUserId: uuid("owner_user_id").references(() => users.id),
     visibility: visibilityScope("visibility").notNull().default("personal"),
     externalTurnId: text("external_turn_id"),
     turnIndex: integer("turn_index"),
@@ -362,9 +370,7 @@ export const messages = pgTable(
       .notNull()
       .references(() => sessions.id, { onDelete: "cascade" }),
     turnId: uuid("turn_id").references(() => turns.id, { onDelete: "cascade" }),
-    ownerUserId: uuid("owner_user_id").references(() => users.id, {
-      onDelete: "cascade"
-    }),
+    ownerUserId: uuid("owner_user_id").references(() => users.id),
     visibility: visibilityScope("visibility").notNull().default("personal"),
     role: text("role").notNull(),
     content: text("content").notNull(),
@@ -415,9 +421,7 @@ export const toolEvents = pgTable(
     messageId: uuid("message_id").references(() => messages.id, {
       onDelete: "set null"
     }),
-    ownerUserId: uuid("owner_user_id").references(() => users.id, {
-      onDelete: "cascade"
-    }),
+    ownerUserId: uuid("owner_user_id").references(() => users.id),
     visibility: visibilityScope("visibility").notNull().default("personal"),
     toolName: text("tool_name").notNull(),
     toolInput: jsonb("tool_input").$type<unknown>(),
@@ -462,9 +466,7 @@ export const memoryEvents = pgTable(
     actorUserId: uuid("actor_user_id").references(() => users.id, {
       onDelete: "set null"
     }),
-    ownerUserId: uuid("owner_user_id").references(() => users.id, {
-      onDelete: "cascade"
-    }),
+    ownerUserId: uuid("owner_user_id").references(() => users.id),
     visibility: visibilityScope("visibility").notNull(),
     eventType: memoryEventType("event_type").notNull(),
     sourceRuntime: sourceRuntime("source_runtime"),
@@ -497,6 +499,14 @@ export const memoryEvents = pgTable(
       .defaultNow(),
     createdAt: now(),
     updatedAt: updatedNow(),
+    personalDeletedAt: timestamp("personal_deleted_at", {
+      withTimezone: true
+    }),
+    personalDeletedByUserId: uuid("personal_deleted_by_user_id").references(
+      () => users.id,
+      { onDelete: "set null" }
+    ),
+    personalDeletionReason: text("personal_deletion_reason"),
     invalidatedAt: timestamp("invalidated_at", { withTimezone: true }),
     invalidationReason: text("invalidation_reason")
   },
@@ -554,9 +564,7 @@ export const memoryNodes = pgTable(
   "memory_nodes",
   {
     id: id(),
-    ownerUserId: uuid("owner_user_id").references(() => users.id, {
-      onDelete: "cascade"
-    }),
+    ownerUserId: uuid("owner_user_id").references(() => users.id),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, {
       onDelete: "set null"
     }),
@@ -600,6 +608,14 @@ export const memoryNodes = pgTable(
       .defaultNow(),
     createdAt: now(),
     updatedAt: updatedNow(),
+    personalDeletedAt: timestamp("personal_deleted_at", {
+      withTimezone: true
+    }),
+    personalDeletedByUserId: uuid("personal_deleted_by_user_id").references(
+      () => users.id,
+      { onDelete: "set null" }
+    ),
+    personalDeletionReason: text("personal_deletion_reason"),
     invalidatedAt: timestamp("invalidated_at", { withTimezone: true }),
     invalidationReason: text("invalidation_reason")
   },
@@ -710,9 +726,7 @@ export const memoryEmbeddings = pgTable(
     messageId: uuid("message_id").references(() => messages.id, {
       onDelete: "cascade"
     }),
-    ownerUserId: uuid("owner_user_id").references(() => users.id, {
-      onDelete: "cascade"
-    }),
+    ownerUserId: uuid("owner_user_id").references(() => users.id),
     visibility: visibilityScope("visibility").notNull(),
     embeddingModel: text("embedding_model").notNull(),
     embeddingDimensions: integer("embedding_dimensions").notNull(),
@@ -723,7 +737,15 @@ export const memoryEmbeddings = pgTable(
     sourceText: text("source_text"),
     createdAt: now(),
     invalidatedAt: timestamp("invalidated_at", { withTimezone: true }),
-    invalidationReason: text("invalidation_reason")
+    invalidationReason: text("invalidation_reason"),
+    personalDeletedAt: timestamp("personal_deleted_at", {
+      withTimezone: true
+    }),
+    personalDeletedByUserId: uuid("personal_deleted_by_user_id").references(
+      () => users.id,
+      { onDelete: "set null" }
+    ),
+    personalDeletionReason: text("personal_deletion_reason")
   },
   (table) => [
     uniqueIndex("memory_embeddings_unique_active_node_chunk")
@@ -980,9 +1002,7 @@ export const conversationItems = pgTable(
   "conversation_items",
   {
     id: id(),
-    ownerUserId: uuid("owner_user_id").references(() => users.id, {
-      onDelete: "cascade"
-    }),
+    ownerUserId: uuid("owner_user_id").references(() => users.id),
     visibility: visibilityScope("visibility").notNull().default("personal"),
     sessionId: uuid("session_id").references(() => sessions.id, {
       onDelete: "set null"
@@ -1021,6 +1041,14 @@ export const conversationItems = pgTable(
       () => users.id,
       { onDelete: "set null" }
     ),
+    personalDeletedAt: timestamp("personal_deleted_at", {
+      withTimezone: true
+    }),
+    personalDeletedByUserId: uuid("personal_deleted_by_user_id").references(
+      () => users.id,
+      { onDelete: "set null" }
+    ),
+    personalDeletionReason: text("personal_deletion_reason"),
     metadata: jsonb("metadata")
       .$type<Record<string, unknown>>()
       .notNull()
@@ -1088,6 +1116,66 @@ export const conversationItems = pgTable(
     check(
       "conversation_items_transport_chunk_count_check",
       sql`${table.transportChunkCount} >= 1 and ${table.transportChunkIndex} < ${table.transportChunkCount}`
+    )
+  ]
+);
+
+export const teamSessionShareGrants = pgTable(
+  "team_session_share_grants",
+  {
+    id: id(),
+    ownerUserId: uuid("owner_user_id").references(() => users.id, {
+      onDelete: "set null"
+    }),
+    sessionId: uuid("session_id").references(() => sessions.id, {
+      onDelete: "set null"
+    }),
+    teamId: uuid("team_id")
+      .notNull()
+      .references(() => teams.id),
+    teamWorkspaceId: uuid("team_workspace_id").notNull(),
+    grantedByUserId: uuid("granted_by_user_id").references(() => users.id, {
+      onDelete: "set null"
+    }),
+    createdAt: now(),
+    updatedAt: updatedNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedByUserId: uuid("revoked_by_user_id").references(() => users.id, {
+      onDelete: "set null"
+    }),
+    revocationReason: text("revocation_reason"),
+    personalDeletedAt: timestamp("personal_deleted_at", {
+      withTimezone: true
+    }),
+    personalDeletedByUserId: uuid("personal_deleted_by_user_id").references(
+      () => users.id,
+      { onDelete: "set null" }
+    ),
+    personalDeletionReason: text("personal_deletion_reason"),
+    retainedByTeamAt: timestamp("retained_by_team_at", {
+      withTimezone: true
+    }).defaultNow(),
+    retentionReason: text("retention_reason")
+      .notNull()
+      .default("active_team_share")
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.teamWorkspaceId, table.teamId],
+      foreignColumns: [teamWorkspaces.id, teamWorkspaces.teamId],
+      name: "team_session_share_grants_workspace_team_fk"
+    }),
+    uniqueIndex("team_session_share_grants_active_unique")
+      .on(table.sessionId, table.teamWorkspaceId)
+      .where(
+        sql`${table.sessionId} is not null and ${table.revokedAt} is null`
+      ),
+    index("team_session_share_grants_workspace_active_idx")
+      .on(table.teamWorkspaceId, table.createdAt.desc())
+      .where(sql`${table.revokedAt} is null`),
+    index("team_session_share_grants_owner_idx").on(
+      table.ownerUserId,
+      table.createdAt.desc()
     )
   ]
 );

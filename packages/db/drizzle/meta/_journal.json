@@ -36,6 +36,13 @@
       "when": 1781866399219,
       "tag": "0004_white_paper_doll",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1781882924553,
+      "tag": "0005_typical_vivisector",
+      "breakpoints": true
     }
   ]
 }

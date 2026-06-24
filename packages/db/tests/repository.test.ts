@@ -134,6 +134,7 @@ describeDb("memory repository visibility", () => {
       `
         truncate table
           audit_events,
+          team_session_share_grants,
           team_workspace_access_grants,
           team_invites,
           team_workspaces,
@@ -291,6 +292,29 @@ describeDb("memory repository visibility", () => {
     expect(await repo.getApiTokenUser(tokenHash)).toBeNull();
   });
 
+  it("rejects tombstoned users from account and API token authentication", async () => {
+    const email = `deleted-api-token-${randomUUID()}@example.com`;
+    const user = await repo.createUser({
+      email,
+      displayName: "Deleted API Token User"
+    });
+    const tokenHash = `hash-${randomUUID()}-${randomUUID()}`;
+    await repo.createApiToken({
+      ownerUserId: user.id,
+      name: "Deleted User Token",
+      tokenHash,
+      tokenPrefix: "cmt_deleted"
+    });
+
+    await pool.query("update users set deleted_at = now() where id = $1", [
+      user.id
+    ]);
+
+    await expect(repo.getUser(user.id)).resolves.toBeNull();
+    await expect(repo.findUserByEmail(email)).resolves.toBeNull();
+    await expect(repo.getApiTokenUser(tokenHash)).resolves.toBeNull();
+  });
+
   it("enforces Team roles and Workspace access at request time", async () => {
     const owner = await repo.createUser({
       email: `team-owner-${randomUUID()}@example.com`,
@@ -441,6 +465,30 @@ describeDb("memory repository visibility", () => {
       canCreateShare: false,
       canManageWorkspace: false
     });
+    await pool.query(
+      `
+        update team_workspace_access_grants
+        set disabled_at = now(), disabled_reason = 'billing_suspended'
+        where team_workspace_id = $1 and user_id = $2
+      `,
+      [workspace!.id, member.id]
+    );
+    await expect(
+      repo.getTeamWorkspaceAccess({ userId: member.id }, workspace!.id)
+    ).resolves.toMatchObject({
+      access: "disabled",
+      canRecall: false,
+      canCreateShare: false,
+      canManageWorkspace: false
+    });
+    await pool.query(
+      `
+        update team_workspace_access_grants
+        set disabled_at = null, disabled_reason = null
+        where team_workspace_id = $1 and user_id = $2
+      `,
+      [workspace!.id, member.id]
+    );
 
     await expect(
       repo.setTeamWorkspaceAccess(
@@ -600,6 +648,195 @@ describeDb("memory repository visibility", () => {
       acceptedAt: memberAcceptedAt,
       disabledAt: null
     });
+  });
+
+  it("retains Team session share grants through personal deletion and member exit", async () => {
+    const owner = await repo.createUser({
+      email: `retention-owner-${randomUUID()}@example.com`,
+      displayName: "Retention Owner"
+    });
+    const member = await repo.createUser({
+      email: `retention-member-${randomUUID()}@example.com`,
+      displayName: "Retention Member"
+    });
+    const team = await repo.createTeam(
+      { userId: owner.id },
+      { name: "Retention Team" }
+    );
+    await repo.upsertTeamMember(
+      { userId: owner.id },
+      { teamId: team.id, userId: member.id, role: "member" }
+    );
+    const workspace = await repo.createTeamWorkspace(
+      { userId: owner.id },
+      { teamId: team.id, name: "Retained Workspace" }
+    );
+    await repo.setTeamWorkspaceAccess(
+      { userId: owner.id },
+      {
+        teamWorkspaceId: workspace!.id,
+        userId: member.id,
+        access: "read"
+      }
+    );
+    const session = await repo.createCapturedSession(
+      { userId: owner.id },
+      {
+        workspaceId: "retention-project",
+        externalSessionId: `retained-session-${randomUUID()}`,
+        sourceRuntime: "codex",
+        captureMethod: "hook"
+      }
+    );
+    const event = await repo.createMemoryEvent(
+      { userId: owner.id },
+      {
+        visibility: "personal",
+        workspaceId: "retention-project",
+        sessionId: session.id,
+        actor: "user",
+        eventType: "captured",
+        rawEventType: "user_prompt",
+        content: "The billing grace period decision stays with the workspace."
+      }
+    );
+
+    const grant = await pool.query<{ id: string }>(
+      `
+        insert into team_session_share_grants (
+          owner_user_id,
+          session_id,
+          team_id,
+          team_workspace_id,
+          granted_by_user_id
+        )
+        values ($1, $2, $3, $4, $5)
+        returning id
+      `,
+      [owner.id, session.id, team.id, workspace!.id, owner.id]
+    );
+    const grantId = grant.rows[0]!.id;
+
+    await pool.query(
+      `
+        update sessions
+        set
+          personal_deleted_at = now(),
+          personal_deleted_by_user_id = $1,
+          personal_deletion_reason = 'user_deleted'
+        where id = $2
+      `,
+      [owner.id, session.id]
+    );
+    await pool.query(
+      `
+        update memory_events
+        set
+          personal_deleted_at = now(),
+          personal_deleted_by_user_id = $1,
+          personal_deletion_reason = 'user_deleted'
+        where id = $2
+      `,
+      [owner.id, event.id]
+    );
+    await pool.query(
+      `
+        update team_session_share_grants
+        set
+          personal_deleted_at = now(),
+          personal_deleted_by_user_id = $1,
+          personal_deletion_reason = 'user_deleted'
+        where id = $2
+      `,
+      [owner.id, grantId]
+    );
+    await repo.upsertTeamMember(
+      { userId: owner.id },
+      {
+        teamId: team.id,
+        userId: member.id,
+        role: "member",
+        status: "disabled"
+      }
+    );
+    await repo.setTeamWorkspaceAccess(
+      { userId: owner.id },
+      {
+        teamWorkspaceId: workspace!.id,
+        userId: member.id,
+        access: "disabled"
+      }
+    );
+    await pool.query(
+      `
+        update users
+        set
+          deleted_at = now(),
+          deletion_reason = 'account_deleted'
+        where id = $1
+      `,
+      [owner.id]
+    );
+    await expect(
+      pool.query("delete from users where id = $1", [owner.id])
+    ).rejects.toThrow();
+
+    const retained = await pool.query<{
+      id: string;
+      session_id: string;
+      owner_user_id: string;
+      personal_deleted_at: Date | null;
+      revoked_at: Date | null;
+      retention_reason: string;
+    }>(
+      `
+        select
+          id,
+          session_id,
+          owner_user_id,
+          personal_deleted_at,
+          revoked_at,
+          retention_reason
+        from team_session_share_grants
+        where id = $1
+      `,
+      [grantId]
+    );
+    expect(retained.rows).toHaveLength(1);
+    expect(retained.rows[0]).toMatchObject({
+      id: grantId,
+      session_id: session.id,
+      owner_user_id: owner.id,
+      revoked_at: null,
+      retention_reason: "active_team_share"
+    });
+    expect(retained.rows[0]!.personal_deleted_at).toBeInstanceOf(Date);
+    const retainedSources = await pool.query<{
+      session_exists: string;
+      memory_event_exists: string;
+    }>(
+      `
+        select
+          exists(select 1 from sessions where id = $1)::text as session_exists,
+          exists(select 1 from memory_events where id = $2)::text as memory_event_exists
+      `,
+      [session.id, event.id]
+    );
+    expect(retainedSources.rows[0]).toEqual({
+      session_exists: "true",
+      memory_event_exists: "true"
+    });
+    await expect(
+      repo.getTeamWorkspaceAccess({ userId: member.id }, workspace!.id)
+    ).resolves.toMatchObject({
+      membershipStatus: "disabled",
+      access: "disabled",
+      canRecall: false,
+      canCreateShare: false
+    });
+    await expect(
+      pool.query("delete from team_workspaces where id = $1", [workspace!.id])
+    ).rejects.toThrow();
   });
 
   it("handles Team invites, acceptance, disablement, and audit boundaries", async () => {
@@ -1136,6 +1373,20 @@ describeDb("memory repository visibility", () => {
       user.id
     ]);
     expect(await repo.getSessionUser(disabledHash)).toBeNull();
+
+    const deletedUser = await repo.createUser({
+      email: `auth-session-deleted-${randomUUID()}@example.com`
+    });
+    const deletedHash = `${randomUUID()}-${randomUUID()}`;
+    await repo.createSession(
+      deletedUser.id,
+      deletedHash,
+      new Date(Date.now() + 60_000)
+    );
+    await pool.query("update users set deleted_at = now() where id = $1", [
+      deletedUser.id
+    ]);
+    expect(await repo.getSessionUser(deletedHash)).toBeNull();
   });
 
   it("records user-scoped audit events through the Drizzle-backed repository slice", async () => {
@@ -2568,6 +2819,35 @@ describeDb("memory repository visibility", () => {
     ).rejects.toThrow("above threshold");
   });
 
+  it("excludes personal-deleted memory events from Personal Memory recall", async () => {
+    const alice = await repo.createUser({
+      email: `alice-personal-deleted-recall-${randomUUID()}@example.com`
+    });
+    const engine = createMemoryEngine(repo);
+    const workspaceId = `workspace-personal-deleted-${randomUUID()}`;
+    const event = await captureUserEvent(engine, alice.id, {
+      workspaceId,
+      content: "The private launch codename is Violet Harbor."
+    });
+
+    await pool.query(
+      "update memory_events set personal_deleted_at = now() where id = $1",
+      [event.id]
+    );
+
+    const recall = await engine.searchMemory({
+      requesterContext: { userId: alice.id },
+      query: "Violet Harbor",
+      scope: "personal",
+      searchDomain: "project",
+      workspaceId,
+      retrievalStage: "lexical_search",
+      limit: 5
+    });
+
+    expect(recall.results).toEqual([]);
+  });
+
   it("ranks original lexical story evidence above later question and tool echoes", async () => {
     const alice = await repo.createUser({
       email: `alice-lexical-echo-${randomUUID()}@example.com`
@@ -3407,6 +3687,73 @@ describeDb("memory repository visibility", () => {
       "Hook-only assistant reply should be retained.",
       "Hook-only prompt should be retained."
     ]);
+  });
+
+  it("skips personal-deleted raw conversation items during semantic projection", async () => {
+    const alice = await repo.createUser({
+      email: `alice-projection-personal-delete-${randomUUID()}@example.com`
+    });
+    const workspaceId = randomUUID();
+    await pool.query(
+      `
+        insert into workspaces (id, owner_user_id, visibility, name)
+        values ($1, $2, 'personal', 'Projection Personal Delete Project')
+      `,
+      [workspaceId, alice.id]
+    );
+    const session = await repo.createCapturedSession(
+      { userId: alice.id },
+      {
+        workspaceId,
+        externalSessionId: `projection-personal-delete-${randomUUID()}`,
+        sourceRuntime: "codex",
+        captureMethod: "hook"
+      }
+    );
+    const [rawItem] = await repo.createConversationItems(
+      { userId: alice.id },
+      {
+        items: [
+          {
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-hook-v1",
+            sourceTransport: "hook",
+            externalSessionId: session.externalSessionId ?? undefined,
+            externalThreadId: session.externalSessionId ?? undefined,
+            externalTurnId: "deleted-turn-1",
+            sourceRecordType: "hook_payload",
+            sourceEventType: "UserPromptSubmit",
+            sourceSequence: 1,
+            rawJson: {
+              hook_event_name: "UserPromptSubmit",
+              prompt: "This deleted raw prompt must not be projected."
+            },
+            rawText: "This deleted raw prompt must not be projected.",
+            sourceHash: `deleted-raw-prompt-${randomUUID()}`,
+            idempotencyKey: `deleted-raw-prompt-${randomUUID()}`,
+            projectionStatus: "pending"
+          }
+        ]
+      }
+    );
+    await pool.query(
+      "update conversation_items set personal_deleted_at = now() where id = $1",
+      [rawItem!.id]
+    );
+
+    const projection = await repo.projectPendingConversationItems(
+      { userId: alice.id },
+      { limit: 10 }
+    );
+    const events = await pool.query<{ count: string }>(
+      "select count(*)::text as count from memory_events where session_id = $1",
+      [session.id]
+    );
+
+    expect(projection.rawItemsScanned).toBe(0);
+    expect(projection.memoryEventsCreated).toBe(0);
+    expect(events.rows[0]?.count).toBe("0");
   });
 
   it("exposes transcript source chronology for projected graph events", async () => {
