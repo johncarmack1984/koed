@@ -4,7 +4,14 @@ import {
   type ChildProcess,
   type SpawnSyncReturns
 } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync
+} from "node:fs";
 import { resolve } from "node:path";
 import {
   resolveLocalApiToken,
@@ -16,6 +23,11 @@ import {
   resolveKoedServerPaths,
   type KoedServerPaths
 } from "./paths.js";
+import {
+  readRuntimeState,
+  removeRuntimeState,
+  writeRuntimeState
+} from "./runtime-state.js";
 import { collectKoedServerStatus } from "./status.js";
 import type { KoedServerRuntimeState } from "./types.js";
 
@@ -40,6 +52,71 @@ export interface KoedServerStartOptions {
   spawn?: SpawnLike;
   collectStatus?: typeof collectKoedServerStatus;
 }
+
+export interface KoedServerDaemonStartResult {
+  ok: boolean;
+  state: "starting" | "healthy" | "needs_attention";
+  koedHome: string;
+  pid?: number;
+  message: string;
+  action?: string;
+}
+
+export interface KoedServerDaemonStartOptions {
+  environment?: NodeJS.ProcessEnv;
+  command?: string;
+  entrypoint?: string;
+  force?: boolean;
+  existsSync?: typeof existsSync;
+  readFileSync?: typeof readFileSync;
+  rmSync?: typeof rmSync;
+  openSync?: typeof openSync;
+  closeSync?: typeof closeSync;
+  checkPid?: (pid: number) => boolean;
+  spawn?: SpawnLike;
+  collectStatus?: typeof collectKoedServerStatus;
+}
+
+const resolveDependencyMode = (
+  environment: NodeJS.ProcessEnv
+): "managed" | "external" =>
+  environment.KOED_DEPENDENCY_MODE === "external" ? "external" : "managed";
+
+const resolveStartedBy = (environment: NodeJS.ProcessEnv): "cli" | "desktop" =>
+  environment.KOED_DESKTOP_MANAGED === "1" ? "desktop" : "cli";
+
+const resolveRuntimeLogs = (
+  paths: KoedServerPaths
+): { supervisor: string; supervisorError: string } => ({
+  supervisor: resolve(paths.logsDir, "koed-server.out.log"),
+  supervisorError: resolve(paths.logsDir, "koed-server.err.log")
+});
+
+const resolveKoedServerVersion = (environment: NodeJS.ProcessEnv): string =>
+  environment.KOED_SERVER_VERSION ??
+  environment.npm_package_version ??
+  "development";
+
+const acquireStartingLock = (
+  lockPath: string,
+  openFile: typeof openSync,
+  closeFile: typeof closeSync
+): boolean => {
+  try {
+    const fd = openFile(lockPath, "wx", 0o600);
+    closeFile(fd);
+    return true;
+  } catch (error) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? String((error as { code?: unknown }).code)
+        : "";
+    if (code === "EEXIST") {
+      return false;
+    }
+    throw error;
+  }
+};
 
 const runCommand = (
   paths: KoedServerPaths,
@@ -150,6 +227,141 @@ const localServiceEnv = (
     EXPLORER_API_BASE_URL: resolveApiUrl(environment, repoEnv),
     VITE_KOED_API_BASE_URL: resolveApiUrl(environment, repoEnv)
   };
+};
+
+export const startKoedServerDaemon = async ({
+  environment = process.env,
+  command = process.execPath,
+  entrypoint = process.argv[1],
+  force = false,
+  existsSync: pathExists = existsSync,
+  readFileSync: readFile = readFileSync,
+  rmSync: remove = rmSync,
+  openSync: openFile = openSync,
+  closeSync: closeFile = closeSync,
+  checkPid = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  spawn = nodeSpawn as SpawnLike,
+  collectStatus = collectKoedServerStatus
+}: KoedServerDaemonStartOptions = {}): Promise<KoedServerDaemonStartResult> => {
+  const paths = resolveKoedServerPaths(environment);
+  ensureKoedHome(paths);
+  mkdirSync(paths.logsDir, { recursive: true, mode: 0o700 });
+
+  if (pathExists(paths.runtimeStatePath)) {
+    const runtime = readRuntimeState(paths, {
+      existsSync: pathExists,
+      readFileSync: readFile
+    });
+    try {
+      if (
+        runtime &&
+        Number.isInteger(runtime.pid) &&
+        runtime.pid > 0 &&
+        checkPid(runtime.pid)
+      ) {
+        return {
+          ok: true,
+          state: "starting",
+          koedHome: paths.koedHome,
+          pid: runtime.pid,
+          message: "Koed server is already starting in the background."
+        };
+      }
+      removeRuntimeState(paths, { rmSync: remove });
+    } catch {
+      removeRuntimeState(paths, { rmSync: remove });
+    }
+  }
+
+  const current = await collectStatus(environment);
+  if (!force && current.api.state === "healthy") {
+    return {
+      ok: true,
+      state: "healthy",
+      koedHome: paths.koedHome,
+      message: "Koed server API is already reachable."
+    };
+  }
+
+  if (!entrypoint) {
+    return {
+      ok: false,
+      state: "needs_attention",
+      koedHome: paths.koedHome,
+      message: "Could not determine the koed-server CLI entrypoint.",
+      action: "Run koed-server start from a shell and keep it running."
+    };
+  }
+
+  const logs = resolveRuntimeLogs(paths);
+  const lockPath = resolve(paths.runDir, "koed-server.starting.lock");
+  if (!acquireStartingLock(lockPath, openFile, closeFile)) {
+    return {
+      ok: true,
+      state: "starting",
+      koedHome: paths.koedHome,
+      message: "Koed server is already starting in the background."
+    };
+  }
+
+  let stdoutFd: number | null = null;
+  let stderrFd: number | null = null;
+  try {
+    stdoutFd = openFile(logs.supervisor, "a", 0o600);
+    stderrFd = openFile(logs.supervisorError, "a", 0o600);
+    const child = spawn(command, [entrypoint, "start"], {
+      cwd: paths.repoRoot,
+      detached: true,
+      env: {
+        ...process.env,
+        ...environment,
+        KOED_DESKTOP_MANAGED: environment.KOED_DESKTOP_MANAGED,
+        KOED_REPO_ROOT: environment.KOED_REPO_ROOT ?? paths.repoRoot
+      },
+      stdio: ["ignore", stdoutFd, stderrFd]
+    });
+    child.unref?.();
+
+    if (typeof child.pid === "number" && child.pid > 0) {
+      writeRuntimeState(paths, {
+        pid: child.pid,
+        startedAt: new Date().toISOString(),
+        lastHeartbeatAt: new Date().toISOString(),
+        startedBy: resolveStartedBy(environment),
+        dependencyMode: resolveDependencyMode(environment),
+        version: { koedServer: resolveKoedServerVersion(environment) },
+        logs,
+        repoRoot: paths.repoRoot,
+        apiUrl: current.api.url,
+        explorerUrl: current.explorer.url,
+        services: [],
+        processes: {}
+      });
+    }
+
+    return {
+      ok: true,
+      state: "starting",
+      koedHome: paths.koedHome,
+      pid: child.pid,
+      message: "Koed server is starting in the background."
+    };
+  } finally {
+    if (stdoutFd !== null) {
+      closeFile(stdoutFd);
+    }
+    if (stderrFd !== null) {
+      closeFile(stderrFd);
+    }
+    remove(lockPath, { force: true });
+  }
 };
 
 export const startKoedServer = async ({
@@ -274,9 +486,16 @@ export const startKoedServer = async ({
     )
   };
 
-  const runtime: KoedServerRuntimeState = {
+  let runtime: KoedServerRuntimeState = {
     pid: process.pid,
     startedAt: new Date().toISOString(),
+    lastHeartbeatAt: new Date().toISOString(),
+    startedBy: resolveStartedBy(environment),
+    dependencyMode: resolveDependencyMode(environment),
+    version: {
+      koedServer: resolveKoedServerVersion(environment)
+    },
+    logs: resolveRuntimeLogs(paths),
     repoRoot: paths.repoRoot,
     apiUrl,
     explorerUrl,
@@ -287,13 +506,14 @@ export const startKoedServer = async ({
       explorer: children.explorer.pid ?? 0
     }
   };
-  writeFileSync(
-    paths.runtimeStatePath,
-    `${JSON.stringify(runtime, null, 2)}\n`,
-    {
-      mode: 0o600
-    }
-  );
+  writeRuntimeState(paths, runtime);
+
+  const writeHeartbeat = () => {
+    runtime = { ...runtime, lastHeartbeatAt: new Date().toISOString() };
+    writeRuntimeState(paths, runtime);
+  };
+  const heartbeat = setInterval(writeHeartbeat, 5_000);
+  heartbeat.unref?.();
 
   console.log(
     JSON.stringify(
@@ -334,6 +554,7 @@ export const startKoedServer = async ({
   );
 
   const shutdown = () => {
+    clearInterval(heartbeat);
     for (const child of Object.values(children)) {
       child.kill("SIGTERM");
     }
@@ -341,16 +562,20 @@ export const startKoedServer = async ({
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
-  await new Promise<void>((resolvePromise, rejectPromise) => {
-    const exits = new Set<string>();
-    for (const [name, child] of Object.entries(children)) {
-      child.on("exit", () => {
-        exits.add(name);
-        if (exits.size === Object.keys(children).length) {
-          resolvePromise();
-        }
-      });
-      child.on("error", rejectPromise);
-    }
-  });
+  try {
+    await new Promise<void>((resolvePromise, rejectPromise) => {
+      const exits = new Set<string>();
+      for (const [name, child] of Object.entries(children)) {
+        child.on("exit", () => {
+          exits.add(name);
+          if (exits.size === Object.keys(children).length) {
+            resolvePromise();
+          }
+        });
+        child.on("error", rejectPromise);
+      }
+    });
+  } finally {
+    clearInterval(heartbeat);
+  }
 };

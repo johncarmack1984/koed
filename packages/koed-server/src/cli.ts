@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 import { setupCodex } from "./setup.js";
 import { collectKoedServerDoctor, collectKoedServerStatus } from "./status.js";
-import { startKoedServer } from "./start.js";
+import { startKoedServer, startKoedServerDaemon } from "./start.js";
+import { stopKoedServer } from "./stop.js";
+import { restartKoedServer } from "./restart.js";
 
 export const usageText = `Usage: koed-server <command> [options]
 
 Commands:
   start                  Start and supervise local Koed services
+  start --daemon         Start local Koed services in the background
+  stop --json            Stop local Koed app processes
+  restart --json         Restart local Koed app processes in the background
   status --json          Print machine-readable local service state
   doctor --json          Print actionable setup/dependency diagnostics
   setup codex --json     Configure the supported Codex integration
@@ -24,6 +29,9 @@ export interface KoedServerCliDependencies {
   collectStatus?: typeof collectKoedServerStatus;
   collectDoctor?: typeof collectKoedServerDoctor;
   start?: typeof startKoedServer;
+  startDaemon?: typeof startKoedServerDaemon;
+  stop?: typeof stopKoedServer;
+  restart?: typeof restartKoedServer;
   setupCodex?: typeof setupCodex;
   stdout?: Pick<NodeJS.WriteStream, "write">;
   stderr?: Pick<NodeJS.WriteStream, "write">;
@@ -42,6 +50,9 @@ export const runKoedServerCli = async (
     collectStatus = collectKoedServerStatus,
     collectDoctor = collectKoedServerDoctor,
     start = startKoedServer,
+    startDaemon = startKoedServerDaemon,
+    stop = stopKoedServer,
+    restart = restartKoedServer,
     setupCodex: setup = setupCodex,
     stdout = process.stdout,
     stderr = process.stderr
@@ -51,6 +62,7 @@ export const runKoedServerCli = async (
   const subcommand = args[1];
   const wantsHelp = args.includes("--help") || args.includes("-h");
   const wantsJson = args.includes("--json");
+  const wantsDaemon = args.includes("--daemon");
 
   try {
     if (wantsHelp || !command) {
@@ -79,8 +91,37 @@ export const runKoedServerCli = async (
     }
 
     if (command === "start") {
+      if (wantsDaemon) {
+        const result = await startDaemon();
+        if (wantsJson) {
+          printJson(stdout, result);
+        } else {
+          stdout.write(`${result.message}\n`);
+        }
+        return result.ok ? 0 : 1;
+      }
       await start();
       return 0;
+    }
+
+    if (command === "stop") {
+      const result = stop();
+      if (wantsJson) {
+        printJson(stdout, result);
+      } else {
+        stdout.write(`${result.message}\n`);
+      }
+      return result.ok ? 0 : 1;
+    }
+
+    if (command === "restart") {
+      const result = await restart();
+      if (wantsJson) {
+        printJson(stdout, result);
+      } else {
+        stdout.write(`${result.message}\n`);
+      }
+      return result.ok ? 0 : 1;
     }
 
     if (command === "setup" && subcommand === "codex") {

@@ -7,7 +7,7 @@ import {
   protocol,
   shell
 } from "electron";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,13 +47,13 @@ const koedServer = createKoedServerManager({
       resourcesPath: process.resourcesPath,
       environment: {
         ...process.env,
+        KOED_DESKTOP_MANAGED: "1",
         KOED_REPO_ROOT: process.env.KOED_REPO_ROOT ?? repoRoot
       },
       existsSync
     }),
   existsSync,
   execFile,
-  spawn,
   openExternal: (url) => shell.openExternal(url)
 });
 
@@ -128,7 +128,4 @@ app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     void createWindow();
   }
-});
-app.on("before-quit", () => {
-  koedServer.stop();
 });

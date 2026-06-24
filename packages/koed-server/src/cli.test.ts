@@ -15,6 +15,16 @@ const status: KoedServerStatus = {
   state: "healthy",
   koedHome: "/tmp/koed",
   generatedAt: "2026-01-01T00:00:00.000Z",
+  daemon: {
+    state: "healthy",
+    running: true,
+    stale: false,
+    pid: 10,
+    startedBy: "cli",
+    dependencyMode: "managed",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    lastHeartbeatAt: "2026-01-01T00:00:00.000Z"
+  },
   api: { state: "healthy", url: "http://localhost:3300" },
   database: { state: "healthy" },
   redis: { state: "healthy" },
@@ -66,6 +76,74 @@ describe("JSON command output", () => {
     expect(JSON.parse(stdout.text())).toMatchObject({
       ok: false,
       summary: "API is not ready"
+    });
+  });
+
+  it("prints start --daemon --json", async () => {
+    const stdout = writer();
+
+    const exitCode = await runKoedServerCli(["start", "--daemon", "--json"], {
+      stdout: stdout.stream,
+      startDaemon: async () => ({
+        ok: true,
+        state: "starting",
+        koedHome: "/tmp/koed",
+        pid: 42,
+        message: "Koed server is starting in the background."
+      })
+    });
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: true,
+      state: "starting",
+      pid: 42
+    });
+  });
+
+  it("prints stop --json", async () => {
+    const stdout = writer();
+
+    const exitCode = await runKoedServerCli(["stop", "--json"], {
+      stdout: stdout.stream,
+      stop: () => ({
+        ok: true,
+        state: "healthy",
+        koedHome: "/tmp/koed",
+        message: "Koed server stop signal sent.",
+        stoppedPids: [11, 12, 10],
+        missingPids: []
+      })
+    });
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: true,
+      stoppedPids: [11, 12, 10]
+    });
+  });
+
+  it("prints restart --json", async () => {
+    const stdout = writer();
+
+    const exitCode = await runKoedServerCli(["restart", "--json"], {
+      stdout: stdout.stream,
+      restart: async () => ({
+        ok: true,
+        state: "starting",
+        koedHome: "/tmp/koed",
+        pid: 42,
+        message: "Koed server is starting in the background.",
+        stoppedPids: [11, 12, 10],
+        missingPids: []
+      })
+    });
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: true,
+      stoppedPids: [11, 12, 10],
+      pid: 42
     });
   });
 });

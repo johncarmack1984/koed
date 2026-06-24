@@ -9,6 +9,7 @@ export const stateLabels = {
 
 export const statusComponentKeys = [
   "api",
+  "daemon",
   "explorer",
   "database",
   "redis",
@@ -33,6 +34,10 @@ export const componentDefinitions = {
   api: {
     label: "API",
     description: "Koed HTTP API used by local integrations and Explorer."
+  },
+  daemon: {
+    label: "koed-server daemon",
+    description: "Local control-plane supervisor that owns Koed app processes."
   },
   explorer: {
     label: "Explorer",
@@ -292,6 +297,7 @@ export const statusGroups = [
       "Local services that power capture, recall, Explorer, and storage.",
     componentKeys: [
       "api",
+      "daemon",
       "explorer",
       "database",
       "redis",

@@ -27,7 +27,9 @@ MCP-side workers.
 
 ## Local Service Startup
 
-1. The Operator or Koed Desktop starts `koed-server`.
+1. The Operator or Koed Desktop starts `koed-server`. Desktop uses
+   `koed-server start --daemon --json` so the local control plane can outlive
+   the Electron window.
 2. `koed-server` resolves `KOED_HOME`, prepares local config/log/runtime
    directories, provisions the Explorer credential inside `KOED_HOME`, and
    starts Docker-backed dependencies.
@@ -39,7 +41,9 @@ MCP-side workers.
    readiness endpoint, Docker dependency state, local Worker process state,
    local API Token configuration, MCP Server doctor output, Supported Capture
    Hook config, Codex config, LCM Summary Service availability, and last
-   verification metadata.
+   verification metadata. Status also reports daemon lifecycle metadata such as
+   supervisor PID, started-by source, dependency mode, stale runtime state,
+   heartbeat time, and log paths.
 5. `koed-server setup codex --json` wraps the existing guided bootstrap path so
    Codex MCP Server, Supported Capture Hook, local API Token, app-provisioned
    Explorer credential, verification, and doctor setup can be invoked through
@@ -47,7 +51,9 @@ MCP-side workers.
 6. Koed Desktop can start/connect to the same headless command surface, run
    the first-launch Codex bootstrap and health-check sequence, poll status,
    and embed Explorer without requiring the Operator to invoke repo-local
-   scripts directly.
+   scripts directly. Closing Koed Desktop does not stop capture services; an
+   explicit `koed-server stop --json` call stops the supervised app processes,
+   and `koed-server restart --json` stops then daemonizes them again.
 
 ## Ingestion
 

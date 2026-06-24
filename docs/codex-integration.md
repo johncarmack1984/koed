@@ -4,17 +4,20 @@ Codex is currently the only supported AI Client for Koed.
 
 ## Recommended Setup
 
-Start the local control plane supervisor in one terminal:
+Start the local control plane supervisor in one terminal, or daemonize it:
 
 ```bash
 pnpm --filter @koed/koed-server build
 node packages/koed-server/dist/cli.js start
+node packages/koed-server/dist/cli.js start --daemon --json
 ```
 
 `koed-server start` is long-running. After it reports that the API is ready, run
-the Codex setup wrapper from another terminal:
+the Codex setup wrapper from another terminal. If you use `start --daemon`,
+poll `status --json` until the API is healthy first:
 
 ```bash
+node packages/koed-server/dist/cli.js status --json
 node packages/koed-server/dist/cli.js setup codex --json
 ```
 

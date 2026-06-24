@@ -16,6 +16,16 @@ export interface KoedServerStatus {
   state: KoedServerComponentState;
   koedHome: string;
   generatedAt: string;
+  daemon: KoedServerComponentStatus & {
+    running: boolean;
+    stale: boolean;
+    pid: number | null;
+    startedBy: "cli" | "desktop" | null;
+    dependencyMode: "managed" | "external" | null;
+    startedAt: string | null;
+    lastHeartbeatAt: string | null;
+    logs?: Record<string, string>;
+  };
   api: KoedServerComponentStatus & { url: string };
   database: KoedServerComponentStatus;
   redis: KoedServerComponentStatus;
@@ -47,6 +57,13 @@ export interface KoedServerDoctorResult {
 export interface KoedServerRuntimeState {
   pid: number;
   startedAt: string;
+  lastHeartbeatAt?: string;
+  startedBy?: "cli" | "desktop";
+  dependencyMode?: "managed" | "external";
+  version?: {
+    koedServer: string;
+  };
+  logs?: Record<string, string>;
   repoRoot: string;
   apiUrl: string;
   explorerUrl: string;

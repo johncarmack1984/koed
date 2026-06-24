@@ -1,21 +1,5 @@
-import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
 import { createKoedEnvironment, createKoedServerManager } from "./manager.js";
-
-type FakeChildProcess = EventEmitter & {
-  killed: boolean;
-  kill: (signal?: string) => boolean;
-};
-
-const childProcess = (): FakeChildProcess => {
-  const child = new EventEmitter() as FakeChildProcess;
-  child.killed = false;
-  child.kill = () => {
-    child.killed = true;
-    return true;
-  };
-  return child;
-};
 
 describe("Koed server desktop manager", () => {
   it("adds KOED_REPO_ROOT without overriding explicit values", () => {
@@ -45,7 +29,6 @@ describe("Koed server desktop manager", () => {
         calls.push({ command, args });
         callback(null, JSON.stringify({ ok: true, state: "healthy" }), "");
       },
-      spawn: () => childProcess() as never,
       openExternal: async () => undefined
     });
 
@@ -71,7 +54,6 @@ describe("Koed server desktop manager", () => {
       }),
       existsSync: () => false,
       execFile: () => undefined,
-      spawn: () => childProcess() as never,
       openExternal: async () => undefined
     });
 
@@ -85,9 +67,8 @@ describe("Koed server desktop manager", () => {
     });
   });
 
-  it("starts one koed-server process and stops it on quit", async () => {
-    const spawned = childProcess();
-    const spawnCalls: string[][] = [];
+  it("starts koed-server as a daemon and leaves it running on quit", async () => {
+    const calls: string[][] = [];
     let statusCalls = 0;
     const manager = createKoedServerManager({
       repoRoot: "/repo",
@@ -99,7 +80,25 @@ describe("Koed server desktop manager", () => {
         env: { KOED_REPO_ROOT: "/repo" }
       }),
       existsSync: () => true,
-      execFile: (_command, _args, _options, callback) => {
+      execFile: (_command, args, _options, callback) => {
+        calls.push(args);
+        if (args.includes("start")) {
+          callback(
+            null,
+            JSON.stringify({ ok: true, state: "starting", pid: 123 }),
+            ""
+          );
+          return;
+        }
+        if (args.includes("stop")) {
+          callback(null, JSON.stringify({ ok: true, state: "healthy" }), "");
+          return;
+        }
+        if (args.includes("restart")) {
+          callback(null, JSON.stringify({ ok: true, state: "starting" }), "");
+          return;
+        }
+
         statusCalls += 1;
         callback(
           null,
@@ -115,10 +114,6 @@ describe("Koed server desktop manager", () => {
           ""
         );
       },
-      spawn: (_command, args) => {
-        spawnCalls.push(args);
-        return spawned as never;
-      },
       openExternal: async () => undefined
     });
 
@@ -128,9 +123,22 @@ describe("Koed server desktop manager", () => {
     await expect(manager.handlers.start!()).resolves.toMatchObject({
       state: "healthy"
     });
-    expect(spawnCalls).toEqual([["/repo/cli.js", "start"]]);
+    expect(calls).toEqual([
+      ["/repo/cli.js", "status", "--json"],
+      ["/repo/cli.js", "start", "--daemon", "--json"],
+      ["/repo/cli.js", "status", "--json"],
+      ["/repo/cli.js", "status", "--json"]
+    ]);
 
     manager.stop();
-    expect(spawned.killed).toBe(true);
+    expect(calls).toHaveLength(4);
+    await expect(manager.handlers.stop_service!()).resolves.toMatchObject({
+      ok: true
+    });
+    expect(calls.at(-1)).toEqual(["/repo/cli.js", "stop", "--json"]);
+    await expect(manager.handlers.restart_service!()).resolves.toMatchObject({
+      ok: true
+    });
+    expect(calls.at(-1)).toEqual(["/repo/cli.js", "restart", "--json"]);
   });
 });

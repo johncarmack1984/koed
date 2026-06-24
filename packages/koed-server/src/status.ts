@@ -11,6 +11,7 @@ import {
   resolveKoedServerPaths,
   type KoedServerPaths
 } from "./paths.js";
+import { readRuntimeState } from "./runtime-state.js";
 import type {
   KoedServerComponentState,
   KoedServerComponentStatus,
@@ -431,6 +432,71 @@ const inspectLastVerification = (
   };
 };
 
+const inspectDaemon = (
+  runtime: KoedServerRuntimeState | null,
+  runtimeProcessRunning: boolean,
+  apiState: KoedServerComponentState
+): KoedServerStatus["daemon"] => {
+  if (!runtime) {
+    return {
+      ...notConfigured(
+        "koed-server runtime state was not found.",
+        "Run koed-server start --daemon --json."
+      ),
+      running: false,
+      stale: false,
+      pid: null,
+      startedBy: null,
+      dependencyMode: null,
+      startedAt: null,
+      lastHeartbeatAt: null
+    };
+  }
+
+  const details = {
+    services: runtime.services,
+    version: runtime.version
+  };
+  const common = {
+    running: runtimeProcessRunning,
+    stale: !runtimeProcessRunning,
+    pid: runtime.pid,
+    startedBy: runtime.startedBy ?? null,
+    dependencyMode: runtime.dependencyMode ?? null,
+    startedAt: runtime.startedAt ?? null,
+    lastHeartbeatAt: runtime.lastHeartbeatAt ?? null,
+    ...(runtime.logs ? { logs: runtime.logs } : {})
+  };
+
+  if (runtimeProcessRunning && apiState === "healthy") {
+    return {
+      ...healthy("koed-server daemon is running.", details),
+      ...common
+    };
+  }
+
+  if (runtimeProcessRunning) {
+    return {
+      ...starting(
+        "koed-server daemon is running while services start.",
+        details
+      ),
+      ...common
+    };
+  }
+
+  return {
+    ...needsAttention(
+      apiState === "healthy"
+        ? "koed-server runtime PID is stale, but the API is reachable."
+        : "koed-server runtime PID is stale.",
+      "Run koed-server restart --json.",
+      details
+    ),
+    ...common
+  };
+};
+
 export const aggregateState = (
   components: KoedServerComponentStatus[]
 ): KoedServerComponentState => {
@@ -456,12 +522,17 @@ export const collectKoedServerStatus = async (
   const repoEnv = loadRepoEnv(paths.repoRoot);
   const apiUrl = resolveApiUrl(environment, repoEnv);
   const explorerUrl = resolveExplorerUrl(environment, repoEnv);
-  const runtime = readJsonFile<KoedServerRuntimeState>(
-    paths.runtimeStatePath,
-    deps.readFileSync
-  );
+  const runtime = readRuntimeState(paths, {
+    existsSync: deps.existsSync,
+    readFileSync: deps.readFileSync
+  });
   const runtimeProcessRunning = runtime ? deps.checkPid(runtime.pid) : false;
   const apiReady = await statusFromApiReady(apiUrl, deps.fetch);
+  const daemon = inspectDaemon(
+    runtime,
+    runtimeProcessRunning,
+    apiReady.api.state
+  );
   const apiToken = inspectApiToken(environment, repoEnv);
   const codex = inspectCodex(environment, deps);
   const captureHook = inspectCaptureHook(environment, deps);
@@ -507,6 +578,7 @@ export const collectKoedServerStatus = async (
     state: "starting" as KoedServerComponentState,
     koedHome: paths.koedHome,
     generatedAt: deps.now().toISOString(),
+    daemon,
     api: { ...apiReady.api, url: apiUrl },
     database: apiReady.database,
     redis: apiReady.redis,
@@ -522,6 +594,7 @@ export const collectKoedServerStatus = async (
   } satisfies KoedServerStatus;
 
   const blockingComponents = [
+    statusWithoutState.daemon,
     statusWithoutState.api,
     statusWithoutState.database,
     statusWithoutState.redis,
@@ -544,6 +617,7 @@ export const collectKoedServerDoctor = async (
 ): Promise<KoedServerDoctorResult> => {
   const status = await collectKoedServerStatus(environment, dependencies);
   const checks: KoedServerDoctorCheck[] = [
+    ["daemon", "koed-server daemon", status.daemon],
     ["api", "API", status.api],
     ["database", "Database", status.database],
     ["redis", "Redis", status.redis],

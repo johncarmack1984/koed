@@ -113,6 +113,7 @@ describe("status and doctor JSON contracts", () => {
     );
 
     expect(status.koedHome).toBe(root);
+    expect(status.daemon.state).toBe("not_configured");
     expect(status.codex.configured).toBe(false);
     expect(status.captureHook.state).toBe("not_configured");
     expect(status.state).toBe("not_configured");
@@ -167,7 +168,52 @@ describe("status and doctor JSON contracts", () => {
     expect(doctorEnvironments[0]?.MEMORY_API_TOKEN).toBe("env_token");
   });
 
-  it("maps fully prepared but stopped supervisor to starting", async () => {
+  it("marks stale runtime state as needs_attention without hiding API readiness", async () => {
+    const root = tempDir();
+    mkdirSync(resolve(root, "run"), { recursive: true });
+    writeFileSync(
+      resolve(root, "run/koed-server.json"),
+      JSON.stringify({
+        pid: 10,
+        startedBy: "desktop",
+        dependencyMode: "managed",
+        startedAt: "2026-01-01T00:00:00.000Z",
+        lastHeartbeatAt: "2026-01-01T00:00:10.000Z",
+        services: ["api"]
+      })
+    );
+
+    const status = await collectKoedServerStatus(
+      { KOED_HOME: root, KOED_REPO_ROOT: root, HOME: root },
+      {
+        fetch: async () =>
+          response(true, 200, {
+            checks: [
+              { service: "postgres", status: "ok" },
+              { service: "redis", status: "ok" },
+              { service: "embedding-service", status: "ok" }
+            ]
+          }),
+        spawnSync: () =>
+          spawnResult('{"Service":"redis","State":"running"}\n', 0),
+        checkPid: () => false,
+        now: () => new Date("2026-01-01T00:00:00.000Z")
+      }
+    );
+
+    expect(status.api.state).toBe("healthy");
+    expect(status.daemon).toMatchObject({
+      state: "needs_attention",
+      running: false,
+      stale: true,
+      pid: 10,
+      startedBy: "desktop",
+      dependencyMode: "managed"
+    });
+    expect(status.state).toBe("needs_attention");
+  });
+
+  it("maps fully prepared but stopped supervisor to needs_attention", async () => {
     const root = tempDir();
     mkdirSync(resolve(root, ".codex"), { recursive: true });
     mkdirSync(resolve(root, "hook"), { recursive: true });
@@ -223,7 +269,8 @@ describe("status and doctor JSON contracts", () => {
       }
     );
 
-    expect(status.state).toBe("healthy");
+    expect(status.state).toBe("needs_attention");
+    expect(status.daemon.state).toBe("needs_attention");
     expect(status.explorer.state).toBe("starting");
   });
 });

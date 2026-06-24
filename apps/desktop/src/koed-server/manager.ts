@@ -1,4 +1,3 @@
-import type { ChildProcess } from "node:child_process";
 import type { NodeEntrypointInvocation } from "./runtime.js";
 
 export type DesktopCommandHandler = (args?: Record<string, unknown>) => unknown;
@@ -19,16 +18,6 @@ export interface KoedServerManagerOptions {
     },
     callback: (error: Error | null, stdout: string, stderr: string) => void
   ) => void;
-  spawn: (
-    command: string,
-    args: string[],
-    options: {
-      cwd: string;
-      env: NodeJS.ProcessEnv;
-      stdio: "pipe";
-      detached: false;
-    }
-  ) => ChildProcess;
   openExternal: (url: string) => Promise<unknown>;
 }
 
@@ -76,20 +65,6 @@ const withDesktopStartLog = (
   };
 };
 
-const summarizeStartFailure = (
-  outputLines: string[],
-  fallback: string
-): string =>
-  [...outputLines]
-    .reverse()
-    .find(
-      (line) =>
-        line.includes("failed with exit code") ||
-        line.includes("ERR_PNPM") ||
-        line.includes("Exit status") ||
-        line.endsWith("Failed")
-    ) ?? fallback;
-
 const hasHealthyApi = (value: unknown): boolean => {
   if (typeof value !== "object" || value === null || !("api" in value)) {
     return false;
@@ -118,10 +93,8 @@ export const createKoedServerManager = ({
   createCliInvocation,
   existsSync,
   execFile,
-  spawn,
   openExternal
 }: KoedServerManagerOptions): KoedServerManager => {
-  let serverProcess: ChildProcess | null = null;
   const startOutputLines: string[] = [];
   void environment;
 
@@ -186,57 +159,30 @@ export const createKoedServerManager = ({
       return current;
     }
 
-    if (serverProcess && !serverProcess.killed) {
-      return pollUntilReady();
-    }
     if (!existsSync(cliPath)) {
       return missingCliPayload();
     }
 
     startOutputLines.length = 0;
-    const invocation = createCliInvocation(["start"]);
+    const invocation = createCliInvocation(["start", "--daemon", "--json"]);
     appendOutputLines(
       startOutputLines,
       `$ ${invocation.command} ${invocation.args.join(" ")}`
     );
-    serverProcess = spawn(invocation.command, invocation.args, {
-      cwd: repoRoot,
-      env: invocation.env,
-      stdio: "pipe",
-      detached: false
-    });
-    serverProcess.stdout?.on("data", (chunk) => {
-      appendOutputLines(startOutputLines, chunk);
-    });
-    serverProcess.stderr?.on("data", (chunk) => {
-      appendOutputLines(startOutputLines, chunk);
-    });
-    const startExited = new Promise<unknown>((resolveExit) => {
-      serverProcess?.once("exit", (code, signal) => {
-        const exitSummary = `koed-server start exited with ${
-          signal ? `signal ${signal}` : `code ${code ?? "unknown"}`
-        }`;
-        appendOutputLines(startOutputLines, exitSummary);
-        serverProcess = null;
-        resolveExit(
-          withDesktopStartLog(
-            {
-              ok: false,
-              state: "needs_attention",
-              error: summarizeStartFailure(startOutputLines, exitSummary)
-            },
-            startOutputLines
-          )
-        );
-      });
-    });
-    return await Promise.race([pollUntilReady(), startExited]);
+    const startResult = await runJson(["start", "--daemon"], 45_000);
+    if (
+      typeof startResult === "object" &&
+      startResult !== null &&
+      "ok" in startResult &&
+      (startResult as { ok?: unknown }).ok === false
+    ) {
+      return withDesktopStartLog(startResult, startOutputLines);
+    }
+    return pollUntilReady();
   };
 
   const stop = () => {
-    if (serverProcess && !serverProcess.killed) {
-      serverProcess.kill("SIGTERM");
-    }
+    startOutputLines.length = 0;
   };
 
   return {
@@ -246,6 +192,8 @@ export const createKoedServerManager = ({
       doctor: () => runJson(["doctor"], 45_000),
       setup_codex: () => runJson(["setup", "codex"], 120_000),
       start,
+      stop_service: () => runJson(["stop"], 45_000),
+      restart_service: () => runJson(["restart"], 90_000),
       open_external: async (args) => {
         const url = typeof args?.url === "string" ? args.url : "";
         if (!url) {

@@ -31,10 +31,12 @@ docker compose up -d --build
 pnpm desktop:start
 ```
 
-`pnpm desktop:start` opens Koed Desktop, auto-starts `koed-server`, and runs
-the full Codex bootstrap + health-check sequence before showing the Explorer.
-If you need to rerun only the last-mile client setup manually, use
-`pnpm clients:bootstrap`.
+`pnpm desktop:start` opens Koed Desktop, starts `koed-server` in the
+background, and runs the full Codex bootstrap + health-check sequence before
+showing the Explorer. Closing Koed Desktop does not stop capture services; use
+`node packages/koed-server/dist/cli.js stop --json` when you intentionally want
+to stop the local app processes. If you need to rerun only the last-mile client
+setup manually, use `pnpm clients:bootstrap`.
 
 The Explorer runs beside the API and is embedded by Koed Desktop:
 
@@ -43,18 +45,28 @@ http://localhost:5174
 ```
 
 If you want the lower-level control-plane commands directly, start the
-long-running supervisor in one terminal:
+supervisor in one terminal or daemonize it:
 
 ```bash
 pnpm --filter @koed/koed-server build
 node packages/koed-server/dist/cli.js start
+node packages/koed-server/dist/cli.js start --daemon --json
 ```
 
-After `koed-server start` reports that the API is ready, run setup from another
-terminal:
+`status --json` reports daemon PID, stale runtime state, logs, and service
+readiness. After `koed-server start` reports that the API is ready, run setup
+from another terminal:
 
 ```bash
+node packages/koed-server/dist/cli.js status --json
 node packages/koed-server/dist/cli.js setup codex --json
+```
+
+Stop supervised local app processes explicitly:
+
+```bash
+node packages/koed-server/dist/cli.js stop --json
+node packages/koed-server/dist/cli.js restart --json
 ```
 
 ## Connect Codex

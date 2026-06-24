@@ -18,19 +18,33 @@ docker compose up -d --build
 pnpm desktop:start
 ```
 
-`pnpm desktop:start` opens Koed Desktop, which auto-starts `koed-server`, runs
-Codex bootstrap when needed, and keeps the startup screen visible until the
-system is ready.
+`pnpm desktop:start` opens Koed Desktop, which starts `koed-server` in daemon
+mode, runs Codex bootstrap when needed, and keeps the startup screen visible
+until the system is ready. Closing Koed Desktop leaves `koed-server`, API,
+Worker, and Explorer running so Capture Hook activity can continue.
 
 `koed-server` owns `KOED_HOME`, starts Docker-backed dependencies, runs API,
 Worker, and Explorer as supervised local app processes, and records runtime
-state under `KOED_HOME/run`.
+state under `KOED_HOME/run`. Daemon stdout/stderr are written under
+`KOED_HOME/logs/koed-server.out.log` and `KOED_HOME/logs/koed-server.err.log`.
 
 Check service state from any headless shell:
 
 ```bash
 node packages/koed-server/dist/cli.js status --json
 node packages/koed-server/dist/cli.js doctor --json
+```
+
+`status --json` includes the daemon lifecycle component, including PID,
+started-by source, dependency mode, stale runtime state, heartbeat metadata, and
+log paths.
+
+Start or stop the control plane without the Electron UI:
+
+```bash
+node packages/koed-server/dist/cli.js start --daemon --json
+node packages/koed-server/dist/cli.js stop --json
+node packages/koed-server/dist/cli.js restart --json
 ```
 
 Run Codex setup through the same surface after `koed-server start` has made the
@@ -55,8 +69,9 @@ The Explorer frontend is available at `http://localhost:5174`, or the host port 
 ### Koed Desktop
 
 Koed Desktop is the Electron control surface for the same local control plane.
-It wraps `koed-server`, shows service status, and can start the supervisor,
-run Codex setup, run doctor, and open the embedded Explorer.
+It wraps `koed-server`, shows service status, starts or connects to the daemon
+supervisor, runs Codex setup, runs doctor, and opens the embedded Explorer.
+The control plane lifetime is separate from the Electron window lifetime.
 
 ```bash
 pnpm --filter @koed/desktop start

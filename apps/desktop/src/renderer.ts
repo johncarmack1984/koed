@@ -410,6 +410,8 @@ const componentLabel = (key: StatusComponentKey): string => {
   switch (key) {
     case "api":
       return "API";
+    case "daemon":
+      return "koed-server";
     case "explorer":
       return "Explorer";
     case "database":
