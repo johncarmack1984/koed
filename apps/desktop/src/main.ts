@@ -13,7 +13,11 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { registerDesktopCommandHandlers } from "./ipc/commands.js";
 import { createKoedServerManager } from "./koed-server/manager.js";
-import { createKoedServerCliInvocation } from "./koed-server/runtime.js";
+import {
+  createKoedServerCliInvocation,
+  createKoedServerInvocationEnvironment,
+  resolveKoedServerRuntimeLayout
+} from "./koed-server/runtime.js";
 import {
   KOED_APP_SCHEME,
   resolveAppProtocolRequest
@@ -21,10 +25,17 @@ import {
 import { createMainWindowOptions } from "./window/window-manager.js";
 
 const appDir = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(appDir, "..", "..", "..");
-const koedServerCli = resolve(repoRoot, "packages/koed-server/dist/cli.js");
+const runtimeLayout = () =>
+  resolveKoedServerRuntimeLayout({
+    appIsPackaged: app.isPackaged,
+    appDir,
+    resourcesPath: process.resourcesPath
+  });
 const appName = "Koed";
-const desktopIconPath = resolve(repoRoot, "apps/desktop/assets/koed-icon.png");
+const desktopIconPath = resolve(
+  runtimeLayout().repoRoot,
+  "apps/desktop/assets/koed-icon.png"
+);
 
 app.setName(appName);
 
@@ -36,32 +47,32 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 const koedServer = createKoedServerManager({
-  repoRoot,
-  cliPath: koedServerCli,
+  repoRoot: runtimeLayout().repoRoot,
+  cliPath: runtimeLayout().cliPath,
   environment: process.env,
-  createCliInvocation: (args) =>
-    createKoedServerCliInvocation(koedServerCli, args, {
+  createCliInvocation: (args) => {
+    const layout = runtimeLayout();
+    return createKoedServerCliInvocation(layout.cliPath, args, {
       appIsPackaged: app.isPackaged,
       electronExecPath: process.execPath,
       platform: process.platform,
       resourcesPath: process.resourcesPath,
-      environment: {
-        ...process.env,
-        KOED_DESKTOP_MANAGED: "1",
-        KOED_REPO_ROOT: process.env.KOED_REPO_ROOT ?? repoRoot
-      },
+      environment: createKoedServerInvocationEnvironment({
+        appIsPackaged: app.isPackaged,
+        environment: process.env,
+        repoRoot: layout.repoRoot
+      }),
       existsSync
-    }),
+    });
+  },
   existsSync,
   execFile,
   openExternal: (url) => shell.openExternal(url),
-  openPath: (path) => shell.openPath(path)
+  openPath: (path) => shell.openPath(path),
+  appVersion: app.getVersion()
 });
 
-const getAppDistDir = (): string =>
-  app.isPackaged
-    ? resolve(process.resourcesPath, "app-dist")
-    : resolve(repoRoot, "apps/desktop/dist");
+const getAppDistDir = (): string => runtimeLayout().appDistDir;
 
 const getDesktopIcon = () => {
   if (!existsSync(desktopIconPath)) {

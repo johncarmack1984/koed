@@ -26,6 +26,11 @@ export const resolveRepoRoot = (
     return resolve(fromEnv);
   }
 
+  const fromPackagedApp = environment.KOED_PACKAGED_APP_ROOT?.trim();
+  if (fromPackagedApp) {
+    return resolve(fromPackagedApp);
+  }
+
   // dist/ -> package root -> packages/koed-server -> repo root
   return resolve(packageDir, "..", "..");
 };

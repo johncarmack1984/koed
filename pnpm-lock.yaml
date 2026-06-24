@@ -87,9 +87,27 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@koed/api':
+        specifier: workspace:*
+        version: link:../api
+      '@koed/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@koed/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@koed/koed-server':
         specifier: workspace:*
         version: link:../../packages/koed-server
+      '@koed/mcp-server':
+        specifier: workspace:*
+        version: link:../../packages/mcp-server
+      '@koed/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      '@koed/worker':
+        specifier: workspace:*
+        version: link:../worker
     devDependencies:
       electron:
         specifier: ^39.2.7

@@ -8,6 +8,12 @@ export interface NodeEntrypointInvocation {
   env: NodeJS.ProcessEnv;
 }
 
+export interface KoedServerRuntimeLayout {
+  repoRoot: string;
+  cliPath: string;
+  appDistDir: string;
+}
+
 export interface KoedServerRuntimeOptions {
   appIsPackaged: boolean;
   electronExecPath: string;
@@ -18,6 +24,66 @@ export interface KoedServerRuntimeOptions {
 }
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
+
+export const assertPathExists = ({
+  label,
+  filePath,
+  existsSync: pathExists = existsSync
+}: {
+  label: string;
+  filePath: string;
+  existsSync?: (path: string) => boolean;
+}): string => {
+  if (!pathExists(filePath)) {
+    throw new Error(`${label} is missing at ${filePath}`);
+  }
+  return filePath;
+};
+
+export const packagedKoedAppRootName = "koed-app-root";
+
+export const resolveDevelopmentRepoRoot = (appDir = currentDir): string =>
+  resolve(appDir, "..", "..", "..");
+
+export const resolvePackagedKoedAppRoot = (resourcesPath: string): string =>
+  resolve(resourcesPath, packagedKoedAppRootName);
+
+export const resolveKoedServerRuntimeLayout = ({
+  appIsPackaged,
+  appDir = currentDir,
+  resourcesPath
+}: {
+  appIsPackaged: boolean;
+  appDir?: string;
+  resourcesPath?: string;
+}): KoedServerRuntimeLayout => {
+  const repoRoot = appIsPackaged
+    ? resolvePackagedKoedAppRoot(resourcesPath ?? resolve(appDir, ".."))
+    : resolveDevelopmentRepoRoot(appDir);
+  return {
+    repoRoot,
+    cliPath: resolve(repoRoot, "packages/koed-server/dist/cli.js"),
+    appDistDir: appIsPackaged
+      ? resolve(resourcesPath ?? resolve(appDir, ".."), "app-dist")
+      : resolve(repoRoot, "apps/desktop/dist")
+  };
+};
+
+export const createKoedServerInvocationEnvironment = ({
+  appIsPackaged,
+  environment,
+  repoRoot
+}: {
+  appIsPackaged: boolean;
+  environment: NodeJS.ProcessEnv;
+  repoRoot: string;
+}): NodeJS.ProcessEnv => ({
+  ...environment,
+  KOED_DESKTOP_MANAGED: "1",
+  ...(appIsPackaged
+    ? { KOED_PACKAGED_APP_ROOT: repoRoot }
+    : { KOED_REPO_ROOT: environment.KOED_REPO_ROOT ?? repoRoot })
+});
 
 export const createElectronNodeEnv = (
   environment: NodeJS.ProcessEnv
@@ -87,9 +153,17 @@ export const createKoedServerCliInvocation = (
     return {
       command,
       args: [
-        resolvePackagedRunnerPath(options.resourcesPath),
+        assertPathExists({
+          label: "Bundled Koed Desktop node entrypoint runner",
+          filePath: resolvePackagedRunnerPath(options.resourcesPath),
+          existsSync: options.existsSync
+        }),
         "node-script",
-        cliPath,
+        assertPathExists({
+          label: "Bundled koed-server CLI",
+          filePath: cliPath,
+          existsSync: options.existsSync
+        }),
         ...args
       ],
       env

@@ -20,6 +20,7 @@ export interface KoedServerManagerOptions {
   ) => void;
   openExternal: (url: string) => Promise<unknown>;
   openPath: (path: string) => Promise<string>;
+  appVersion?: string;
 }
 
 export interface KoedServerManager {
@@ -96,6 +97,54 @@ const hasRunningDaemon = (value: unknown): boolean => {
   );
 };
 
+const extractDaemonVersion = (value: unknown): string | null => {
+  if (typeof value !== "object" || value === null || !("daemon" in value)) {
+    return null;
+  }
+  const daemon = (value as { daemon?: unknown }).daemon;
+  if (typeof daemon !== "object" || daemon === null) {
+    return null;
+  }
+  const details = (daemon as { details?: unknown }).details;
+  if (typeof details !== "object" || details === null) {
+    return null;
+  }
+  const version = (details as { version?: unknown }).version;
+  if (typeof version !== "object" || version === null) {
+    return null;
+  }
+  const koedServer = (version as { koedServer?: unknown }).koedServer;
+  return typeof koedServer === "string" && koedServer.trim()
+    ? koedServer.trim()
+    : null;
+};
+
+const normalizeVersion = (value: string | null | undefined): string | null => {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed.replace(/^v/i, "") : null;
+};
+
+const shouldRestartDesktopManagedDaemon = (
+  value: unknown,
+  appVersion?: string
+): boolean => {
+  const current = normalizeVersion(extractDaemonVersion(value));
+  const expected = normalizeVersion(appVersion);
+  if (!current || !expected) {
+    return false;
+  }
+  if (typeof value !== "object" || value === null || !("daemon" in value)) {
+    return false;
+  }
+  const daemon = (value as { daemon?: unknown }).daemon;
+  return (
+    typeof daemon === "object" &&
+    daemon !== null &&
+    (daemon as { startedBy?: unknown }).startedBy === "desktop" &&
+    current !== expected
+  );
+};
+
 const extractDaemonLogPath = (value: unknown): string | null => {
   if (typeof value !== "object" || value === null || !("daemon" in value)) {
     return null;
@@ -137,7 +186,8 @@ export const createKoedServerManager = ({
   existsSync,
   execFile,
   openExternal,
-  openPath
+  openPath,
+  appVersion
 }: KoedServerManagerOptions): KoedServerManager => {
   const startOutputLines: string[] = [];
   void environment;
@@ -200,10 +250,33 @@ export const createKoedServerManager = ({
   const start = async () => {
     const current = await runJson(["status"], 10_000);
     if (hasHealthyApi(current)) {
-      return current;
+      if (!shouldRestartDesktopManagedDaemon(current, appVersion)) {
+        return current;
+      }
+      const restartResult = await runJson(["restart"], 90_000);
+      if (
+        typeof restartResult === "object" &&
+        restartResult !== null &&
+        "ok" in restartResult &&
+        (restartResult as { ok?: unknown }).ok === false
+      ) {
+        return withDesktopStartLog(restartResult, startOutputLines);
+      }
+      return pollUntilReady();
     }
 
     if (hasRunningDaemon(current)) {
+      if (shouldRestartDesktopManagedDaemon(current, appVersion)) {
+        const restartResult = await runJson(["restart"], 90_000);
+        if (
+          typeof restartResult === "object" &&
+          restartResult !== null &&
+          "ok" in restartResult &&
+          (restartResult as { ok?: unknown }).ok === false
+        ) {
+          return withDesktopStartLog(restartResult, startOutputLines);
+        }
+      }
       return pollUntilReady();
     }
 

@@ -1,5 +1,6 @@
 dist/
 dist-electron/
 dist-types/
+dist-resources/
 tsconfig.tsbuildinfo
 tsconfig.electron.tsbuildinfo

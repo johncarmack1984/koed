@@ -50,13 +50,16 @@ MCP-side workers.
    Explorer credential, verification, and doctor setup can be invoked through
    the control plane.
 6. Koed Desktop acts as a launcher/client for the same headless command
-   surface. It runs the first-launch Codex bootstrap and health-check sequence,
-   polls status, embeds Explorer, opens daemon logs/diagnostics, and exposes
-   explicit Start Koed, Restart Koed, and Stop Koed controls without owning the
-   daemon process lifetime. Closing Koed Desktop does not stop capture services;
-   an explicit `koed-server stop --json` call stops the supervised app
-   processes, and `koed-server restart --json` stops then daemonizes them
-   again.
+   surface. Development builds resolve that surface from the repo checkout;
+   packaged builds resolve it from Electron resources under `koed-app-root` and
+   run it through Electron's Node-capable helper without requiring
+   `KOED_REPO_ROOT` from the Operator. It runs the first-launch Codex bootstrap
+   and health-check sequence, polls status, embeds Explorer, opens daemon
+   logs/diagnostics, and exposes explicit Start Koed, Restart Koed, and Stop
+   Koed controls without owning the daemon process lifetime. Closing Koed
+   Desktop does not stop capture services; an explicit `koed-server stop --json`
+   call stops the supervised app processes, and `koed-server restart --json`
+   stops then daemonizes them again.
 
 ## Ingestion
 

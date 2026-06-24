@@ -161,6 +161,73 @@ describe("Koed server desktop manager", () => {
     expect(opened).toEqual(["/logs/err.log"]);
   });
 
+  it("restarts a desktop-managed daemon when bundled version changes", async () => {
+    const calls: string[][] = [];
+    let statusCalls = 0;
+    const manager = createKoedServerManager({
+      repoRoot: "/repo",
+      cliPath: "/repo/cli.js",
+      environment: {},
+      createCliInvocation: (args) => ({
+        command: "/node",
+        args: ["/repo/cli.js", ...args],
+        env: { KOED_REPO_ROOT: "/repo" }
+      }),
+      existsSync: () => true,
+      execFile: (_command, args, _options, callback) => {
+        calls.push(args);
+        if (args.includes("restart")) {
+          callback(null, JSON.stringify({ ok: true, state: "starting" }), "");
+          return;
+        }
+        statusCalls += 1;
+        callback(
+          null,
+          JSON.stringify(
+            statusCalls === 1
+              ? {
+                  ok: true,
+                  state: "healthy",
+                  daemon: {
+                    state: "healthy",
+                    running: true,
+                    stale: false,
+                    startedBy: "desktop",
+                    details: { version: { koedServer: "0.1.0" } }
+                  },
+                  api: { state: "healthy" }
+                }
+              : {
+                  ok: true,
+                  state: "healthy",
+                  daemon: {
+                    state: "healthy",
+                    running: true,
+                    stale: false,
+                    startedBy: "desktop",
+                    details: { version: { koedServer: "0.2.0" } }
+                  },
+                  api: { state: "healthy" }
+                }
+          ),
+          ""
+        );
+      },
+      openExternal: async () => undefined,
+      openPath: async () => "",
+      appVersion: "0.2.0"
+    });
+
+    await expect(manager.handlers.start!()).resolves.toMatchObject({
+      state: "healthy"
+    });
+    expect(calls).toEqual([
+      ["/repo/cli.js", "status", "--json"],
+      ["/repo/cli.js", "restart", "--json"],
+      ["/repo/cli.js", "status", "--json"]
+    ]);
+  });
+
   it("starts koed-server as a daemon and leaves it running on quit", async () => {
     const calls: string[][] = [];
     let statusCalls = 0;

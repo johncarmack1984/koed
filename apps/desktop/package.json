@@ -8,6 +8,7 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json && vite build",
+    "package:resources": "pnpm --filter @koed/koed-server build && pnpm --filter @koed/mcp-server build && pnpm --filter @koed/api build && pnpm --filter @koed/worker build && pnpm --filter @koed/explorer build && pnpm build && node ../../scripts/package-desktop-resources.mjs",
     "dev": "vite --host 127.0.0.1",
     "prestart": "pnpm --filter @koed/koed-server build",
     "start": "pnpm build && electron .",
@@ -15,7 +16,13 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@koed/koed-server": "workspace:*"
+    "@koed/api": "workspace:*",
+    "@koed/core": "workspace:*",
+    "@koed/db": "workspace:*",
+    "@koed/koed-server": "workspace:*",
+    "@koed/mcp-server": "workspace:*",
+    "@koed/shared": "workspace:*",
+    "@koed/worker": "workspace:*"
   },
   "devDependencies": {
     "electron": "^39.2.7"

@@ -17,6 +17,7 @@
     "api-token:revoke": "pnpm --filter @koed/db api-token:revoke",
     "koed-server": "pnpm --filter @koed/koed-server",
     "desktop:build": "pnpm --filter @koed/desktop build",
+    "desktop:package:resources": "pnpm --filter @koed/desktop package:resources",
     "desktop:dev": "pnpm --filter @koed/desktop dev",
     "desktop:start": "pnpm --filter @koed/desktop start",
     "codex:bootstrap": "node scripts/codex-bootstrap.mjs",

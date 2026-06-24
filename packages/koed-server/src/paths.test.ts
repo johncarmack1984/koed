@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   ensureKoedHome,
   resolveKoedHome,
-  resolveKoedServerPaths
+  resolveKoedServerPaths,
+  resolveRepoRoot
 } from "./paths.js";
 
 const temps: string[] = [];
@@ -25,6 +26,24 @@ describe("KOED_HOME resolution", () => {
   it("uses KOED_HOME when set", () => {
     const home = tempDir();
     expect(resolveKoedHome({ KOED_HOME: home })).toBe(resolve(home));
+  });
+
+  it("uses packaged app root when repo checkout root is absent", () => {
+    const packagedRoot = tempDir();
+    expect(resolveRepoRoot({ KOED_PACKAGED_APP_ROOT: packagedRoot })).toBe(
+      resolve(packagedRoot)
+    );
+  });
+
+  it("prefers explicit repo checkout root over packaged app root", () => {
+    const repoRoot = tempDir();
+    const packagedRoot = tempDir();
+    expect(
+      resolveRepoRoot({
+        KOED_REPO_ROOT: repoRoot,
+        KOED_PACKAGED_APP_ROOT: packagedRoot
+      })
+    ).toBe(resolve(repoRoot));
   });
 
   it("creates owned config, logs, run, and data directories", () => {

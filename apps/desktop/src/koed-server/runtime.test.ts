@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertPathExists,
   createElectronNodeEnv,
   createKoedServerCliInvocation,
-  resolveElectronNodeExecPath
+  createKoedServerInvocationEnvironment,
+  resolveElectronNodeExecPath,
+  resolveKoedServerRuntimeLayout,
+  resolvePackagedKoedAppRoot
 } from "./runtime.js";
 
 describe("Koed Desktop Node entrypoint runtime", () => {
@@ -11,6 +15,68 @@ describe("Koed Desktop Node entrypoint runtime", () => {
       FOO: "bar",
       ELECTRON_RUN_AS_NODE: "1"
     });
+  });
+
+  it("resolves development runtime paths from the workspace", () => {
+    expect(
+      resolveKoedServerRuntimeLayout({
+        appIsPackaged: false,
+        appDir: "/repo/apps/desktop/dist-electron"
+      })
+    ).toEqual({
+      repoRoot: "/repo",
+      cliPath: "/repo/packages/koed-server/dist/cli.js",
+      appDistDir: "/repo/apps/desktop/dist"
+    });
+  });
+
+  it("resolves packaged runtime paths under resources without a repo checkout", () => {
+    expect(
+      resolvePackagedKoedAppRoot("/Applications/Koed.app/Contents/Resources")
+    ).toBe("/Applications/Koed.app/Contents/Resources/koed-app-root");
+    expect(
+      resolveKoedServerRuntimeLayout({
+        appIsPackaged: true,
+        appDir:
+          "/Applications/Koed.app/Contents/Resources/app.asar/dist-electron",
+        resourcesPath: "/Applications/Koed.app/Contents/Resources"
+      })
+    ).toEqual({
+      repoRoot: "/Applications/Koed.app/Contents/Resources/koed-app-root",
+      cliPath:
+        "/Applications/Koed.app/Contents/Resources/koed-app-root/packages/koed-server/dist/cli.js",
+      appDistDir: "/Applications/Koed.app/Contents/Resources/app-dist"
+    });
+  });
+
+  it("sets KOED_REPO_ROOT only for development invocations", () => {
+    expect(
+      createKoedServerInvocationEnvironment({
+        appIsPackaged: false,
+        environment: {},
+        repoRoot: "/repo"
+      })
+    ).toMatchObject({ KOED_DESKTOP_MANAGED: "1", KOED_REPO_ROOT: "/repo" });
+    expect(
+      createKoedServerInvocationEnvironment({
+        appIsPackaged: true,
+        environment: {},
+        repoRoot: "/resources/koed-app-root"
+      })
+    ).toEqual({
+      KOED_DESKTOP_MANAGED: "1",
+      KOED_PACKAGED_APP_ROOT: "/resources/koed-app-root"
+    });
+  });
+
+  it("throws labeled errors for missing packaged runtime files", () => {
+    expect(() =>
+      assertPathExists({
+        label: "Bundled koed-server CLI",
+        filePath: "/missing/cli.js",
+        existsSync: () => false
+      })
+    ).toThrow("Bundled koed-server CLI is missing at /missing/cli.js");
   });
 
   it("uses explicit KOED_NODE_COMMAND when configured", () => {
@@ -78,7 +144,8 @@ describe("Koed Desktop Node entrypoint runtime", () => {
         electronExecPath: "/Applications/Koed.app/Contents/MacOS/Koed",
         platform: "linux",
         resourcesPath: "/Applications/Koed.app/Contents/Resources",
-        environment: {}
+        environment: {},
+        existsSync: () => true
       }
     );
 
