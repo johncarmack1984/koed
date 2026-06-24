@@ -618,9 +618,9 @@ const startupLiveConfig: Record<StartupStepId, StartupLiveConfig> = {
       ])
   },
   start: {
-    liveTitle: "Live: local services",
+    liveTitle: "Live: koed-server daemon",
     liveBody:
-      "Runs koed-server start: ensure Docker deps, build apps, then spawn API/worker/Explorer.",
+      "Connects to the existing daemon, or starts koed-server in the background when missing.",
     componentKeys: [
       "api",
       "explorer",
@@ -1160,6 +1160,10 @@ const renderShell = () => {
     <section class="desktop-shell">
       <section class="startup-screen" data-startup-panel>
         <div class="startup-card">
+          <div class="service-lifecycle-note">
+            <strong>Koed runs in the background.</strong>
+            <span>Closing this window will not stop capture.</span>
+          </div>
           <div class="brand startup-brand">
             <img class="brand-logo" src="${koedMarkUrl}" alt="Koed" />
             <div>
@@ -1217,6 +1221,10 @@ const renderShell = () => {
           </div>
         </aside>
         <section class="explorer">
+          <div class="service-lifecycle-note shell-note">
+            <strong>Koed is running in the background.</strong>
+            <span>Closing this window will not stop capture. Use Stop Koed to stop local services.</span>
+          </div>
           <div class="explorer-body">
             <div class="empty" data-explorer-empty>
               Explorer will appear after startup completes.
@@ -1690,11 +1698,11 @@ const runStartupSequence = async () => {
 
     if (!startupStepReady("start")) {
       startupDetail =
-        "Starting Docker dependencies plus the local API, worker, and Explorer processes.";
+        "Connecting to the koed-server daemon, or starting it in the background if missing.";
       setStartupStep("start", "running");
-      appendStartupLog("command: koed-server start");
+      appendStartupLog("command: koed-server start --daemon --json");
       appendStartupLog(
-        "does: setup env; docker compose up deps; build apps; spawn API/worker/Explorer"
+        "does: reuse existing daemon when healthy/starting; otherwise launch background services"
       );
       const startResult = await runWithStartupProbes("start", () =>
         invokeWithTimeout("start", undefined, 180_000)
@@ -1846,6 +1854,44 @@ const runStatusCardAction = async (
     } else if (action.command === "status") {
       await refreshStatus();
       appendStatusCardLog(cardId, "status refreshed");
+    } else if (action.command === "stop_service") {
+      const result = await invokeWithTimeout(
+        "stop_service",
+        undefined,
+        action.timeoutMs ?? 90_000
+      );
+      const error = commandResultError(result);
+      if (error) {
+        appendStatusCardLog(cardId, `failed: ${error}`);
+      } else {
+        appendStatusCardLog(cardId, "Koed stop requested");
+      }
+      await refreshStatus();
+    } else if (action.command === "restart_service") {
+      const result = await invokeWithTimeout(
+        "restart_service",
+        undefined,
+        action.timeoutMs ?? 180_000
+      );
+      const error = commandResultError(result);
+      if (error) {
+        appendStatusCardLog(cardId, `failed: ${error}`);
+      } else {
+        appendStatusCardLog(cardId, "Koed restart requested");
+      }
+      await refreshStatus();
+    } else if (action.command === "open_logs") {
+      const result = await invokeWithTimeout(
+        "open_logs",
+        undefined,
+        action.timeoutMs ?? 10_000
+      );
+      const error = commandResultError(result);
+      if (error) {
+        appendStatusCardLog(cardId, `failed: ${error}`);
+      } else {
+        appendStatusCardLog(cardId, "opened koed-server logs");
+      }
     } else {
       const result = await invokeWithTimeout(
         action.command,

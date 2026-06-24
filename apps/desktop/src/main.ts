@@ -54,7 +54,8 @@ const koedServer = createKoedServerManager({
     }),
   existsSync,
   execFile,
-  openExternal: (url) => shell.openExternal(url)
+  openExternal: (url) => shell.openExternal(url),
+  openPath: (path) => shell.openPath(path)
 });
 
 const getAppDistDir = (): string =>

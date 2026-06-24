@@ -397,6 +397,31 @@ button:disabled {
   width: 34px;
 }
 
+.service-lifecycle-note {
+  background: #ebfbee;
+  border: 1px solid #b2f2bb;
+  border-radius: 12px;
+  color: #1f7a35;
+  display: grid;
+  gap: 3px;
+  line-height: 1.35;
+  padding: 10px 12px;
+}
+
+.service-lifecycle-note strong {
+  font-size: 13px;
+}
+
+.service-lifecycle-note span {
+  font-size: 12px;
+}
+
+.shell-note {
+  border-radius: 0;
+  border-width: 0 0 1px;
+  flex: none;
+}
+
 .status-pill {
   border-radius: 999px;
   flex: none;

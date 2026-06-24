@@ -29,7 +29,8 @@ describe("Koed server desktop manager", () => {
         calls.push({ command, args });
         callback(null, JSON.stringify({ ok: true, state: "healthy" }), "");
       },
-      openExternal: async () => undefined
+      openExternal: async () => undefined,
+      openPath: async () => ""
     });
 
     await expect(manager.handlers.status!()).resolves.toMatchObject({
@@ -54,7 +55,8 @@ describe("Koed server desktop manager", () => {
       }),
       existsSync: () => false,
       execFile: () => undefined,
-      openExternal: async () => undefined
+      openExternal: async () => undefined,
+      openPath: async () => ""
     });
 
     await expect(manager.handlers.doctor!()).resolves.toMatchObject({
@@ -65,6 +67,98 @@ describe("Koed server desktop manager", () => {
       ok: false,
       state: "not_configured"
     });
+  });
+
+  it("reconnects to a starting daemon without launching a duplicate", async () => {
+    const calls: string[][] = [];
+    let statusCalls = 0;
+    const manager = createKoedServerManager({
+      repoRoot: "/repo",
+      cliPath: "/repo/cli.js",
+      environment: {},
+      createCliInvocation: (args) => ({
+        command: "/node",
+        args: ["/repo/cli.js", ...args],
+        env: { KOED_REPO_ROOT: "/repo" }
+      }),
+      existsSync: () => true,
+      execFile: (_command, args, _options, callback) => {
+        calls.push(args);
+        statusCalls += 1;
+        callback(
+          null,
+          JSON.stringify(
+            statusCalls === 1
+              ? {
+                  ok: false,
+                  state: "starting",
+                  daemon: { state: "starting", running: true, stale: false },
+                  api: { state: "starting" }
+                }
+              : {
+                  ok: true,
+                  state: "healthy",
+                  daemon: { state: "healthy", running: true, stale: false },
+                  api: { state: "healthy" }
+                }
+          ),
+          ""
+        );
+      },
+      openExternal: async () => undefined,
+      openPath: async () => ""
+    });
+
+    await expect(manager.handlers.start!()).resolves.toMatchObject({
+      state: "healthy"
+    });
+    expect(calls).toEqual([
+      ["/repo/cli.js", "status", "--json"],
+      ["/repo/cli.js", "status", "--json"]
+    ]);
+  });
+
+  it("opens daemon logs from current status", async () => {
+    const opened: string[] = [];
+    const manager = createKoedServerManager({
+      repoRoot: "/repo",
+      cliPath: "/repo/cli.js",
+      environment: {},
+      createCliInvocation: (args) => ({
+        command: "/node",
+        args: ["/repo/cli.js", ...args],
+        env: { KOED_REPO_ROOT: "/repo" }
+      }),
+      existsSync: () => true,
+      execFile: (_command, _args, _options, callback) => {
+        callback(
+          null,
+          JSON.stringify({
+            ok: true,
+            state: "healthy",
+            daemon: {
+              state: "healthy",
+              logs: {
+                supervisor: "/logs/out.log",
+                supervisorError: "/logs/err.log"
+              }
+            }
+          }),
+          ""
+        );
+      },
+      openExternal: async () => undefined,
+      openPath: async (path) => {
+        opened.push(path);
+        return "";
+      }
+    });
+
+    await expect(manager.handlers.open_logs!()).resolves.toMatchObject({
+      ok: true,
+      path: "/logs/err.log"
+    });
+    expect(opened).toEqual(["/logs/err.log"]);
   });
 
   it("starts koed-server as a daemon and leaves it running on quit", async () => {
@@ -114,7 +208,8 @@ describe("Koed server desktop manager", () => {
           ""
         );
       },
-      openExternal: async () => undefined
+      openExternal: async () => undefined,
+      openPath: async () => ""
     });
 
     await expect(manager.handlers.start!()).resolves.toMatchObject({

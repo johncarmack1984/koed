@@ -19,6 +19,7 @@ export interface KoedServerManagerOptions {
     callback: (error: Error | null, stdout: string, stderr: string) => void
   ) => void;
   openExternal: (url: string) => Promise<unknown>;
+  openPath: (path: string) => Promise<string>;
 }
 
 export interface KoedServerManager {
@@ -78,6 +79,48 @@ const hasHealthyApi = (value: unknown): boolean => {
   );
 };
 
+const hasRunningDaemon = (value: unknown): boolean => {
+  if (typeof value !== "object" || value === null || !("daemon" in value)) {
+    return false;
+  }
+  const daemon = (value as { daemon?: unknown }).daemon;
+  if (typeof daemon !== "object" || daemon === null) {
+    return false;
+  }
+  const state = (daemon as { state?: unknown }).state;
+  return (
+    ((daemon as { running?: unknown }).running === true &&
+      (daemon as { stale?: unknown }).stale !== true) ||
+    state === "healthy" ||
+    state === "starting"
+  );
+};
+
+const extractDaemonLogPath = (value: unknown): string | null => {
+  if (typeof value !== "object" || value === null || !("daemon" in value)) {
+    return null;
+  }
+  const daemon = (value as { daemon?: unknown }).daemon;
+  if (typeof daemon !== "object" || daemon === null || !("logs" in daemon)) {
+    return null;
+  }
+  const logs = (daemon as { logs?: unknown }).logs;
+  if (typeof logs !== "object" || logs === null) {
+    return null;
+  }
+  const candidates = [
+    (logs as Record<string, unknown>).supervisorError,
+    (logs as Record<string, unknown>).supervisor,
+    ...Object.values(logs as Record<string, unknown>)
+  ];
+  return (
+    candidates.find(
+      (candidate): candidate is string =>
+        typeof candidate === "string" && candidate.length > 0
+    ) ?? null
+  );
+};
+
 export const createKoedEnvironment = (
   repoRoot: string,
   environment: NodeJS.ProcessEnv
@@ -93,7 +136,8 @@ export const createKoedServerManager = ({
   createCliInvocation,
   existsSync,
   execFile,
-  openExternal
+  openExternal,
+  openPath
 }: KoedServerManagerOptions): KoedServerManager => {
   const startOutputLines: string[] = [];
   void environment;
@@ -159,6 +203,10 @@ export const createKoedServerManager = ({
       return current;
     }
 
+    if (hasRunningDaemon(current)) {
+      return pollUntilReady();
+    }
+
     if (!existsSync(cliPath)) {
       return missingCliPayload();
     }
@@ -194,6 +242,19 @@ export const createKoedServerManager = ({
       start,
       stop_service: () => runJson(["stop"], 45_000),
       restart_service: () => runJson(["restart"], 90_000),
+      open_logs: async () => {
+        const current = await runJson(["status"], 10_000);
+        const logPath = extractDaemonLogPath(current);
+        if (!logPath) {
+          return {
+            ok: false,
+            state: "not_configured",
+            error: "koed-server log path is not available yet."
+          };
+        }
+        const error = await openPath(logPath);
+        return error ? { ok: false, error } : { ok: true, path: logPath };
+      },
       open_external: async (args) => {
         const url = typeof args?.url === "string" ? args.url : "";
         if (!url) {

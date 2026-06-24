@@ -106,6 +106,9 @@ export type StatusCardActionCommand =
   | "start"
   | "setup_codex"
   | "doctor"
+  | "stop_service"
+  | "restart_service"
+  | "open_logs"
   | "open_explorer"
   | "copy_diagnostics";
 
@@ -130,10 +133,10 @@ export const statusCards = [
   {
     id: "controlPlane",
     title: "Koed Control Plane",
-    role: "Supervises KOED_HOME plus local API, Worker, and Explorer processes.",
+    role: "Connects Desktop to the daemon that runs API, Worker, Explorer, and capture services.",
     impact:
-      "Local startup and process supervision are blocked when this is down.",
-    componentKeys: ["api", "workerQueues", "explorer"],
+      "Capture and recall keep running in the background until you explicitly stop Koed.",
+    componentKeys: ["daemon", "api", "workerQueues", "explorer"],
     primaryAction: {
       label: "Start Koed",
       command: "start",
@@ -141,8 +144,10 @@ export const statusCards = [
       primary: true
     },
     secondaryActions: [
-      { label: "Run doctor", command: "doctor", timeoutMs: 90_000 },
-      { label: "Copy diagnostics", command: "copy_diagnostics" }
+      { label: "Restart Koed", command: "restart_service", timeoutMs: 180_000 },
+      { label: "Stop Koed", command: "stop_service", timeoutMs: 90_000 },
+      { label: "Open logs", command: "open_logs", timeoutMs: 10_000 },
+      { label: "Run doctor", command: "doctor", timeoutMs: 90_000 }
     ]
   },
   {
