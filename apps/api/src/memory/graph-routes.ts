@@ -24,13 +24,18 @@ export const registerGraphRoutes = (
 ) => {
   const {
     requireRepository,
-    auth: { authenticate, authenticateApiToken },
+    auth: { authenticate, authenticateApiToken, authenticateSession },
     graph: { cacheProvider, graphCacheTtlSeconds, hashCacheKey },
     rateLimit: {
       memoryRead: memoryReadRateLimit,
       memoryWrite: memoryWriteRateLimit
     }
   } = context;
+  const authenticateGraphRead = async (
+    request: Parameters<typeof authenticate>[0],
+    teamWorkspaceId?: string
+  ) => (teamWorkspaceId ? authenticateSession(request) : authenticate(request));
+
   app.get(
     "/v1/memory/clusters",
     { preHandler: memoryReadRateLimit },
@@ -107,8 +112,8 @@ export const registerGraphRoutes = (
     { preHandler: memoryReadRateLimit },
     async (request) => {
       const repo = requireRepository();
-      const user = await authenticate(request);
       const query = graphNodesQuerySchema.parse(request.query);
+      const user = await authenticateGraphRead(request, query.teamWorkspaceId);
       return {
         nodes: await repo.listLcmGraphNodes(
           { userId: user.id },
@@ -126,14 +131,15 @@ export const registerGraphRoutes = (
     { preHandler: memoryReadRateLimit },
     async (request, reply) => {
       const repo = requireRepository();
-      const user = await authenticate(request);
       const params = nodeIdParamsSchema.parse(request.params);
       const query = graphEventDetailQuerySchema.parse(request.query);
+      const user = await authenticateGraphRead(request, query.teamWorkspaceId);
       const node = await repo.getLcmGraphNode(
         { userId: user.id },
         params.nodeId,
         {
-          includeInvalidated: query.includeInvalidated
+          includeInvalidated: query.includeInvalidated,
+          teamWorkspaceId: query.teamWorkspaceId
         }
       );
       return node
@@ -149,8 +155,8 @@ export const registerGraphRoutes = (
     { preHandler: memoryReadRateLimit },
     async (request) => {
       const repo = requireRepository();
-      const user = await authenticate(request);
       const query = graphEventsQuerySchema.parse(request.query);
+      const user = await authenticateGraphRead(request, query.teamWorkspaceId);
       return {
         events: await repo.listLcmGraphEvents({ userId: user.id }, query)
       };
@@ -162,8 +168,13 @@ export const registerGraphRoutes = (
     { preHandler: memoryReadRateLimit },
     async (request) => {
       const repo = requireRepository();
-      const user = await authenticate(request);
       const query = graphQuerySchema.parse(request.query);
+      const user = await authenticateGraphRead(request, query.teamWorkspaceId);
+      if (query.teamWorkspaceId) {
+        return {
+          projects: await repo.listLcmGraphThreads({ userId: user.id }, query)
+        };
+      }
       const cacheKey = `koed:graph:threads:${user.id}:${hashCacheKey(
         JSON.stringify(query)
       )}`;
@@ -186,9 +197,9 @@ export const registerGraphRoutes = (
     { preHandler: memoryReadRateLimit },
     async (request, reply) => {
       const repo = requireRepository();
-      const user = await authenticate(request);
       const params = graphEventParamsSchema.parse(request.params);
       const query = graphEventDetailQuerySchema.parse(request.query);
+      const user = await authenticateGraphRead(request, query.teamWorkspaceId);
       const event = await repo.getLcmGraphEvent(
         { userId: user.id },
         params.eventId,
@@ -341,9 +352,11 @@ export const registerGraphRoutes = (
     { preHandler: memoryReadRateLimit },
     async (request) => {
       const repo = requireRepository();
-      const user = await authenticateApiToken(request);
       const params = nodeIdParamsSchema.parse(request.params);
       const query = expandMemoryNodeQuerySchema.parse(request.query);
+      const user = query.team_workspace_id
+        ? await authenticateSession(request)
+        : await authenticateApiToken(request);
       const expanded = await repo.expandMemoryNode(
         params.nodeId,
         {
@@ -353,6 +366,7 @@ export const registerGraphRoutes = (
           searchDomain: query.search_domain,
           sessionId: query.session_id,
           workspaceId: query.workspace_id,
+          teamWorkspaceId: query.team_workspace_id,
           recentDays: query.recent_days,
           sourceAfter: query.source_after?.toISOString(),
           sourceBefore: query.source_before?.toISOString()

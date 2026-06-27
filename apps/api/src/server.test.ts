@@ -2571,9 +2571,27 @@ describe("api health", () => {
       url: "/v1/memory/graph/overview",
       headers: { cookie }
     });
+    const regularThreads = await app.inject({
+      method: "GET",
+      url: "/v1/memory/graph/threads",
+      headers: { cookie }
+    });
+    const threadCacheReadsBeforeTeam = cacheReads.filter((key) =>
+      key.startsWith("koed:graph:threads:")
+    ).length;
+    const threadCacheWritesBeforeTeam = cacheWrites.filter((key) =>
+      key.startsWith("koed:graph:threads:")
+    ).length;
+    const teamThreads = await app.inject({
+      method: "GET",
+      url: `/v1/memory/graph/threads?teamWorkspaceId=${randomUUID()}`,
+      headers: { cookie }
+    });
     await app.close();
 
     expect(overview.statusCode).toBe(200);
+    expect(regularThreads.statusCode).toBe(200);
+    expect(teamThreads.statusCode).toBe(200);
     expect(rateLimitKeys.some((key) => key.startsWith("memoryRead:"))).toBe(
       true
     );
@@ -2583,6 +2601,14 @@ describe("api health", () => {
     expect(
       cacheWrites.some((key) => key.startsWith("koed:graph:overview:"))
     ).toBe(true);
+    expect(threadCacheReadsBeforeTeam).toBe(1);
+    expect(threadCacheWritesBeforeTeam).toBe(1);
+    expect(
+      cacheReads.filter((key) => key.startsWith("koed:graph:threads:")).length
+    ).toBe(threadCacheReadsBeforeTeam);
+    expect(
+      cacheWrites.filter((key) => key.startsWith("koed:graph:threads:")).length
+    ).toBe(threadCacheWritesBeforeTeam);
   });
 });
 
@@ -3509,7 +3535,7 @@ describe("account and access flows", () => {
     expect(JSON.stringify(forwardedItem)).not.toContain("\\u0000");
   });
 
-  it("forwards staged retrieval controls through MCP recall endpoints", async () => {
+  it("keeps Team Workspace recall behind session authentication", async () => {
     const repository = createFakeRepository();
     const recallInputs: Array<Record<string, unknown>> = [];
     const originalSearchMemoryNodes =
@@ -3536,6 +3562,7 @@ describe("account and access flows", () => {
     });
     const token = jsonBody<TokenResponse>(createdToken).token;
     const parentNodeId = randomUUID();
+    const teamWorkspaceId = randomUUID();
 
     const search = await app.inject({
       method: "POST",
@@ -3550,6 +3577,16 @@ describe("account and access flows", () => {
         limit: 2
       }
     });
+    const rejectedTeamSearch = await app.inject({
+      method: "POST",
+      url: "/v1/memory/search",
+      headers: { authorization: `Bearer ${token}` },
+      payload: {
+        query: "Seraphina",
+        retrieval_scope: "personal",
+        team_workspace_id: teamWorkspaceId
+      }
+    });
     const answer = await app.inject({
       method: "POST",
       url: "/v1/memory/answer",
@@ -3558,6 +3595,7 @@ describe("account and access flows", () => {
         query: "Seraphina",
         retrieval_scope: "personal",
         retrieval_stage: "score_scan",
+        team_workspace_id: teamWorkspaceId,
         strict_limit: true,
         limit: 1
       }
@@ -3572,11 +3610,131 @@ describe("account and access flows", () => {
       strictLimit: false,
       limit: 2
     });
+    expect(rejectedTeamSearch.statusCode).toBe(403);
+    expect(jsonBody<{ error: string }>(rejectedTeamSearch).error).toBe(
+      "Session cookie required for Team Workspace recall"
+    );
     expect(recallInputs[1]).toMatchObject({
       retrievalStage: "score_scan",
+      teamWorkspaceId,
       strictLimit: true,
       limit: 1
     });
+  });
+
+  it("keeps Team Workspace node expansion behind session authentication", async () => {
+    const repository = createFakeRepository();
+    const expandInputs: Array<Record<string, unknown>> = [];
+    repository.expandMemoryNode = async (nodeId, _actor, input) => {
+      expandInputs.push({ nodeId, ...(input as Record<string, unknown>) });
+      return {
+        nodeId,
+        visibility: "personal",
+        sourceItems: [],
+        sources: []
+      } satisfies ExpandedMemoryNode;
+    };
+    const app = await buildServer({ repository });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "team-expand@example.com",
+        password: "password123"
+      }
+    });
+    const cookie = cookieHeader(registered);
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie },
+      payload: { name: "Client Integration" }
+    });
+    const token = jsonBody<TokenResponse>(createdToken).token;
+    const nodeId = randomUUID();
+    const teamWorkspaceId = randomUUID();
+    const rejectedTokenExpand = await app.inject({
+      method: "GET",
+      url: `/v1/memory/nodes/${nodeId}/expand?team_workspace_id=${teamWorkspaceId}`,
+      headers: { authorization: `Bearer ${token}` }
+    });
+    const sessionExpand = await app.inject({
+      method: "GET",
+      url: `/v1/memory/nodes/${nodeId}/expand?team_workspace_id=${teamWorkspaceId}`,
+      headers: { cookie }
+    });
+    await app.close();
+
+    expect(rejectedTokenExpand.statusCode).toBe(401);
+    expect(jsonBody<{ error: string }>(rejectedTokenExpand).error).toBe(
+      "Session cookie required"
+    );
+    expect(sessionExpand.statusCode).toBe(200);
+    expect(expandInputs).toEqual([
+      expect.objectContaining({ nodeId, teamWorkspaceId })
+    ]);
+  });
+
+  it("keeps Team Workspace graph APIs behind session authentication", async () => {
+    const app = await buildServer({ repository: createFakeRepository() });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "team-graph-token@example.com",
+        password: "password123"
+      }
+    });
+    const cookie = cookieHeader(registered);
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie },
+      payload: { name: "Client Integration" }
+    });
+    const token = jsonBody<TokenResponse>(createdToken).token;
+    const headers = { authorization: `Bearer ${token}` };
+    const teamWorkspaceId = randomUUID();
+    const nodeId = randomUUID();
+    const eventId = randomUUID();
+
+    const responses = await Promise.all([
+      app.inject({
+        method: "GET",
+        url: `/v1/memory/graph/nodes?teamWorkspaceId=${teamWorkspaceId}`,
+        headers
+      }),
+      app.inject({
+        method: "GET",
+        url: `/v1/memory/graph/events?teamWorkspaceId=${teamWorkspaceId}`,
+        headers
+      }),
+      app.inject({
+        method: "GET",
+        url: `/v1/memory/graph/threads?teamWorkspaceId=${teamWorkspaceId}`,
+        headers
+      }),
+      app.inject({
+        method: "GET",
+        url: `/v1/memory/graph/nodes/${nodeId}?teamWorkspaceId=${teamWorkspaceId}`,
+        headers
+      }),
+      app.inject({
+        method: "GET",
+        url: `/v1/memory/graph/events/${eventId}?teamWorkspaceId=${teamWorkspaceId}`,
+        headers
+      })
+    ]);
+    await app.close();
+
+    expect(responses.map((response) => response.statusCode)).toEqual([
+      401, 401, 401, 401, 401
+    ]);
+    for (const response of responses) {
+      expect(jsonBody<{ error: string }>(response).error).toBe(
+        "Session cookie required"
+      );
+    }
   });
 
   it("rejects unsupported capture policy visibility for API-token setup", async () => {

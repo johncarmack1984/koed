@@ -9,7 +9,7 @@ export const registerRecallRoutes = (
 ) => {
   const {
     requireRepository,
-    auth: { authenticate, authenticateApiToken },
+    auth: { authenticate, authenticateApiToken, authenticateSession },
     rateLimit: { memoryRecall: memoryRecallRateLimit }
   } = context;
 
@@ -20,6 +20,12 @@ export const registerRecallRoutes = (
       const repo = requireRepository();
       const user = await authenticateApiToken(request);
       const input = searchMemorySchema.parse(request.body);
+      if (input.team_workspace_id) {
+        throw Object.assign(
+          new Error("Session cookie required for Team Workspace recall"),
+          { statusCode: 403 }
+        );
+      }
       const result = await searchMemory({
         repository: repo,
         requesterContext: { userId: user.id },
@@ -28,6 +34,7 @@ export const registerRecallRoutes = (
         searchDomain: input.search_domain,
         sessionId: input.session_id,
         workspaceId: input.workspace_id,
+        teamWorkspaceId: input.team_workspace_id,
         limit: input.limit,
         recentDays: input.recent_days,
         sourceAfter: input.source_after?.toISOString(),
@@ -65,8 +72,10 @@ export const registerRecallRoutes = (
     { preHandler: memoryRecallRateLimit },
     async (request) => {
       const repo = requireRepository();
-      const user = await authenticate(request);
       const input = searchMemorySchema.parse(request.body);
+      const user = input.team_workspace_id
+        ? await authenticateSession(request)
+        : await authenticate(request);
       const result = await answerMemory({
         repository: repo,
         requesterContext: { userId: user.id },
@@ -75,6 +84,7 @@ export const registerRecallRoutes = (
         searchDomain: input.search_domain,
         sessionId: input.session_id,
         workspaceId: input.workspace_id,
+        teamWorkspaceId: input.team_workspace_id,
         limit: input.limit,
         recentDays: input.recent_days,
         sourceAfter: input.source_after?.toISOString(),

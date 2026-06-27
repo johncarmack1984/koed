@@ -40,6 +40,7 @@ import { createWorkflowTokenUsageRepository } from "./workflow-token-usage-repos
 import {
   codexIdePromptUserText,
   estimateTokens,
+  resolveTeamWorkspaceAuthorization,
   type LcmSourceItem
 } from "@koed/core";
 import type {
@@ -1780,6 +1781,21 @@ const defaultRetrievalMetadata = (
   embeddingModel: null,
   embeddingDimensions: null,
   ...overrides
+});
+
+type TeamWorkspaceReadBoundary = {
+  teamWorkspaceId: string;
+  teamId: string;
+} | null;
+
+const emptySearchResult = (
+  overrides: Partial<RetrievalMetadata> = {}
+): {
+  results: MemorySearchResult[];
+  metadata: RetrievalMetadata;
+} => ({
+  results: [],
+  metadata: defaultRetrievalMetadata(overrides)
 });
 
 const uuidPattern =
@@ -3779,6 +3795,28 @@ export const createMemorySourceRepository = (
   },
 
   async listLcmGraphNodes(actor, input = {}) {
+    const teamWorkspaceAccess = input.teamWorkspaceId
+      ? await this.getTeamWorkspaceAccess(actor, input.teamWorkspaceId)
+      : null;
+    const teamWorkspaceAuthorization = resolveTeamWorkspaceAuthorization({
+      requesterUserId: actor.userId,
+      teamWorkspaceId: input.teamWorkspaceId,
+      access: teamWorkspaceAccess
+    });
+    if (
+      teamWorkspaceAuthorization.mode === "team_workspace" &&
+      !teamWorkspaceAuthorization.authorized
+    ) {
+      return [];
+    }
+    const teamWorkspaceBoundary: TeamWorkspaceReadBoundary =
+      teamWorkspaceAuthorization.mode === "team_workspace" &&
+      teamWorkspaceAuthorization.authorized
+        ? {
+            teamWorkspaceId: teamWorkspaceAuthorization.teamWorkspaceId,
+            teamId: teamWorkspaceAuthorization.teamId
+          }
+        : null;
     const nodeIds = input.nodeIds?.filter(Boolean) ?? [];
     const limit = nodeIds.length
       ? Math.min(nodeIds.length, 500)
@@ -3820,7 +3858,7 @@ export const createMemorySourceRepository = (
         left join sessions s on s.id = ev.session_id
         left join memory_embeddings me on me.memory_node_id = mn.id and me.invalidated_at is null and me.personal_deleted_at is null
         where mn.kind in ('leaf', 'rollup')
-          and ($2::boolean = true or mn.invalidated_at is null and mn.personal_deleted_at is null)
+          and ($2::boolean = true or mn.invalidated_at is null)
           and ($3::visibility_scope is null or mn.visibility = $3::visibility_scope)
           and ($4::text is null or coalesce(
             case when ev.payload ->> 'workspaceId' = s.id::text then null else ev.payload ->> 'workspaceId' end,
@@ -3831,7 +3869,32 @@ export const createMemorySourceRepository = (
           and ($6::text is null or mn.summary_text ilike '%' || $6 || '%' or mn.id::text = $6)
           and ($7::uuid[] is null or mn.id = any($7::uuid[]))
           and mn.visibility = 'personal'
-          and mn.owner_user_id = $1
+          and (
+            (mn.owner_user_id = $1 and ($2::boolean = true or mn.personal_deleted_at is null))
+            or (
+              $9::uuid is not null
+              and exists (
+                select 1
+                from memory_node_sources auth_any_mns
+                where auth_any_mns.memory_node_id = mn.id
+              )
+              and not exists (
+                select 1
+                from memory_node_sources auth_mns
+                left join memory_events auth_ev on auth_ev.id = auth_mns.memory_event_id and auth_ev.invalidated_at is null
+                left join messages auth_msg on auth_msg.id = auth_mns.message_id and auth_msg.invalidated_at is null
+                where auth_mns.memory_node_id = mn.id
+                  and not exists (
+                    select 1
+                    from team_session_share_grants auth_grant
+                    where auth_grant.session_id = coalesce(auth_ev.session_id, auth_msg.session_id)
+                      and auth_grant.team_workspace_id = $9::uuid
+                      and auth_grant.team_id = $10::uuid
+                      and auth_grant.revoked_at is null
+                  )
+              )
+            )
+          )
         group by mn.id, ev.id, s.id
         order by mn.updated_at desc, mn.created_at desc
         limit $8
@@ -3844,7 +3907,9 @@ export const createMemorySourceRepository = (
         input.threadId ?? null,
         input.query?.trim() || null,
         nodeIds.length ? nodeIds : null,
-        limit
+        limit,
+        teamWorkspaceBoundary?.teamWorkspaceId ?? null,
+        teamWorkspaceBoundary?.teamId ?? null
       ]
     );
     return result.rows.map(mapLcmGraphNode);
@@ -3853,6 +3918,7 @@ export const createMemorySourceRepository = (
   async getLcmGraphNode(actor, nodeId, input = {}) {
     const nodes = await this.listLcmGraphNodes(actor, {
       includeInvalidated: input.includeInvalidated,
+      teamWorkspaceId: input.teamWorkspaceId,
       nodeIds: [nodeId],
       limit: 1
     });
@@ -3895,6 +3961,7 @@ export const createMemorySourceRepository = (
     ]);
     const visibleNodes = await this.listLcmGraphNodes(actor, {
       includeInvalidated: true,
+      teamWorkspaceId: input.teamWorkspaceId,
       limit: 500
     });
     const visibleNodeById = new Map(
@@ -3904,6 +3971,7 @@ export const createMemorySourceRepository = (
       Promise.all(
         sourceRows.rows.map((row) =>
           this.getLcmGraphEvent(actor, row.memory_event_id, {
+            teamWorkspaceId: input.teamWorkspaceId,
             includeInvalidated: true,
             includeRaw: false
           })
@@ -3975,6 +4043,28 @@ export const createMemorySourceRepository = (
   },
 
   async listLcmGraphEvents(actor, input = {}) {
+    const teamWorkspaceAccess = input.teamWorkspaceId
+      ? await this.getTeamWorkspaceAccess(actor, input.teamWorkspaceId)
+      : null;
+    const teamWorkspaceAuthorization = resolveTeamWorkspaceAuthorization({
+      requesterUserId: actor.userId,
+      teamWorkspaceId: input.teamWorkspaceId,
+      access: teamWorkspaceAccess
+    });
+    if (
+      teamWorkspaceAuthorization.mode === "team_workspace" &&
+      !teamWorkspaceAuthorization.authorized
+    ) {
+      return [];
+    }
+    const teamWorkspaceBoundary: TeamWorkspaceReadBoundary =
+      teamWorkspaceAuthorization.mode === "team_workspace" &&
+      teamWorkspaceAuthorization.authorized
+        ? {
+            teamWorkspaceId: teamWorkspaceAuthorization.teamWorkspaceId,
+            teamId: teamWorkspaceAuthorization.teamId
+          }
+        : null;
     const limit = Math.min(Math.max(input.limit ?? 100, 1), 500);
     const result = await pool.query<Parameters<typeof mapLcmGraphEvent>[0]>(
       `
@@ -3987,7 +4077,20 @@ export const createMemorySourceRepository = (
                 select me.id, me.source_sequence
                 from memory_events me
                 where me.visibility = 'personal'
-                  and me.owner_user_id = $1
+                  and (
+                    me.owner_user_id = $1
+                    or (
+                      $12::uuid is not null
+                      and exists (
+                        select 1
+                        from team_session_share_grants cursor_grant
+                        where cursor_grant.session_id = me.session_id
+                          and cursor_grant.team_workspace_id = $12::uuid
+                          and cursor_grant.team_id = $13::uuid
+                          and cursor_grant.revoked_at is null
+                      )
+                    )
+                  )
                 union all
                 select
                   msg.id,
@@ -3998,7 +4101,20 @@ export const createMemorySourceRepository = (
                   end as source_sequence
                 from messages msg
                 where msg.visibility = 'personal'
-                  and msg.owner_user_id = $1
+                  and (
+                    msg.owner_user_id = $1
+                    or (
+                      $12::uuid is not null
+                      and exists (
+                        select 1
+                        from team_session_share_grants cursor_grant
+                        where cursor_grant.session_id = msg.session_id
+                          and cursor_grant.team_workspace_id = $12::uuid
+                          and cursor_grant.team_id = $13::uuid
+                          and cursor_grant.revoked_at is null
+                      )
+                    )
+                  )
                 union all
                 select
                   te.id,
@@ -4009,7 +4125,20 @@ export const createMemorySourceRepository = (
                   end as source_sequence
                 from tool_events te
                 where te.visibility = 'personal'
-                  and te.owner_user_id = $1
+                  and (
+                    te.owner_user_id = $1
+                    or (
+                      $12::uuid is not null
+                      and exists (
+                        select 1
+                        from team_session_share_grants cursor_grant
+                        where cursor_grant.session_id = te.session_id
+                          and cursor_grant.team_workspace_id = $12::uuid
+                          and cursor_grant.team_id = $13::uuid
+                          and cursor_grant.revoked_at is null
+                      )
+                    )
+                  )
               ) cursor_event
               where cursor_event.id = $10::uuid
               limit 1
@@ -4067,7 +4196,7 @@ export const createMemorySourceRepository = (
           from memory_events me
           cross join cursor_order co
           left join sessions s on s.id = me.session_id
-          where ($2::boolean = true or me.invalidated_at is null and me.personal_deleted_at is null)
+          where ($2::boolean = true or me.invalidated_at is null)
             and ($6::uuid is not null or me.session_id is null or me.capture_method = 'api')
             and ($3::visibility_scope is null or me.visibility = $3::visibility_scope)
             and ($4::text is null or coalesce(
@@ -4109,7 +4238,20 @@ export const createMemorySourceRepository = (
               )
             )
             and me.visibility = 'personal'
-            and me.owner_user_id = $1
+            and (
+              (me.owner_user_id = $1 and ($2::boolean = true or me.personal_deleted_at is null))
+              or (
+                $12::uuid is not null
+                and exists (
+                  select 1
+                  from team_session_share_grants auth_grant
+                  where auth_grant.session_id = me.session_id
+                    and auth_grant.team_workspace_id = $12::uuid
+                    and auth_grant.team_id = $13::uuid
+                    and auth_grant.revoked_at is null
+                )
+              )
+            )
           union all
           select
             msg.id,
@@ -4226,7 +4368,20 @@ export const createMemorySourceRepository = (
               )
             )
             and msg.visibility = 'personal'
-            and msg.owner_user_id = $1
+            and (
+              msg.owner_user_id = $1
+              or (
+                $12::uuid is not null
+                and exists (
+                  select 1
+                  from team_session_share_grants auth_grant
+                  where auth_grant.session_id = msg.session_id
+                    and auth_grant.team_workspace_id = $12::uuid
+                    and auth_grant.team_id = $13::uuid
+                    and auth_grant.revoked_at is null
+                )
+              )
+            )
           union all
           select
             te.id,
@@ -4363,7 +4518,20 @@ export const createMemorySourceRepository = (
               )
             )
             and te.visibility = 'personal'
-            and te.owner_user_id = $1
+            and (
+              te.owner_user_id = $1
+              or (
+                $12::uuid is not null
+                and exists (
+                  select 1
+                  from team_session_share_grants auth_grant
+                  where auth_grant.session_id = te.session_id
+                    and auth_grant.team_workspace_id = $12::uuid
+                    and auth_grant.team_id = $13::uuid
+                    and auth_grant.revoked_at is null
+                )
+              )
+            )
         )
         select
           ve.*,
@@ -4390,7 +4558,9 @@ export const createMemorySourceRepository = (
         input.cursorTimestamp ?? null,
         input.cursorSourceSequence ?? null,
         input.cursorId ?? null,
-        limit
+        limit,
+        teamWorkspaceBoundary?.teamWorkspaceId ?? null,
+        teamWorkspaceBoundary?.teamId ?? null
       ]
     );
     return result.rows.map((row) =>
@@ -4403,6 +4573,28 @@ export const createMemorySourceRepository = (
   },
 
   async listLcmGraphThreads(actor, input = {}) {
+    const teamWorkspaceAccess = input.teamWorkspaceId
+      ? await this.getTeamWorkspaceAccess(actor, input.teamWorkspaceId)
+      : null;
+    const teamWorkspaceAuthorization = resolveTeamWorkspaceAuthorization({
+      requesterUserId: actor.userId,
+      teamWorkspaceId: input.teamWorkspaceId,
+      access: teamWorkspaceAccess
+    });
+    if (
+      teamWorkspaceAuthorization.mode === "team_workspace" &&
+      !teamWorkspaceAuthorization.authorized
+    ) {
+      return [];
+    }
+    const teamWorkspaceBoundary: TeamWorkspaceReadBoundary =
+      teamWorkspaceAuthorization.mode === "team_workspace" &&
+      teamWorkspaceAuthorization.authorized
+        ? {
+            teamWorkspaceId: teamWorkspaceAuthorization.teamWorkspaceId,
+            teamId: teamWorkspaceAuthorization.teamId
+          }
+        : null;
     const limit = Math.min(Math.max(input.limit ?? 100, 1), 500);
     const offset = Math.max(input.offset ?? 0, 0);
     const result = await pool.query<Parameters<typeof mapLcmGraphThreadRow>[0]>(
@@ -4449,7 +4641,7 @@ export const createMemorySourceRepository = (
             me.payload ->> 'content' as content
           from memory_events me
           left join sessions s on s.id = me.session_id
-          where ($2::boolean = true or me.invalidated_at is null and me.personal_deleted_at is null)
+          where ($2::boolean = true or me.invalidated_at is null)
             and ($3::visibility_scope is null or me.visibility = $3::visibility_scope)
             and ($4::text is null or coalesce(
               case when me.payload ->> 'workspaceId' = s.id::text then null else me.payload ->> 'workspaceId' end,
@@ -4466,7 +4658,20 @@ export const createMemorySourceRepository = (
               or coalesce(me.payload #>> '{metadata,projectName}', s.workspace_id::text, s.cwd, 'Unknown project') ilike '%' || $6 || '%'
             )
             and me.visibility = 'personal'
-            and me.owner_user_id = $1
+            and (
+              (me.owner_user_id = $1 and ($2::boolean = true or me.personal_deleted_at is null))
+              or (
+                $9::uuid is not null
+                and exists (
+                  select 1
+                  from team_session_share_grants auth_grant
+                  where auth_grant.session_id = me.session_id
+                    and auth_grant.team_workspace_id = $9::uuid
+                    and auth_grant.team_id = $10::uuid
+                    and auth_grant.revoked_at is null
+                )
+              )
+            )
           union all
           select
             s.id::text as id,
@@ -4501,7 +4706,20 @@ export const createMemorySourceRepository = (
               or coalesce(s.metadata ->> 'projectName', s.workspace_id::text, s.cwd, 'Unknown project') ilike '%' || $6 || '%'
             )
             and s.visibility = 'personal'
-            and s.owner_user_id = $1
+            and (
+              s.owner_user_id = $1
+              or (
+                $9::uuid is not null
+                and exists (
+                  select 1
+                  from team_session_share_grants auth_grant
+                  where auth_grant.session_id = s.id
+                    and auth_grant.team_workspace_id = $9::uuid
+                    and auth_grant.team_id = $10::uuid
+                    and auth_grant.revoked_at is null
+                )
+              )
+            )
         ),
         ranked_threads as (
           select
@@ -4541,7 +4759,9 @@ export const createMemorySourceRepository = (
         input.threadId ?? null,
         input.query?.trim() || null,
         limit,
-        offset
+        offset,
+        teamWorkspaceBoundary?.teamWorkspaceId ?? null,
+        teamWorkspaceBoundary?.teamId ?? null
       ]
     );
 
@@ -4578,6 +4798,7 @@ export const createMemorySourceRepository = (
   async getLcmGraphEvent(actor, eventId, input = {}) {
     const events = await this.listLcmGraphEvents(actor, {
       eventId,
+      teamWorkspaceId: input.teamWorkspaceId,
       includeInvalidated: input.includeInvalidated,
       includeRaw: input.includeRaw,
       limit: 1
@@ -5398,6 +5619,28 @@ export const createMemorySourceRepository = (
     if (searchDomain === "project" && !input.workspaceId) {
       throw new Error("Project-scoped memory search requires workspaceId");
     }
+    const teamWorkspaceAccess = input.teamWorkspaceId
+      ? await this.getTeamWorkspaceAccess(actor, input.teamWorkspaceId)
+      : null;
+    const teamWorkspaceAuthorization = resolveTeamWorkspaceAuthorization({
+      requesterUserId: actor.userId,
+      teamWorkspaceId: input.teamWorkspaceId,
+      access: teamWorkspaceAccess
+    });
+    if (
+      teamWorkspaceAuthorization.mode === "team_workspace" &&
+      !teamWorkspaceAuthorization.authorized
+    ) {
+      return emptySearchResult();
+    }
+    const teamWorkspaceBoundary: TeamWorkspaceReadBoundary =
+      teamWorkspaceAuthorization.mode === "team_workspace" &&
+      teamWorkspaceAuthorization.authorized
+        ? {
+            teamWorkspaceId: teamWorkspaceAuthorization.teamWorkspaceId,
+            teamId: teamWorkspaceAuthorization.teamId
+          }
+        : null;
     const requestedLimit = input.limit ?? 10;
     const shouldRerank = rerankingEnabled();
     const now = new Date();
@@ -5747,7 +5990,32 @@ export const createMemorySourceRepository = (
             ) filtered_sources on true
             where mn.invalidated_at is null and mn.personal_deleted_at is null
               and mn.visibility = 'personal'
-              and mn.owner_user_id = $1
+              and (
+                mn.owner_user_id = $1
+                or (
+                  $13::uuid is not null
+                  and exists (
+                    select 1
+                    from memory_node_sources auth_any_mns
+                    where auth_any_mns.memory_node_id = mn.id
+                  )
+                  and not exists (
+                    select 1
+                    from memory_node_sources auth_mns
+                    left join memory_events auth_ev on auth_ev.id = auth_mns.memory_event_id and auth_ev.invalidated_at is null
+                    left join messages auth_msg on auth_msg.id = auth_mns.message_id and auth_msg.invalidated_at is null
+                    where auth_mns.memory_node_id = mn.id
+                      and not exists (
+                        select 1
+                        from team_session_share_grants auth_grant
+                        where auth_grant.session_id = coalesce(auth_ev.session_id, auth_msg.session_id)
+                          and auth_grant.team_workspace_id = $13::uuid
+                          and auth_grant.team_id = $14::uuid
+                          and auth_grant.revoked_at is null
+                      )
+                  )
+                )
+              )
               and ($2::visibility_scope is null or mn.visibility = $2::visibility_scope)
               and lower(
                 case
@@ -5781,9 +6049,22 @@ export const createMemorySourceRepository = (
                 else 0.05
               end::double precision as source_rank
             from memory_events me
-            where me.invalidated_at is null and me.personal_deleted_at is null
+            where me.invalidated_at is null
               and me.visibility = 'personal'
-              and me.owner_user_id = $1
+              and (
+                (me.owner_user_id = $1 and me.personal_deleted_at is null)
+                or (
+                  $13::uuid is not null
+                  and exists (
+                    select 1
+                    from team_session_share_grants auth_grant
+                    where auth_grant.session_id = me.session_id
+                      and auth_grant.team_workspace_id = $13::uuid
+                      and auth_grant.team_id = $14::uuid
+                      and auth_grant.revoked_at is null
+                  )
+                )
+              )
               and ($2::visibility_scope is null or me.visibility = $2::visibility_scope)
               and lower(coalesce(me.payload ->> 'content', '')) like any($3::text[])
               and (
@@ -5822,7 +6103,20 @@ export const createMemorySourceRepository = (
             left join sessions msg_session on msg_session.id = msg.session_id
             where msg.invalidated_at is null
               and msg.visibility = 'personal'
-              and msg.owner_user_id = $1
+              and (
+                msg.owner_user_id = $1
+                or (
+                  $13::uuid is not null
+                  and exists (
+                    select 1
+                    from team_session_share_grants auth_grant
+                    where auth_grant.session_id = msg.session_id
+                      and auth_grant.team_workspace_id = $13::uuid
+                      and auth_grant.team_id = $14::uuid
+                      and auth_grant.revoked_at is null
+                  )
+                )
+              )
               and ($2::visibility_scope is null or msg.visibility = $2::visibility_scope)
               and lower(msg.content) like any($3::text[])
               and (
@@ -5896,7 +6190,9 @@ export const createMemorySourceRepository = (
           sourceBefore,
           localEmbeddingModel(),
           localEmbeddingDimensions(),
-          lexicalCandidateLimit
+          lexicalCandidateLimit,
+          teamWorkspaceBoundary?.teamWorkspaceId ?? null,
+          teamWorkspaceBoundary?.teamId ?? null
         ]
       );
       return {
@@ -6123,7 +6419,34 @@ export const createMemorySourceRepository = (
                   end as summary_text,
                   case
                     when mn.summary_model is not null then mn.summary_text
-                    when linked_mn.summary_model is not null then linked_mn.summary_text
+                    when linked_mn.summary_model is not null
+                      and (
+                        me.owner_user_id = $1
+                        or (
+                          $15::uuid is not null
+                          and exists (
+                            select 1
+                            from memory_node_sources rerank_any_mns
+                            where rerank_any_mns.memory_node_id = linked_mn.id
+                          )
+                          and not exists (
+                            select 1
+                            from memory_node_sources rerank_mns
+                            left join memory_events rerank_ev on rerank_ev.id = rerank_mns.memory_event_id and rerank_ev.invalidated_at is null
+                            left join messages rerank_msg on rerank_msg.id = rerank_mns.message_id and rerank_msg.invalidated_at is null
+                            where rerank_mns.memory_node_id = linked_mn.id
+                              and not exists (
+                                select 1
+                                from team_session_share_grants rerank_grant
+                                where rerank_grant.session_id = coalesce(rerank_ev.session_id, rerank_msg.session_id)
+                                  and rerank_grant.team_workspace_id = $15::uuid
+                                  and rerank_grant.team_id = $16::uuid
+                                  and rerank_grant.revoked_at is null
+                              )
+                          )
+                        )
+                      )
+                    then linked_mn.summary_text
                     else null
                   end as rerank_text,
                   coalesce(mn.summary_model, linked_mn.summary_model) as lcm_summary_model,
@@ -6138,7 +6461,7 @@ export const createMemorySourceRepository = (
                       when me.memory_node_id is not null then (
                         select max(coalesce(source_ev.captured_at, source_msg.captured_at))
                         from memory_node_sources source_mns
-                        left join memory_events source_ev on source_ev.id = source_mns.memory_event_id and source_ev.invalidated_at is null and source_ev.personal_deleted_at is null
+                        left join memory_events source_ev on source_ev.id = source_mns.memory_event_id and source_ev.invalidated_at is null
                         left join messages source_msg on source_msg.id = source_mns.message_id and source_msg.invalidated_at is null
                         where source_mns.memory_node_id = me.memory_node_id
                       )
@@ -6155,22 +6478,95 @@ export const createMemorySourceRepository = (
                 from memory_embeddings me
                 join ${embeddingTable} v on v.memory_embedding_id = me.id
                 left join memory_nodes mn on mn.id = me.memory_node_id and mn.invalidated_at is null and mn.personal_deleted_at is null
-                left join memory_events ev on ev.id = me.memory_event_id and ev.invalidated_at is null and ev.personal_deleted_at is null
+                left join memory_events ev on ev.id = me.memory_event_id and ev.invalidated_at is null
                 left join messages msg on msg.id = me.message_id and msg.invalidated_at is null
                 left join sessions msg_session on msg_session.id = msg.session_id
                 left join memory_node_sources mns on mns.memory_event_id = me.memory_event_id or mns.message_id = me.message_id
                 left join memory_nodes linked_mn on linked_mn.id = mns.memory_node_id and linked_mn.invalidated_at is null and linked_mn.personal_deleted_at is null
-                where me.invalidated_at is null and me.personal_deleted_at is null
+                where me.invalidated_at is null
                   and me.embedding_model = $5
                   and me.embedding_dimensions = $6
                   and me.embedding_version = $7
                   and (
-                    (me.memory_node_id is not null and mn.id is not null)
-                    or (me.memory_event_id is not null and ev.id is not null)
+                    (
+                      me.memory_node_id is not null
+                      and mn.id is not null
+                      and me.personal_deleted_at is null
+                    )
+                    or (
+                      me.memory_event_id is not null
+                      and ev.id is not null
+                      and (
+                        me.personal_deleted_at is null
+                        or (
+                          $15::uuid is not null
+                          and exists (
+                            select 1
+                            from team_session_share_grants auth_grant
+                            where auth_grant.session_id = ev.session_id
+                              and auth_grant.team_workspace_id = $15::uuid
+                              and auth_grant.team_id = $16::uuid
+                              and auth_grant.revoked_at is null
+                          )
+                        )
+                      )
+                    )
                     or (me.message_id is not null and msg.id is not null)
                   )
                   and me.visibility = 'personal'
-                  and me.owner_user_id = $1
+                  and (
+                    me.owner_user_id = $1
+                    or (
+                      $15::uuid is not null
+                      and (
+                        (
+                          me.memory_node_id is not null
+                          and exists (
+                            select 1
+                            from memory_node_sources auth_any_mns
+                            where auth_any_mns.memory_node_id = me.memory_node_id
+                          )
+                          and not exists (
+                            select 1
+                            from memory_node_sources auth_mns
+                            left join memory_events auth_ev on auth_ev.id = auth_mns.memory_event_id and auth_ev.invalidated_at is null
+                            left join messages auth_msg on auth_msg.id = auth_mns.message_id and auth_msg.invalidated_at is null
+                            where auth_mns.memory_node_id = me.memory_node_id
+                              and not exists (
+                                select 1
+                                from team_session_share_grants auth_grant
+                                where auth_grant.session_id = coalesce(auth_ev.session_id, auth_msg.session_id)
+                                  and auth_grant.team_workspace_id = $15::uuid
+                                  and auth_grant.team_id = $16::uuid
+                                  and auth_grant.revoked_at is null
+                              )
+                          )
+                        )
+                        or (
+                          me.memory_event_id is not null
+                          and exists (
+                            select 1
+                            from team_session_share_grants auth_grant
+                            where auth_grant.session_id = ev.session_id
+                              and auth_grant.team_workspace_id = $15::uuid
+                              and auth_grant.team_id = $16::uuid
+                              and auth_grant.revoked_at is null
+                          )
+                        )
+                        or (
+                          me.message_id is not null
+                          and exists (
+                            select 1
+                            from team_session_share_grants auth_grant
+                            where auth_grant.session_id = msg.session_id
+                              and auth_grant.team_workspace_id = $15::uuid
+                              and auth_grant.team_id = $16::uuid
+                              and auth_grant.revoked_at is null
+                          )
+                        )
+                      )
+                    )
+                  )
                   and ($2::visibility_scope is null or me.visibility = $2::visibility_scope)
                   and (
                     $8::text = 'global'
@@ -6336,7 +6732,9 @@ export const createMemorySourceRepository = (
                 stage,
                 sourceAfter,
                 sourceBefore,
-                parentNodeIds
+                parentNodeIds,
+                teamWorkspaceBoundary?.teamWorkspaceId ?? null,
+                teamWorkspaceBoundary?.teamId ?? null
               ]
             );
             const rows = vectorResult.rows.map((row) => {
@@ -7142,6 +7540,28 @@ export const createMemorySourceRepository = (
     if (sourceAfter && sourceBefore && sourceAfter >= sourceBefore) {
       throw new Error("sourceAfter must be earlier than sourceBefore");
     }
+    const teamWorkspaceAccess = input.teamWorkspaceId
+      ? await this.getTeamWorkspaceAccess(actor, input.teamWorkspaceId)
+      : null;
+    const teamWorkspaceAuthorization = resolveTeamWorkspaceAuthorization({
+      requesterUserId: actor.userId,
+      teamWorkspaceId: input.teamWorkspaceId,
+      access: teamWorkspaceAccess
+    });
+    if (
+      teamWorkspaceAuthorization.mode === "team_workspace" &&
+      !teamWorkspaceAuthorization.authorized
+    ) {
+      throw new Error("Memory node not found or not visible");
+    }
+    const teamWorkspaceBoundary: TeamWorkspaceReadBoundary =
+      teamWorkspaceAuthorization.mode === "team_workspace" &&
+      teamWorkspaceAuthorization.authorized
+        ? {
+            teamWorkspaceId: teamWorkspaceAuthorization.teamWorkspaceId,
+            teamId: teamWorkspaceAuthorization.teamId
+          }
+        : null;
     const visibleNode = await pool.query<{
       id: string;
       visibility: Visibility;
@@ -7151,12 +7571,42 @@ export const createMemorySourceRepository = (
         select mn.id, mn.visibility, mn.source_items_json
         from memory_nodes mn
         where mn.id = $2
-          and mn.invalidated_at is null and mn.personal_deleted_at is null
+          and mn.invalidated_at is null
           and mn.visibility = 'personal'
-          and mn.owner_user_id = $1
+          and (
+            (mn.owner_user_id = $1 and mn.personal_deleted_at is null)
+            or (
+              $3::uuid is not null
+              and exists (
+                select 1
+                from memory_node_sources auth_any_mns
+                where auth_any_mns.memory_node_id = mn.id
+              )
+              and not exists (
+                select 1
+                from memory_node_sources auth_mns
+                left join memory_events auth_ev on auth_ev.id = auth_mns.memory_event_id and auth_ev.invalidated_at is null
+                left join messages auth_msg on auth_msg.id = auth_mns.message_id and auth_msg.invalidated_at is null
+                where auth_mns.memory_node_id = mn.id
+                  and not exists (
+                    select 1
+                    from team_session_share_grants auth_grant
+                    where auth_grant.session_id = coalesce(auth_ev.session_id, auth_msg.session_id)
+                      and auth_grant.team_workspace_id = $3::uuid
+                      and auth_grant.team_id = $4::uuid
+                      and auth_grant.revoked_at is null
+                  )
+              )
+            )
+          )
         limit 1
       `,
-      [actor.userId, nodeId]
+      [
+        actor.userId,
+        nodeId,
+        teamWorkspaceBoundary?.teamWorkspaceId ?? null,
+        teamWorkspaceBoundary?.teamId ?? null
+      ]
     );
     const node = visibleNode.rows[0];
     if (!node) {
@@ -7185,9 +7635,22 @@ export const createMemorySourceRepository = (
         from memory_node_sources mns
         join memory_events me on me.id = mns.memory_event_id
         where mns.memory_node_id = $1
-          and me.invalidated_at is null and me.personal_deleted_at is null
+          and me.invalidated_at is null
           and me.visibility = 'personal'
-          and me.owner_user_id = $2
+          and (
+            (me.owner_user_id = $2 and me.personal_deleted_at is null)
+            or (
+              $8::uuid is not null
+              and exists (
+                select 1
+                from team_session_share_grants auth_grant
+                where auth_grant.session_id = me.session_id
+                  and auth_grant.team_workspace_id = $8::uuid
+                  and auth_grant.team_id = $9::uuid
+                  and auth_grant.revoked_at is null
+              )
+            )
+          )
           and ($3::timestamptz is null or me.captured_at >= $3::timestamptz)
           and ($4::timestamptz is null or me.captured_at < $4::timestamptz)
           and (
@@ -7204,7 +7667,9 @@ export const createMemorySourceRepository = (
         sourceBefore,
         searchDomain,
         input.sessionId ?? null,
-        input.workspaceId ?? null
+        input.workspaceId ?? null,
+        teamWorkspaceBoundary?.teamWorkspaceId ?? null,
+        teamWorkspaceBoundary?.teamId ?? null
       ]
     );
     const supportingRows =
