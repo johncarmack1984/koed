@@ -6,6 +6,7 @@ import type {
   MemoryEventRecord,
   MemorySearchResult
 } from "@koed/core";
+import releaseManifest from "@koed/koed/package.json" with { type: "json" };
 import type {
   ActorContext,
   AuditEventRecord,
@@ -90,6 +91,29 @@ type AccessResponse = {
   ok?: boolean;
   auth?: string;
   providerConfigSupported?: boolean;
+};
+type CapabilitiesResponse = {
+  product: string;
+  apiVersion: string;
+  capabilitySchemaVersion: number;
+  releaseVersion: string;
+  deployment: {
+    mode: string;
+    distribution: string;
+    managedBy: string;
+  };
+  auth: {
+    modes: string[];
+  };
+  providers: string[];
+  capabilities: Record<
+    string,
+    {
+      availability: string;
+      description: string;
+      endpoints?: string[];
+    }
+  >;
 };
 type TeamResponse = {
   team: { id: string; name: string };
@@ -2353,6 +2377,7 @@ describe("api health", () => {
         health: "/health",
         readiness: "/ready",
         publicStatus: "/self-host/status",
+        capabilities: "/v1/capabilities",
         openapi: "/openapi.json"
       },
       explorer: {
@@ -2374,6 +2399,81 @@ describe("api health", () => {
 
     expect(generated.headers["x-request-id"]).toEqual(expect.any(String));
     expect(provided.headers["x-request-id"]).toBe("operator-request-1");
+  });
+
+  it("publishes a safe unauthenticated capability contract", async () => {
+    process.env.KOED_HOST_CHECKOUT_PATH = "/sensitive/local/path";
+    const app = await buildServer();
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/capabilities"
+    });
+    await app.close();
+
+    const capabilities = jsonBody<CapabilitiesResponse>(response);
+
+    expect(response.statusCode).toBe(200);
+    expect(capabilities.releaseVersion).toBe(releaseManifest.version);
+    expect(capabilities).toMatchObject({
+      product: "koed",
+      apiVersion: "v1",
+      capabilitySchemaVersion: 1,
+      deployment: {
+        mode: "self_hosted",
+        distribution: "source_available",
+        managedBy: "operator"
+      },
+      capabilities: {
+        "clients.codex": {
+          availability: "available"
+        },
+        "clients.electronBackendTarget": {
+          availability: "available"
+        },
+        "memory.personal": {
+          availability: "available"
+        },
+        "memory.captureHook": {
+          availability: "available"
+        },
+        "memory.mcpRecall": {
+          availability: "available"
+        },
+        "memory.localLcmSummaries": {
+          availability: "available"
+        },
+        "teams.management": {
+          availability: "partial"
+        },
+        "teams.workspaces": {
+          availability: "partial"
+        },
+        "operations.diagnostics": {
+          availability: "authenticated"
+        }
+      }
+    });
+    expect(capabilities.providers).toEqual(
+      expect.arrayContaining(["operations", "auth", "clients", "memory"])
+    );
+    expect(capabilities.auth.modes).toEqual(
+      expect.arrayContaining(["session_cookie", "api_token"])
+    );
+    for (const privateCapability of [
+      "billing",
+      "memoryInbox",
+      "managedConnectors",
+      "teamMemoryRecall",
+      "shareGrants"
+    ]) {
+      expect(capabilities.capabilities).not.toHaveProperty(privateCapability);
+    }
+    expect(response.body).not.toContain("/sensitive/local/path");
+    expect(response.body).not.toContain("DATABASE_URL");
+    expect(response.body).not.toContain("API_TOKEN");
+    expect(response.body).not.toContain("unsupported");
+    expect(response.body).not.toContain("memoryInbox");
+    expect(response.body).not.toContain("billing");
   });
 
   it("allows browser write preflight requests", async () => {
@@ -5418,5 +5518,12 @@ describe("account and access flows", () => {
     expect(
       jsonBody<OpenApiResponse>(openapi).paths["/v1/memory/answer"]
     ).toBeDefined();
+    expect(
+      jsonBody<OpenApiResponse>(openapi).paths["/v1/capabilities"]
+    ).toMatchObject({
+      get: {
+        security: []
+      }
+    });
   });
 });

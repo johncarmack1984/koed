@@ -13,6 +13,7 @@ import type { Queue } from "bullmq";
 import type { FastifyInstance } from "fastify";
 import { Redis } from "ioredis";
 import type { ApiRouteContext } from "./context.js";
+import { selfHostedCapabilities } from "./capabilities.js";
 import { openApiDocument } from "./openapi.js";
 import type { EmbeddingSourceType, MemoryJobStatus } from "../memory/jobs.js";
 
@@ -52,6 +53,7 @@ export const registerOperationalRoutes = (
       health: "/health",
       readiness: "/ready",
       publicStatus: "/self-host/status",
+      capabilities: "/v1/capabilities",
       openapi: "/openapi.json"
     },
     explorer: {
@@ -120,6 +122,8 @@ export const registerOperationalRoutes = (
   });
 
   app.get("/openapi.json", () => openApiDocument);
+
+  app.get("/v1/capabilities", () => selfHostedCapabilities);
 
   app.get("/health/details", async (request) => {
     await auth.authenticateSession(request);
