@@ -15,15 +15,21 @@ import type {
 
 const startupStepLabels = {
   status: "Local status",
-  start: "Local services",
-  setup: "Codex integration",
+  runtime: "Runtime assets",
+  models: "Embedding model",
+  database: "Database init/migrations",
+  services: "API, Worker, Explorer",
+  integration: "Codex/MCP/Capture Hook",
   health: "Health checks"
 } as const;
 
 const startupPhaseLabels = {
   status: "Checking local status",
-  start: "Starting services",
-  setup: "Configuring integration",
+  runtime: "Verifying runtime assets",
+  models: "Verifying embedding model",
+  database: "Initializing database",
+  services: "Starting local services",
+  integration: "Configuring AI Client integration",
   health: "Verifying system"
 } as const;
 
@@ -38,6 +44,7 @@ type StartupActionId =
   | "runtime_install"
   | "models_install"
   | "doctor"
+  | "open_logs"
   | "keep-waiting";
 
 type StartupSupportAction = {
@@ -58,8 +65,11 @@ type StartupSupport = {
 
 const startupSteps: Array<{ id: StartupStepId; label: string }> = [
   { id: "status", label: startupStepLabels.status },
-  { id: "start", label: startupStepLabels.start },
-  { id: "setup", label: startupStepLabels.setup },
+  { id: "runtime", label: startupStepLabels.runtime },
+  { id: "models", label: startupStepLabels.models },
+  { id: "database", label: startupStepLabels.database },
+  { id: "services", label: startupStepLabels.services },
+  { id: "integration", label: startupStepLabels.integration },
   { id: "health", label: startupStepLabels.health }
 ];
 
@@ -86,14 +96,20 @@ type StartupLogLine = {
 };
 const startupStepLogs: Record<StartupStepId, StartupLogLine[]> = {
   status: [],
-  start: [],
-  setup: [],
+  runtime: [],
+  models: [],
+  database: [],
+  services: [],
+  integration: [],
   health: []
 };
 const readinessCheckLogs: Record<StartupStepId, StartupLogLine[]> = {
   status: [],
-  start: [],
-  setup: [],
+  runtime: [],
+  models: [],
+  database: [],
+  services: [],
+  integration: [],
   health: []
 };
 const lastStartupLogEntry: Partial<Record<StartupStepId, string>> = {};
@@ -114,10 +130,17 @@ const desktopStartLogSeen = new Set<string>();
 const startupProbeCounts: Partial<Record<StartupStepId, number>> = {};
 const startupProbeLimits: Partial<Record<StartupStepId, number>> = {};
 const DEFAULT_PROBE_LIMIT = 12;
+let runtimeAssetsReady = false;
+let modelAssetsReady = false;
+let startRequested = false;
+
 const stepStates: Record<StartupStepId, StartupStepState> = {
   status: "pending",
-  start: "pending",
-  setup: "pending",
+  runtime: "pending",
+  models: "pending",
+  database: "pending",
+  services: "pending",
+  integration: "pending",
   health: "pending"
 };
 
@@ -394,7 +417,7 @@ const appendDesktopStartLog = (nextStatus: KoedServerStatus): void => {
     desktopStartLogSeen.add(line);
     const formatted = formatDesktopStartLogLine(line);
     if (formatted) {
-      appendStartupLog(formatted, undefined, "start");
+      appendStartupLog(formatted, undefined, "services");
     }
   }
 };
@@ -487,6 +510,7 @@ const commandResultError = (value: unknown): string | null => {
     error?: unknown;
     message?: unknown;
     action?: unknown;
+    summary?: unknown;
     ok?: unknown;
   };
   const error = typeof payload.error === "string" ? payload.error : null;
@@ -494,12 +518,44 @@ const commandResultError = (value: unknown): string | null => {
     return error;
   }
   if (payload.ok === false) {
-    const parts = [payload.message, payload.action].filter(
+    const parts = [payload.message, payload.action, payload.summary].filter(
       (entry): entry is string => typeof entry === "string" && entry.length > 0
     );
     return parts.length > 0 ? parts.join(" ") : "Command failed.";
   }
   return null;
+};
+
+const commandResultField = (value: unknown, key: string): string | null => {
+  if (typeof value !== "object" || value === null || !(key in value)) {
+    return null;
+  }
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === "string" && field.trim() ? field.trim() : null;
+};
+
+const commandResultState = (value: unknown): string =>
+  commandResultField(value, "state") ?? "unknown";
+
+const commandResultProvider = (value: unknown): string =>
+  commandResultField(value, "provider") ?? "unknown";
+
+const runtimeInstallConsentArgs = (
+  provider: string,
+  reason: string
+): Record<string, unknown> | undefined => {
+  if (provider !== "homebrew") {
+    return undefined;
+  }
+  const confirmed = window.confirm(
+    `${reason}\n\nKoed Desktop will ask koed-server to run Homebrew-backed runtime install. This may run \`brew install postgresql@17 pgvector llama.cpp\` and link selected binaries under KOED_HOME. Continue?`
+  );
+  if (!confirmed) {
+    throw new Error(
+      "Runtime install cancelled by Operator before Homebrew package-manager mutation."
+    );
+  }
+  return { operatorConsented: true };
 };
 
 const explorerEmbedUrl = (rawUrl: string): string => {
@@ -628,14 +684,90 @@ const startupLiveConfig: Record<StartupStepId, StartupLiveConfig> = {
         }
       ])
   },
-  start: {
-    liveTitle: "Live: local services",
+  runtime: {
+    liveTitle: "Live: runtime assets",
     liveBody:
-      "Runs koed-server start: connect to configured dependencies, build apps, then spawn API/worker/Explorer.",
-    componentKeys: ["explorer"],
+      "Checking koed-server runtime status before installing bundled-local assets.",
+    componentKeys: [],
+    probeMessage: () =>
+      "runtime assets: waiting for koed-server runtime status",
+    actions: () =>
+      stepHasExhaustedProbes("runtime")
+        ? supportActions([
+            {
+              id: "runtime_install",
+              label: "Install runtime",
+              title: "Run koed-server runtime install",
+              primary: true
+            },
+            {
+              id: "doctor",
+              label: "Diagnostics",
+              title: "Run koed-server doctor"
+            }
+          ])
+        : []
+  },
+  models: {
+    liveTitle: "Live: embedding model",
+    liveBody:
+      "Checking koed-server model status before downloading missing model files.",
+    componentKeys: [],
+    probeMessage: () =>
+      "embedding model: waiting for koed-server models status",
+    actions: () =>
+      stepHasExhaustedProbes("models")
+        ? supportActions([
+            {
+              id: "models_install",
+              label: "Install model",
+              title: "Run koed-server models install",
+              primary: true
+            },
+            {
+              id: "doctor",
+              label: "Diagnostics",
+              title: "Run koed-server doctor"
+            }
+          ])
+        : []
+  },
+  database: {
+    liveTitle: "Live: database init/migrations",
+    liveBody:
+      "Starting koed-server and waiting for Postgres, pgvector, and migrations to become ready.",
+    componentKeys: ["database"],
+    probeMessage: (attempt, blocker) =>
+      `status probe ${attempt}: database=${statusState(status?.database)}${
+        friendlyBlocker(blocker)
+          ? `; blocked by ${friendlyBlocker(blocker)}`
+          : ""
+      }`,
+    actions: () =>
+      stepHasExhaustedProbes("database")
+        ? supportActions([
+            {
+              id: "keep-waiting",
+              label: "Keep waiting",
+              title: "Continue checking database readiness",
+              primary: true
+            },
+            {
+              id: "start",
+              label: "Start services",
+              title: "Run koed-server start --daemon again"
+            }
+          ])
+        : []
+  },
+  services: {
+    liveTitle: "Live: API, Worker, Explorer",
+    liveBody:
+      "Runs koed-server start --daemon, then waits for API, Worker, and Explorer readiness from koed-server status.",
+    componentKeys: ["api", "workerQueues", "explorer"],
     probeMessage: localServicesProbeMessage,
     actions: () =>
-      stepHasExhaustedProbes("start")
+      stepHasExhaustedProbes("services")
         ? supportActions([
             {
               id: "keep-waiting",
@@ -646,15 +778,15 @@ const startupLiveConfig: Record<StartupStepId, StartupLiveConfig> = {
             {
               id: "start",
               label: "Restart services",
-              title: "Run koed-server start again"
+              title: "Run koed-server start --daemon again"
             }
           ])
         : []
   },
-  setup: {
-    liveTitle: "Live: Codex integration",
+  integration: {
+    liveTitle: "Live: Codex/MCP/Capture Hook",
     liveBody:
-      "Provisioning the local API token, Explorer credential, and Codex capture settings.",
+      "Provisioning local API Token, Explorer credential, MCP Server, Supported Capture Hook, and Codex settings.",
     componentKeys: ["apiToken", "mcpServer", "captureHook", "codex"],
     probeMessage: (attempt, blocker) =>
       `status probe ${attempt}: checking Codex/MCP/capture hook${
@@ -663,7 +795,7 @@ const startupLiveConfig: Record<StartupStepId, StartupLiveConfig> = {
           : ""
       }`,
     actions: () =>
-      stepHasExhaustedProbes("setup")
+      stepHasExhaustedProbes("integration")
         ? supportActions([
             {
               id: "keep-waiting",
@@ -675,17 +807,17 @@ const startupLiveConfig: Record<StartupStepId, StartupLiveConfig> = {
             {
               id: "setup_codex",
               label: "Rerun setup",
-              title: "Repeat the integration provisioning step"
+              title: "Repeat integration provisioning"
             }
           ])
         : []
   },
   health: {
-    liveTitle: "Live: Explorer availability",
-    liveBody: "Waiting for Explorer to become reachable.",
-    componentKeys: ["explorer"],
+    liveTitle: "Live: diagnostics",
+    liveBody: "Waiting for final Desktop readiness and diagnostics.",
+    componentKeys: ["api", "workerQueues", "explorer"],
     probeMessage: (attempt, blocker) =>
-      `status probe ${attempt}: Explorer availability${
+      `status probe ${attempt}: final Desktop readiness${
         friendlyBlocker(blocker)
           ? `; blocked by ${friendlyBlocker(blocker)}`
           : ""
@@ -695,8 +827,13 @@ const startupLiveConfig: Record<StartupStepId, StartupLiveConfig> = {
         {
           id: "doctor",
           label: "Diagnostics",
-          title: "Print the current health check details",
+          title: "Print current health check details",
           primary: true
+        },
+        {
+          id: "open_logs",
+          label: "Open logs",
+          title: "Open KOED_HOME logs"
         }
       ])
   }
@@ -727,21 +864,56 @@ const readinessChecks: readonly ReadinessCheckDefinition[] = [
     }
   },
   {
-    id: "start",
-    title: "Local services",
-    description: "Local dependencies plus API, Worker, and Explorer.",
-    componentKeys: startupLiveConfig.start.componentKeys,
+    id: "runtime",
+    title: "Runtime assets",
+    description: "koed-server runtime status/install contract.",
+    componentKeys: [],
     action: {
-      label: "Ensure services are running",
+      label: "Install runtime",
+      command: "runtime_install",
+      timeoutMs: 600_000
+    }
+  },
+  {
+    id: "models",
+    title: "Embedding model",
+    description: "koed-server model status/install contract.",
+    componentKeys: [],
+    action: {
+      label: "Install model",
+      command: "models_install",
+      timeoutMs: 600_000
+    }
+  },
+  {
+    id: "database",
+    title: "Database init/migrations",
+    description:
+      "Postgres, pgvector, and migrations reported by koed-server status.",
+    componentKeys: startupLiveConfig.database.componentKeys,
+    action: {
+      label: "Ensure database",
       command: "start",
       timeoutMs: 180_000
     }
   },
   {
-    id: "setup",
-    title: "Codex integration",
-    description: "API token, MCP Server, Capture Hook, and Codex settings.",
-    componentKeys: startupLiveConfig.setup.componentKeys,
+    id: "services",
+    title: "API, Worker, Explorer",
+    description: "Local app processes reported by koed-server status.",
+    componentKeys: startupLiveConfig.services.componentKeys,
+    action: {
+      label: "Ensure services",
+      command: "start",
+      timeoutMs: 180_000
+    }
+  },
+  {
+    id: "integration",
+    title: "Codex/MCP/Capture Hook",
+    description:
+      "API Token, MCP Server, Supported Capture Hook, and Codex settings.",
+    componentKeys: startupLiveConfig.integration.componentKeys,
     action: {
       label: "Run setup",
       command: "setup_codex",
@@ -770,6 +942,12 @@ const startupStepReady = (step: StartupStepId): boolean => {
   if (step === "status") {
     return Boolean(status);
   }
+  if (step === "runtime") {
+    return status?.dependencyMode !== "bundled-local" || runtimeAssetsReady;
+  }
+  if (step === "models") {
+    return status?.dependencyMode !== "bundled-local" || modelAssetsReady;
+  }
   if (step === "health") {
     return desktopReady();
   }
@@ -778,7 +956,7 @@ const startupStepReady = (step: StartupStepId): boolean => {
   const componentsReady =
     components.length === config.componentKeys.length &&
     components.every((component) => component.state === "healthy");
-  return step === "setup"
+  return step === "integration"
     ? componentsReady && explorerCredentialProvisioned()
     : componentsReady;
 };
@@ -790,7 +968,13 @@ const startupStepBlocker = (step: StartupStepId): string => {
   if (blocker) {
     return `${startupStepLabels[step]} did not become ready: ${blocker}.`;
   }
-  if (step === "setup" && !explorerCredentialProvisioned()) {
+  if (step === "runtime") {
+    return "Runtime assets have not been installed through koed-server.";
+  }
+  if (step === "models") {
+    return "Embedding model has not been installed through koed-server.";
+  }
+  if (step === "integration" && !explorerCredentialProvisioned()) {
     return "Explorer credential has not been provisioned for Desktop.";
   }
   return `${startupStepLabels[step]} did not become ready.`;
@@ -1007,12 +1191,18 @@ const readinessCheckState = (
   if (check.id === "status") {
     return status?.state ?? "starting";
   }
+  if (check.id === "runtime") {
+    return runtimeAssetsReady ? "healthy" : "starting";
+  }
+  if (check.id === "models") {
+    return modelAssetsReady ? "healthy" : "starting";
+  }
   const states = check.componentKeys.map(
     (key) => statusComponent(key)?.state ?? "starting"
   );
   const state = aggregateGroupState(states);
   if (
-    check.id === "setup" &&
+    check.id === "integration" &&
     state === "healthy" &&
     !explorerCredentialProvisioned()
   ) {
@@ -1035,7 +1225,13 @@ const readinessCheckSummary = (check: ReadinessCheckDefinition): string => {
   const firstUnhealthy = components.find(
     (component) => component && component.state !== "healthy"
   );
-  if (check.id === "setup" && !explorerCredentialProvisioned()) {
+  if (check.id === "runtime") {
+    return `${checkedAtLabel(check.id)} · ${runtimeAssetsReady ? "Runtime assets ready" : "Waiting for runtime assets"}.`;
+  }
+  if (check.id === "models") {
+    return `${checkedAtLabel(check.id)} · ${modelAssetsReady ? "Embedding model ready" : "Waiting for embedding model"}.`;
+  }
+  if (check.id === "integration" && !explorerCredentialProvisioned()) {
     return `${checkedAtLabel(check.id)} · Explorer credential is not provisioned.`;
   }
   const base = `${checkedAtLabel(check.id)} · ${healthyCount}/${check.componentKeys.length} healthy`;
@@ -1081,6 +1277,35 @@ const renderStatusCardActions = (cardId: StatusCardId): string => {
     )
     .join("");
 };
+
+const renderStartupSteps = (): string => `
+  <div class="startup-steps">
+    ${startupSteps
+      .map((step) => {
+        const stepState = stepStates[step.id];
+        const support = getStartupSupportForStep(step.id);
+        return `
+          <details class="startup-step ${stepState}" data-startup-step="${step.id}">
+            <summary>
+              <div class="startup-step-summary">
+                <span class="startup-step-disclosure" aria-hidden="true"></span>
+                <div class="startup-step-copy">
+                  <strong>${escapeHtml(step.label)}</strong>
+                  <small data-startup-step-summary="${step.id}">${escapeHtml(support.body)}</small>
+                </div>
+                <span data-startup-step-state="${step.id}">${startupStatusLabel(stepState)}</span>
+              </div>
+            </summary>
+            <div class="startup-step-body">
+              <pre class="startup-step-log" data-startup-step-log="${step.id}">${escapeHtml(startupLogText(step.id))}</pre>
+              <div class="status-group-actions" data-startup-step-actions="${step.id}"></div>
+            </div>
+          </details>
+        `;
+      })
+      .join("")}
+  </div>
+`;
 
 const renderStatusCards = (variant: "startup" | "sidebar"): string => `
   <div class="dependency-cards ${variant}" data-status-card-list="${variant}">
@@ -1144,6 +1369,7 @@ const renderShell = () => {
             <small data-startup-detail>${escapeHtml(startupDetail)}</small>
           </div>
           ${renderStatusCards("startup")}
+          ${renderStartupSteps()}
           <p class="hint" data-startup-hint>${escapeHtml(getStartupHint())}</p>
         </div>
       </section>
@@ -1416,11 +1642,12 @@ const syncStatusCards = () => {
     }
   }
 
+  const showStartupPanel = startupVisible && !desktopReady();
   if (startupPanel) {
-    startupPanel.hidden = true;
+    startupPanel.hidden = !showStartupPanel;
   }
   if (mainShell) {
-    mainShell.hidden = false;
+    mainShell.hidden = showStartupPanel;
   }
 
   if (explorerFrame && explorerEmpty) {
@@ -1569,6 +1796,9 @@ const resetStartupSteps = () => {
     delete statusCardCheckedAt[card.id];
   }
   desktopStartLogSeen.clear();
+  runtimeAssetsReady = false;
+  modelAssetsReady = false;
+  startRequested = false;
   startupError = "";
   startupPhase = startupPhaseLabels.status;
   startupDetail = "Checking whether the local stack is already ready.";
@@ -1664,14 +1894,41 @@ const runWithStartupProbes = async <T>(
   }
 };
 
+const ensureDaemonStartRequested = async (
+  step: StartupStepId
+): Promise<void> => {
+  if (startRequested) {
+    appendStartupLog(
+      "koed-server start --daemon already requested",
+      undefined,
+      step
+    );
+    return;
+  }
+  appendStartupLog(
+    "command: koed-server start --daemon --json",
+    undefined,
+    step
+  );
+  const startResult = await runWithStartupProbes(step, () =>
+    invokeWithTimeout("start", undefined, 180_000)
+  );
+  const startError = commandResultError(startResult);
+  if (startError) {
+    throw new Error(`koed-server start --daemon failed: ${startError}`);
+  }
+  startRequested = true;
+};
+
 const runStartupSequence = async () => {
   if (startupRunning) {
     return;
   }
 
   startupRunning = true;
-  startupVisible = false;
+  startupVisible = true;
   resetStartupSteps();
+  startupVisible = true;
   syncUI();
 
   try {
@@ -1686,88 +1943,180 @@ const runStartupSequence = async () => {
       throw new Error("Unable to load Koed status.");
     }
 
-    if (!startupStepReady("start")) {
+    if (status.dependencyMode === "bundled-local") {
       startupDetail =
-        "Verifying the embedding model, then starting local dependencies plus the API, Worker, and Explorer processes.";
-      setStartupStep("start", "running");
-      if (status.dependencyMode === "bundled-local") {
-        appendStartupLog("command: koed-server models status --kind embedding");
-        const modelStatus = await invokeWithTimeout(
-          "models_status",
-          undefined,
-          60_000
+        "Checking native runtime assets through koed-server runtime status.";
+      setStartupStep("runtime", "running");
+      appendStartupLog(
+        "command: koed-server runtime status --json",
+        undefined,
+        "runtime"
+      );
+      const runtimeStatus = await invokeWithTimeout(
+        "runtime_status",
+        undefined,
+        60_000
+      );
+      const runtimeStatusError = commandResultError(runtimeStatus);
+      if (runtimeStatusError) {
+        throw new Error(
+          `koed-server runtime status failed: ${runtimeStatusError}`
         );
-        const modelStatusError = commandResultError(modelStatus);
-        if (modelStatusError) {
-          throw new Error(`koed-server models status failed: ${modelStatusError}`);
-        }
-        const modelState =
-          typeof modelStatus === "object" && modelStatus !== null &&
-          "state" in modelStatus
-            ? String((modelStatus as { state?: unknown }).state)
-            : "unknown";
-        appendStartupLog(`model status: ${modelState}`);
-        if (
-          modelState === "missing" ||
-          modelState === "checksum_mismatch" ||
-          modelState === "not_configured"
-        ) {
-          appendStartupLog("command: koed-server models install --kind embedding");
-          const installResult = await runWithStartupProbes("start", () =>
-            invokeWithTimeout("models_install", undefined, 600_000)
+      }
+      const runtimeState = commandResultState(runtimeStatus);
+      const runtimeProvider = commandResultProvider(runtimeStatus);
+      appendStartupLog(
+        `runtime status: provider=${runtimeProvider} state=${runtimeState}`,
+        undefined,
+        "runtime"
+      );
+      if (runtimeState !== "installed") {
+        const consentArgs = runtimeInstallConsentArgs(
+          runtimeProvider,
+          "Koed needs native runtime assets before local personal startup can continue."
+        );
+        appendStartupLog(
+          "command: koed-server runtime install --dependency-mode bundled-local --json",
+          undefined,
+          "runtime"
+        );
+        const installResult = await runWithStartupProbes("runtime", () =>
+          invokeWithTimeout("runtime_install", consentArgs, 600_000)
+        );
+        const installError = commandResultError(installResult);
+        if (installError) {
+          throw new Error(
+            `koed-server runtime install failed: ${installError}`
           );
-          const installError = commandResultError(installResult);
-          if (installError) {
-            throw new Error(`koed-server models install failed: ${installError}`);
-          }
-          appendStartupLog("model install completed");
-        } else {
-          appendStartupLog("model install skipped; embedding model already verified.");
         }
+        appendStartupLog("runtime install completed", undefined, "runtime");
       } else {
         appendStartupLog(
-          "skipping embedding model install in external dependency mode"
+          "runtime install skipped; runtime assets already verified.",
+          undefined,
+          "runtime"
         );
       }
-      appendStartupLog("command: koed-server start");
+      runtimeAssetsReady = true;
+      setStartupStep("runtime", "done");
+
+      startupDetail =
+        "Checking embedding model files through koed-server models status.";
+      setStartupStep("models", "running");
       appendStartupLog(
-        "does: setup env; use external deps; build apps; spawn API/worker/Explorer"
+        "command: koed-server models status --kind embedding --json",
+        undefined,
+        "models"
       );
-      const startResult = await runWithStartupProbes("start", () =>
-        invokeWithTimeout("start", undefined, 180_000)
+      const modelStatus = await invokeWithTimeout(
+        "models_status",
+        undefined,
+        60_000
       );
-      const startError = commandResultError(startResult);
-      if (startError) {
-        throw new Error(`koed-server start failed: ${startError}`);
+      const modelStatusError = commandResultError(modelStatus);
+      if (modelStatusError) {
+        throw new Error(
+          `koed-server models status failed: ${modelStatusError}`
+        );
       }
-      await waitForStartupStepReady("start");
-      setStartupStep("start", "done");
+      const modelState = commandResultState(modelStatus);
+      appendStartupLog(`model status: ${modelState}`, undefined, "models");
+      if (
+        modelState === "missing" ||
+        modelState === "checksum_mismatch" ||
+        modelState === "not_configured"
+      ) {
+        appendStartupLog(
+          "command: koed-server models install --kind embedding --json",
+          undefined,
+          "models"
+        );
+        const installResult = await runWithStartupProbes("models", () =>
+          invokeWithTimeout("models_install", undefined, 600_000)
+        );
+        const installError = commandResultError(installResult);
+        if (installError) {
+          throw new Error(`koed-server models install failed: ${installError}`);
+        }
+        appendStartupLog("model install completed", undefined, "models");
+      } else {
+        appendStartupLog(
+          "model install skipped; embedding model already verified.",
+          undefined,
+          "models"
+        );
+      }
+      modelAssetsReady = true;
+      setStartupStep("models", "done");
     } else {
-      setStartupStep("start", "skipped");
+      runtimeAssetsReady = true;
+      modelAssetsReady = true;
+      setStartupStep("runtime", "skipped");
+      appendStartupLog(
+        "external dependency mode: koed-server owns diagnostics, Desktop does not install runtime assets",
+        undefined,
+        "runtime"
+      );
+      setStartupStep("models", "skipped");
+      appendStartupLog(
+        "external dependency mode: embedding model install skipped",
+        undefined,
+        "models"
+      );
     }
 
-    if (!startupStepReady("setup")) {
+    if (!startupStepReady("database")) {
       startupDetail =
-        "Configuring Codex integration and provisioning Explorer credentials.";
-      setStartupStep("setup", "running");
-      appendStartupLog("command: koed-server setup codex --json");
-      const setupResult = await runWithStartupProbes("setup", () =>
+        "Starting koed-server and waiting for database init, migrations, and pgvector readiness.";
+      setStartupStep("database", "running");
+      await ensureDaemonStartRequested("database");
+      await waitForStartupStepReady("database", 240_000);
+      setStartupStep("database", "done");
+    } else {
+      setStartupStep("database", "skipped");
+    }
+
+    if (!startupStepReady("services")) {
+      startupDetail =
+        "Waiting for API, Worker, and Explorer processes reported by koed-server status.";
+      setStartupStep("services", "running");
+      await ensureDaemonStartRequested("services");
+      await waitForStartupStepReady("services", 240_000);
+      setStartupStep("services", "done");
+    } else {
+      setStartupStep("services", "skipped");
+    }
+
+    if (!startupStepReady("integration")) {
+      startupDetail =
+        "Configuring Codex, MCP Server, Supported Capture Hook, and Explorer credentials.";
+      setStartupStep("integration", "running");
+      appendStartupLog(
+        "command: koed-server setup codex --json",
+        undefined,
+        "integration"
+      );
+      const setupResult = await runWithStartupProbes("integration", () =>
         invokeWithTimeout("setup_codex", undefined, 300_000)
       );
       const setupError = commandResultError(setupResult);
       if (setupError) {
         throw new Error(`koed-server setup codex failed: ${setupError}`);
       }
-      await waitForStartupStepReady("setup");
-      setStartupStep("setup", "done");
+      await waitForStartupStepReady("integration");
+      setStartupStep("integration", "done");
     } else {
-      setStartupStep("setup", "skipped");
+      setStartupStep("integration", "skipped");
     }
 
     startupDetail =
-      "Waiting for API, Worker, and Explorer to become available.";
+      "Running final status and diagnostics gates before opening Explorer.";
     setStartupStep("health", "running");
-    appendStartupLog("checking: API, Worker/queues, and Explorer reachability");
+    appendStartupLog(
+      "checking: API, Worker/queues, Explorer, and integration readiness",
+      undefined,
+      "health"
+    );
     await waitForDesktopReady();
     setStartupStep("health", "done");
     await refreshStatus();
@@ -1811,9 +2160,18 @@ const runReadinessAction = async (
   appendReadinessLog(check.id, `command: ${action.command}`);
   syncUI();
   try {
+    const args =
+      action.command === "runtime_install"
+        ? runtimeInstallConsentArgs(
+            commandResultProvider(
+              await invokeWithTimeout("runtime_status", undefined, 60_000)
+            ),
+            "Install Koed native runtime assets?"
+          )
+        : undefined;
     const result = await invokeWithTimeout(
       action.command,
-      undefined,
+      args,
       action.timeoutMs
     );
     const error = commandResultError(result);
@@ -1871,16 +2229,18 @@ const runStatusCardAction = async (
       await refreshStatus();
       appendStatusCardLog(cardId, "status refreshed");
     } else if (action.command === "runtime_install") {
-      const confirmed = window.confirm(
-        "Install Koed native runtime assets? Packaged builds use verified bundled assets when a runtime manifest is present; otherwise this may run `brew install postgresql@17 pgvector llama.cpp` and link selected binaries under KOED_HOME."
+      const runtimeStatus = await invokeWithTimeout(
+        "runtime_status",
+        undefined,
+        60_000
       );
-      if (!confirmed) {
-        appendStatusCardLog(cardId, "runtime install cancelled by Operator");
-        return;
-      }
+      const consentArgs = runtimeInstallConsentArgs(
+        commandResultProvider(runtimeStatus),
+        "Install Koed native runtime assets?"
+      );
       const result = await invokeWithTimeout(
         "runtime_install",
-        undefined,
+        consentArgs,
         action.timeoutMs ?? 600_000
       );
       const error = commandResultError(result);
@@ -1890,6 +2250,18 @@ const runStatusCardAction = async (
         appendStatusCardLog(cardId, "runtime install completed");
       }
       await refreshStatus();
+    } else if (action.command === "open_logs") {
+      const result = await invokeWithTimeout(
+        "open_logs",
+        undefined,
+        action.timeoutMs ?? 10_000
+      );
+      const error = commandResultError(result);
+      if (error) {
+        appendStatusCardLog(cardId, `failed: ${error}`);
+      } else {
+        appendStatusCardLog(cardId, "opened KOED_HOME logs");
+      }
     } else if (action.command === "models_install") {
       const result = await invokeWithTimeout(
         "models_install",
@@ -2040,6 +2412,33 @@ const registerHandlers = () => {
         case "setup_codex":
           void runAction("Rerun Codex setup", () =>
             invokeWithTimeout("setup_codex", undefined, 300_000)
+          );
+          return;
+        case "runtime_install":
+          void runAction("Install runtime", async () => {
+            const runtimeStatus = await invokeWithTimeout(
+              "runtime_status",
+              undefined,
+              60_000
+            );
+            return invokeWithTimeout(
+              "runtime_install",
+              runtimeInstallConsentArgs(
+                commandResultProvider(runtimeStatus),
+                "Install Koed native runtime assets?"
+              ),
+              600_000
+            );
+          });
+          return;
+        case "models_install":
+          void runAction("Install model", () =>
+            invokeWithTimeout("models_install", undefined, 600_000)
+          );
+          return;
+        case "open_logs":
+          void runAction("Open logs", () =>
+            invokeWithTimeout("open_logs", undefined, 10_000)
           );
           return;
         case "doctor":

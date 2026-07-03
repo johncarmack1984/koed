@@ -368,6 +368,28 @@ describe("JSON command output", () => {
     });
   });
 
+  it("prints start --daemon --json", async () => {
+    const stdout = writer();
+
+    const exitCode = await runKoedServerCli(["start", "--daemon", "--json"], {
+      stdout: stdout.stream,
+      startDaemon: () => ({
+        ok: true,
+        state: "starting",
+        koedHome: "/tmp/koed",
+        message: "Koed server daemon start requested.",
+        startedPid: 42
+      })
+    });
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: true,
+      state: "starting",
+      startedPid: 42
+    });
+  });
+
   it("prints stop --json", async () => {
     const stdout = writer();
 

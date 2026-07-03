@@ -43,6 +43,7 @@ export interface KoedServerManagerOptions {
     }
   ) => ChildProcess;
   openExternal: (url: string) => Promise<unknown>;
+  openPath?: (path: string) => Promise<string>;
 }
 
 export interface KoedServerManager {
@@ -307,7 +308,8 @@ export const createKoedServerManager = ({
   existsSync,
   execFile,
   spawn,
-  openExternal
+  openExternal,
+  openPath
 }: KoedServerManagerOptions): KoedServerManager => {
   let serverProcess: ChildProcess | null = null;
   const startOutputLines: string[] = [];
@@ -357,6 +359,41 @@ export const createKoedServerManager = ({
         }
       );
     });
+
+  const selectedRuntimeInstallProvider = () =>
+    runtimeInstallProvider(environment, existsSync);
+
+  const runRuntimeStatusJson = () =>
+    runJson(
+      ["runtime", "status", "--provider", selectedRuntimeInstallProvider()],
+      60_000
+    );
+
+  const runRuntimeInstallJson = async (args?: Record<string, unknown>) => {
+    const provider = selectedRuntimeInstallProvider();
+    if (provider === "homebrew" && args?.operatorConsented !== true) {
+      return {
+        ok: false,
+        state: "needs_attention",
+        provider,
+        error:
+          "Operator consent is required before Koed Desktop may mutate Homebrew package-manager state.",
+        action:
+          "Confirm the Homebrew runtime install prompt, then retry runtime install."
+      };
+    }
+    return runJson(
+      [
+        "runtime",
+        "install",
+        "--provider",
+        provider,
+        "--dependency-mode",
+        "bundled-local"
+      ],
+      600_000
+    );
+  };
 
   const runModelJson = () =>
     runJson(["models", "status", "--kind", "embedding"], 60_000);
@@ -474,75 +511,34 @@ export const createKoedServerManager = ({
     }
 
     startOutputLines.length = 0;
-    const invocation = createCliInvocation(["start"]);
+    const invocation = createCliInvocation(["start", "--daemon"]);
     appendOutputLines(
       startOutputLines,
       `$ ${invocation.command} ${invocation.args.join(" ")}`
     );
-    try {
-      serverProcess = spawn(invocation.command, invocation.args, {
-        cwd: repoRoot,
-        env: invocation.env,
-        stdio: "pipe",
-        detached: false
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+    const result = await runJson(["start", "--daemon"], 45_000);
+    if (typeof result === "object" && result !== null) {
+      const payload = result as {
+        ok?: unknown;
+        message?: unknown;
+        error?: unknown;
+        startedPid?: unknown;
+      };
+      const message =
+        typeof payload.message === "string"
+          ? payload.message
+          : typeof payload.error === "string"
+            ? payload.error
+            : "koed-server start --daemon completed.";
       appendOutputLines(
         startOutputLines,
-        `koed-server start failed: ${message}`
+        `${message}${payload.startedPid ? ` pid ${payload.startedPid}` : ""}`
       );
-      serverProcess = null;
-      return withDesktopStartLog(
-        {
-          ok: false,
-          state: "needs_attention",
-          error: message
-        },
-        startOutputLines
-      );
+      if (payload.ok === false) {
+        return withDesktopStartLog(result, startOutputLines);
+      }
     }
-    serverProcess.stdout?.on("data", (chunk) => {
-      appendOutputLines(startOutputLines, chunk);
-    });
-    serverProcess.stderr?.on("data", (chunk) => {
-      appendOutputLines(startOutputLines, chunk);
-    });
-    const startExited = new Promise<unknown>((resolveExit) => {
-      serverProcess?.once("error", (error) => {
-        const message = `koed-server start failed: ${error.message}`;
-        appendOutputLines(startOutputLines, message);
-        serverProcess = null;
-        resolveExit(
-          withDesktopStartLog(
-            {
-              ok: false,
-              state: "needs_attention",
-              error: message
-            },
-            startOutputLines
-          )
-        );
-      });
-      serverProcess?.once("exit", (code, signal) => {
-        const exitSummary = `koed-server start exited with ${
-          signal ? `signal ${signal}` : `code ${code ?? "unknown"}`
-        }`;
-        appendOutputLines(startOutputLines, exitSummary);
-        serverProcess = null;
-        resolveExit(
-          withDesktopStartLog(
-            {
-              ok: false,
-              state: "needs_attention",
-              error: summarizeStartFailure(startOutputLines, exitSummary)
-            },
-            startOutputLines
-          )
-        );
-      });
-    });
-    return await Promise.race([pollUntilReady(), startExited]);
+    return pollUntilReady();
   };
 
   const stop = () => {
@@ -566,18 +562,8 @@ export const createKoedServerManager = ({
       },
       setup_codex: () => runJson(["setup", "codex"], 120_000),
       repair_codex: () => runJson(["repair", "codex"], 120_000),
-      runtime_install: () =>
-        runJson(
-          [
-            "runtime",
-            "install",
-            "--provider",
-            runtimeInstallProvider(environment, existsSync),
-            "--dependency-mode",
-            "bundled-local"
-          ],
-          600_000
-        ),
+      runtime_status: () => runRuntimeStatusJson(),
+      runtime_install: (args) => runRuntimeInstallJson(args),
       models_status: () => runModelJson(),
       models_install: () => runModelInstallJson(),
       explorer_credential: () => provisionExplorerCredential(),
@@ -589,6 +575,15 @@ export const createKoedServerManager = ({
         }
         await openExternal(url);
         return { ok: true };
+      },
+      open_logs: async () => {
+        const logsDir = resolve(resolveKoedHome(environment), "logs");
+        if (openPath) {
+          const error = await openPath(logsDir);
+          return error ? { ok: false, error } : { ok: true, path: logsDir };
+        }
+        await openExternal(`file://${logsDir}`);
+        return { ok: true, path: logsDir };
       }
     },
     stop

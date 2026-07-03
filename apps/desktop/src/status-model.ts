@@ -105,6 +105,7 @@ export type StatusCardActionCommand =
   | "models_install"
   | "doctor"
   | "open_explorer"
+  | "open_logs"
   | "copy_diagnostics";
 
 export interface StatusCardAction {
@@ -140,6 +141,7 @@ export const statusCards = [
     },
     secondaryActions: [
       { label: "Run doctor", command: "doctor", timeoutMs: 90_000 },
+      { label: "Open logs", command: "open_logs", timeoutMs: 10_000 },
       { label: "Copy diagnostics", command: "copy_diagnostics" }
     ]
   },
@@ -180,6 +182,7 @@ export const statusCards = [
         timeoutMs: 600_000
       },
       { label: "Run doctor", command: "doctor", timeoutMs: 90_000 },
+      { label: "Open logs", command: "open_logs", timeoutMs: 10_000 },
       { label: "Copy diagnostics", command: "copy_diagnostics" }
     ]
   },
