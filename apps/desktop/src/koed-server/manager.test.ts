@@ -373,7 +373,7 @@ describe("Koed server desktop manager", () => {
     });
   });
 
-  it("requests koed-server start --daemon once services are not healthy", async () => {
+  it("reconnects without requesting koed-server start --daemon again once healthy", async () => {
     const calls: string[][] = [];
     let statusCalls = 0;
     const manager = createKoedServerManager({
@@ -426,7 +426,7 @@ describe("Koed server desktop manager", () => {
     await expect(manager.handlers.start!()).resolves.toMatchObject({
       state: "healthy"
     });
-    expect(calls.some((args) => args.includes("--daemon"))).toBe(true);
+    expect(calls.filter((args) => args.includes("--daemon"))).toHaveLength(1);
   });
 
   it("reports koed-server daemon start failures without throwing", async () => {

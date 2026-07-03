@@ -98,6 +98,7 @@ const env = (root: string): NodeJS.ProcessEnv => ({
 });
 
 const host = { platform: "darwin" as const, architecture: "arm64" as const };
+const linuxHost = { platform: "linux" as const, architecture: "x64" as const };
 
 const spawnResult = (stdout = "", status = 0, stderr = "") =>
   ({ stdout, stderr, status, signal: null, pid: 1, output: [] }) as never;
@@ -220,6 +221,38 @@ describe("packaged runtime provisioning", () => {
     expect(status.assets[0]?.validation?.errors.join("\n")).toContain(
       "postgres-17"
     );
+  });
+
+  it("validates linux packaged runtime paths and loader checks", () => {
+    const root = tempDir();
+    createPackagedPostgres(root);
+    writeManifest(root, { platform: "linux", architecture: "x64" });
+    const koedPaths = paths(root);
+    const linuxSpawn = (command: string, args: string[]) => {
+      if (args.includes("--version") && command.endsWith("initdb")) {
+        return spawnResult("initdb (PostgreSQL) 17.4\n");
+      }
+      if (args[0] === "-L") {
+        return spawnResult(`${args[1]}:\n\tlinux-vdso.so.1 (0x00007fffd3dfe000)\n`);
+      }
+      return spawnResult();
+    };
+
+    const installed = installPackagedRuntime(koedPaths, env(root), {
+      ...linuxHost,
+      spawnSync: linuxSpawn
+    });
+    const status = collectPackagedRuntimeStatus(koedPaths, env(root), {
+      ...linuxHost,
+      spawnSync: linuxSpawn
+    });
+
+    expect(installed.ok).toBe(true);
+    expect(status.ok).toBe(true);
+    expect(status.state).toBe("installed");
+    expect(status.platform).toBe("linux");
+    expect(status.architecture).toBe("x64");
+    expect(status.assets[0]?.validation?.loader[0]?.ok).toBe(true);
   });
 
   it("reports checksum mismatch as incompatible and does not install", () => {
