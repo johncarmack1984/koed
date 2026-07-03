@@ -49,17 +49,20 @@ MCP-side workers.
    starts native Postgres/pgvector and native Embedding Service runtimes under
    `KOED_HOME`. It does not start Docker Compose. Missing native Postgres,
    Python/llama-server, or model assets report setup guidance through
-   `koed-server runtime status/install`, not repo scripts. It defaults job
-   processing to the Postgres-backed local queue. Packaged Desktop can ship
-   platform/architecture native resources plus `runtime-asset-manifest.json`;
-   `koed-server runtime install --provider packaged --dependency-mode bundled-local --json`
+   `koed-server runtime status/install` and `koed-server models status/install`,
+   not repo scripts. It defaults job processing to the Postgres-backed local
+   queue. Packaged Desktop can ship platform/architecture native resources plus
+   `runtime-asset-manifest.json`; `koed-server runtime install --provider packaged --dependency-mode bundled-local --json`
    verifies SHA-256, executable bits, PostgreSQL 17, `llama-server`, and loader
    dependencies before copying resources into `KOED_HOME/runtime`. For local
    packaged-native smoke, `pnpm native-runtime:stage:homebrew` can create a
    `KOED_NATIVE_RUNTIME_SOURCE_DIR` staging directory from local Homebrew/Linuxbrew
    formulas and an existing Embedding Service virtualenv; this is a development
-   helper rather than a release-quality runtime distribution. On macOS,
-   Linux, and WSL, `koed-server runtime status --provider homebrew --json` can
+   helper rather than a release-quality runtime distribution. Packaged Koed
+   Desktop also calls `koed-server models status --kind embedding --json` and
+   `koed-server models install --kind embedding --json` during first-run local
+   personal setup when the embedding model is missing or checksums do not match.
+   On macOS, Linux, and WSL, `koed-server runtime status --provider homebrew --json` can
    inspect Homebrew-backed runtime assets without installing packages, and
    `koed-server runtime install --provider homebrew --dependency-mode bundled-local --json`
    explicitly installs missing Homebrew packages and links selected binaries
@@ -103,13 +106,14 @@ MCP-side workers.
    running the full bootstrap.
 10. Koed Desktop can start/connect to the same headless command surface, run
     the first-launch Codex bootstrap and health-check sequence, poll status,
-    offer one-click Codex integration repair for stale local config, and embed
-    Explorer without requiring the Operator to invoke repo-local scripts
-    directly. Desktop readiness waits for API, Worker/queues, Explorer, and
-    the provisioned Explorer credential so static Explorer reachability cannot
-    mask an unhealthy processing path. Desktop manages only its local personal
-    `koed-server`; remote, Team Self-Hosted, and cloud targets are
-    connect-only.
+    offer one-click Codex integration repair for stale local config, provision
+    the embedding model through `koed-server models status/install --json` in
+    bundled-local mode, and embed Explorer without requiring the Operator to
+    invoke repo-local scripts directly. Desktop readiness waits for API,
+    Worker/queues, Explorer, and the provisioned Explorer credential so static
+    Explorer reachability cannot mask an unhealthy processing path. Desktop
+    manages only its local personal `koed-server`; remote, Team Self-Hosted,
+    and cloud targets are connect-only.
 
 ## Capability Discovery
 

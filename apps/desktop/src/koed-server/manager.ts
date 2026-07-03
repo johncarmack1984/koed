@@ -86,6 +86,8 @@ const diagnosticStatus = ({
     error: message,
     koedHome: "not available",
     generatedAt: new Date().toISOString(),
+    runtimeMode: "developer",
+    dependencyMode: "external",
     api: { ...component("Start Koed"), url: "" },
     database: component("Install runtime assets"),
     redis: component(),
@@ -356,6 +358,12 @@ export const createKoedServerManager = ({
       );
     });
 
+  const runModelJson = () =>
+    runJson(["models", "status", "--kind", "embedding"], 60_000);
+
+  const runModelInstallJson = () =>
+    runJson(["models", "install", "--kind", "embedding"], 600_000);
+
   const pollUntilReady = async () => {
     let latest: unknown = null;
     for (let attempt = 0; attempt < 90; attempt += 1) {
@@ -570,6 +578,8 @@ export const createKoedServerManager = ({
           ],
           600_000
         ),
+      models_status: () => runModelJson(),
+      models_install: () => runModelInstallJson(),
       explorer_credential: () => provisionExplorerCredential(),
       start,
       open_external: async (args) => {

@@ -156,6 +156,52 @@ describe("Koed server desktop manager", () => {
     expect(calls[0]).toContain("packaged");
   });
 
+  it("runs model status and install through koed-server", async () => {
+    const calls: string[][] = [];
+    const manager = createKoedServerManager({
+      repoRoot: "/repo",
+      cliPath: "/repo/cli.js",
+      environment: {},
+      createCliInvocation: (args) => ({
+        command: "/node",
+        args: ["/repo/cli.js", ...args],
+        env: { KOED_REPO_ROOT: "/repo" }
+      }),
+      existsSync: () => true,
+      execFile: (_command, args, _options, callback) => {
+        calls.push(args);
+        callback(null, JSON.stringify({ ok: true, state: "installed" }), "");
+      },
+      spawn: () => childProcess() as never,
+      openExternal: async () => undefined
+    });
+
+    await expect(manager.handlers.models_status!()).resolves.toMatchObject({
+      ok: true,
+      state: "installed"
+    });
+    await expect(manager.handlers.models_install!()).resolves.toMatchObject({
+      ok: true,
+      state: "installed"
+    });
+    expect(calls[0]).toEqual([
+      "/repo/cli.js",
+      "models",
+      "status",
+      "--kind",
+      "embedding",
+      "--json"
+    ]);
+    expect(calls[1]).toEqual([
+      "/repo/cli.js",
+      "models",
+      "install",
+      "--kind",
+      "embedding",
+      "--json"
+    ]);
+  });
+
   it("runs explicit stop through koed-server and clears the managed process", async () => {
     const spawned = childProcess();
     const calls: string[][] = [];

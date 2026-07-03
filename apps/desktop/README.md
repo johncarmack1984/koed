@@ -74,7 +74,11 @@ Packaged Desktop bundled-local startup asks `koed-server` to allocate local
 ports automatically. The first successful allocation is persisted under
 `KOED_HOME/config/local-ports.json` so subsequent Desktop launches keep stable
 API, Explorer, Postgres, and Embedding Service ports while avoiding common
-local development or Docker port collisions.
+local development or Docker port collisions. During first-run bundled-local
+setup, Desktop also calls `koed-server models status --kind embedding --json`
+and `koed-server models install --kind embedding --json` so the embedding model
+is verified or repaired under `KOED_HOME/models` before local startup
+continues.
 
 Desktop also compares the active local API URL/token with the supported Codex
 MCP and Capture Hook configuration in `~/.codex/config.toml` and

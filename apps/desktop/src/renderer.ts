@@ -36,6 +36,7 @@ type StartupActionId =
   | "start"
   | "setup_codex"
   | "runtime_install"
+  | "models_install"
   | "doctor"
   | "keep-waiting";
 
@@ -479,11 +480,26 @@ const desktopReady = (): boolean =>
   explorerReady();
 
 const commandResultError = (value: unknown): string | null => {
-  if (typeof value !== "object" || value === null || !("error" in value)) {
+  if (typeof value !== "object" || value === null) {
     return null;
   }
-  const error = (value as { error?: unknown }).error;
-  return typeof error === "string" && error.length > 0 ? error : null;
+  const payload = value as {
+    error?: unknown;
+    message?: unknown;
+    action?: unknown;
+    ok?: unknown;
+  };
+  const error = typeof payload.error === "string" ? payload.error : null;
+  if (error) {
+    return error;
+  }
+  if (payload.ok === false) {
+    const parts = [payload.message, payload.action].filter(
+      (entry): entry is string => typeof entry === "string" && entry.length > 0
+    );
+    return parts.length > 0 ? parts.join(" ") : "Command failed.";
+  }
+  return null;
 };
 
 const explorerEmbedUrl = (rawUrl: string): string => {
@@ -1672,8 +1688,47 @@ const runStartupSequence = async () => {
 
     if (!startupStepReady("start")) {
       startupDetail =
-        "Starting local dependencies plus the API, Worker, and Explorer processes.";
+        "Verifying the embedding model, then starting local dependencies plus the API, Worker, and Explorer processes.";
       setStartupStep("start", "running");
+      if (status.dependencyMode === "bundled-local") {
+        appendStartupLog("command: koed-server models status --kind embedding");
+        const modelStatus = await invokeWithTimeout(
+          "models_status",
+          undefined,
+          60_000
+        );
+        const modelStatusError = commandResultError(modelStatus);
+        if (modelStatusError) {
+          throw new Error(`koed-server models status failed: ${modelStatusError}`);
+        }
+        const modelState =
+          typeof modelStatus === "object" && modelStatus !== null &&
+          "state" in modelStatus
+            ? String((modelStatus as { state?: unknown }).state)
+            : "unknown";
+        appendStartupLog(`model status: ${modelState}`);
+        if (
+          modelState === "missing" ||
+          modelState === "checksum_mismatch" ||
+          modelState === "not_configured"
+        ) {
+          appendStartupLog("command: koed-server models install --kind embedding");
+          const installResult = await runWithStartupProbes("start", () =>
+            invokeWithTimeout("models_install", undefined, 600_000)
+          );
+          const installError = commandResultError(installResult);
+          if (installError) {
+            throw new Error(`koed-server models install failed: ${installError}`);
+          }
+          appendStartupLog("model install completed");
+        } else {
+          appendStartupLog("model install skipped; embedding model already verified.");
+        }
+      } else {
+        appendStartupLog(
+          "skipping embedding model install in external dependency mode"
+        );
+      }
       appendStartupLog("command: koed-server start");
       appendStartupLog(
         "does: setup env; use external deps; build apps; spawn API/worker/Explorer"
@@ -1833,6 +1888,19 @@ const runStatusCardAction = async (
         appendStatusCardLog(cardId, `failed: ${error}`);
       } else {
         appendStatusCardLog(cardId, "runtime install completed");
+      }
+      await refreshStatus();
+    } else if (action.command === "models_install") {
+      const result = await invokeWithTimeout(
+        "models_install",
+        undefined,
+        action.timeoutMs ?? 600_000
+      );
+      const error = commandResultError(result);
+      if (error) {
+        appendStatusCardLog(cardId, `failed: ${error}`);
+      } else {
+        appendStatusCardLog(cardId, "embedding model install completed");
       }
       await refreshStatus();
     } else {

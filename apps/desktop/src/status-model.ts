@@ -102,6 +102,7 @@ export type StatusCardActionCommand =
   | "setup_codex"
   | "repair_codex"
   | "runtime_install"
+  | "models_install"
   | "doctor"
   | "open_explorer"
   | "copy_diagnostics";
@@ -204,7 +205,8 @@ export const statusCards = [
     id: "embeddingEngine",
     title: "Embedding Engine",
     role: "Local model runtime that turns memory text into retrieval vectors.",
-    impact: "Semantic recall and new memory indexing are degraded without it.",
+    impact:
+      "Semantic recall and new memory indexing are degraded without the model.",
     componentKeys: ["embeddingService"],
     primaryAction: {
       label: "Ensure embedding stack",
@@ -213,6 +215,11 @@ export const statusCards = [
       primary: true
     },
     secondaryActions: [
+      {
+        label: "Install embedding model",
+        command: "models_install",
+        timeoutMs: 600_000
+      },
       {
         label: "Install runtime",
         command: "runtime_install",
