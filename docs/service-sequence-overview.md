@@ -84,7 +84,7 @@ MCP-side workers.
    job queues use `WORK_QUEUE_BACKEND=bullmq` for Redis/BullMQ or
    `WORK_QUEUE_BACKEND=local` for the Postgres-backed `local_work_queue`
    table.
-7. `koed-server stop --json` stops supervised processes in dependency-safe order: Explorer, Worker, API, native Embedding Service, then native Postgres through `pg_ctl stop`. It treats stale process IDs as an idempotent no-op and does not stop Docker Compose or Operator-managed dependencies. `koed-server restart --json` runs the same stop lifecycle, starts a detached `koed-server start` supervisor, and returns machine-readable JSON without streaming startup logs.
+7. `koed-server start --daemon --json` starts a detached `koed-server start` supervisor and returns machine-readable startup intent for Desktop and scripts. `koed-server stop --json` stops supervised processes in dependency-safe order: Explorer, Worker, API, native Embedding Service, then native Postgres through `pg_ctl stop`. It treats stale process IDs as an idempotent no-op and does not stop Docker Compose or Operator-managed dependencies. `koed-server restart --json` runs the same stop lifecycle, starts a detached `koed-server start` supervisor, and returns machine-readable JSON without streaming startup logs.
 8. `koed-server status --json` and `koed-server doctor --json` poll the API
    readiness endpoint, dependency readiness as reported by the API, local
    Worker process state, local API Token configuration, MCP Server doctor

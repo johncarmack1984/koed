@@ -35,11 +35,12 @@ Check service state or stop/restart supervised local processes from any headless
 ```bash
 node packages/koed-server/dist/cli.js status --json
 node packages/koed-server/dist/cli.js doctor --json
+node packages/koed-server/dist/cli.js start --daemon --json
 node packages/koed-server/dist/cli.js stop --json
 node packages/koed-server/dist/cli.js restart --json
 ```
 
-`stop` is idempotent. Missing/stale process IDs are reported in JSON but do not fail the command. `restart --json` runs the same stop lifecycle, starts a detached `koed-server start` supervisor, and returns machine-readable JSON without streaming startup logs. In bundled-local mode it stops Explorer, Worker, API, native Embedding Service, and native Postgres via `pg_ctl stop -D <dataDir> -m fast`. It does not stop Docker Compose. External dependency mode does not stop Operator-managed Postgres, Redis, or Embedding Service.
+`start --daemon --json` starts a detached `koed-server start` supervisor and returns machine-readable startup intent for Desktop and scripts. `stop` is idempotent. Missing/stale process IDs are reported in JSON but do not fail the command. `restart --json` runs the same stop lifecycle, starts a detached `koed-server start` supervisor, and returns machine-readable JSON without streaming startup logs. In bundled-local mode it stops Explorer, Worker, API, native Embedding Service, and native Postgres via `pg_ctl stop -D <dataDir> -m fast`. It does not stop Docker Compose. External dependency mode does not stop Operator-managed Postgres, Redis, or Embedding Service.
 
 Run Codex setup through the same surface after `koed-server start` has made the
 API ready:
