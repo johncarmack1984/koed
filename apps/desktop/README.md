@@ -96,12 +96,20 @@ restart Codex and trust updated hooks if prompted before expecting new captures.
   `electron-builder --mac dir` and disables signing/notarization.
 - `desktop:package:smoke:mac` builds the unsigned app and verifies the packaged
   renderer, bundled `koed-server`, and `koed-runtime` JS/service artifact layout
-  can run without checkout overrides. Set `KOED_NATIVE_RUNTIME_SOURCE_DIR` to
-  stage native assets into the package manifest for packaged-provider runtime
-  install tests. `pnpm native-runtime:stage:homebrew -- --out /tmp/koed-native-runtime --force`
+  can run without checkout overrides. The smoke launches the packaged
+  `koed-server` with a temporary `KOED_HOME`, unsets `KOED_REPO_ROOT`, verifies
+  daemon start/status/reconnect/stop, and `--missing-assets` checks actionable
+  `doctor --json` output when native runtime assets are absent. Set
+  `KOED_NATIVE_RUNTIME_SOURCE_DIR` to stage native assets into the package
+  manifest for packaged-provider runtime install tests.
+  `pnpm native-runtime:stage:homebrew -- --out /tmp/koed-native-runtime --force`
   can produce a local Homebrew-backed staging directory for those smoke tests.
   `desktop:package:smoke` currently aliases the macOS smoke and guards
-  non-Darwin platforms before package execution.
+  non-Darwin platforms before package execution, though Linux smoke can be
+  pointed at unpacked artifacts with `KOED_DESKTOP_PACKAGE_SMOKE_APP_PATH`,
+  `KOED_DESKTOP_PACKAGE_SMOKE_RESOURCES_PATH`, and
+  `KOED_DESKTOP_PACKAGE_SMOKE_EXECUTABLE` when a Linux packaged build is
+  available.
 - `desktop:package:release` builds macOS `dmg` and `zip` artifacts using the
   release packaging config. Signing/notarization requires a local Developer ID
   identity and release credentials; use `desktop:package` for unsigned local

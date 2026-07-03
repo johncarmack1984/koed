@@ -93,6 +93,14 @@ pnpm smoke:bundled-local -- --full --install-runtime --json
 
 `--install-runtime` explicitly runs the Homebrew-backed runtime install for the temporary `KOED_HOME` before native resource checks. The smoke workflow skips explicit model installation unless `KOED_EMBEDDING_MODEL_URL` and `KOED_EMBEDDING_MODEL_SHA256` are configured. `--full` adds API Token creation, Capture Hook-like personal ingestion, Projection, local queue/embedding work, Memory Answer evidence retrieval with a unique marker, Explorer reachability, and cleanup through `koed-server stop --json`. Missing native binaries or model assets fail clearly instead of falling back to Docker.
 
+Packaged Desktop smoke now exercises the packaged Electron bundle with a temporary `KOED_HOME`, unsets `KOED_REPO_ROOT`, and verifies daemon start/status/reconnect/stop without checkout fallbacks. For CI or diagnostics when native assets are absent, run:
+
+```bash
+pnpm desktop:package:smoke:mac -- --missing-assets --json
+```
+
+When packaged native assets are staged, omit `--missing-assets` to let smoke install packaged runtime assets, start the daemon, and reach a healthy local stack.
+
 If dependency ports conflict with another local app, start the external dependency stack with alternate host ports and pass matching explicit URLs to `koed-server`:
 
 ```bash
