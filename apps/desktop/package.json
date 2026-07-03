@@ -2,7 +2,7 @@
   "name": "@koed/desktop",
   "productName": "Koed",
   "version": "0.1.1",
-  "description": "Electron control surface for Koed local personal memory.",
+  "description": "Electron control surface for Koed local personal installs.",
   "author": "Koed",
   "private": true,
   "license": "AGPL-3.0-only",
