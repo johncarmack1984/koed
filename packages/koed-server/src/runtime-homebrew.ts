@@ -19,10 +19,11 @@ type SpawnSyncLike = (
   options?: Parameters<typeof nodeSpawnSync>[2]
 ) => SpawnSyncReturns<string>;
 
-export type RuntimeProvider = "homebrew";
+export type RuntimeProvider = "homebrew" | "packaged";
 export type RuntimeInstallState =
   | "installed"
   | "missing"
+  | "incompatible"
   | "not_supported"
   | "needs_attention";
 

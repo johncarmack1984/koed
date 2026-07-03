@@ -14,6 +14,10 @@ import {
   collectHomebrewRuntimeStatus,
   installHomebrewRuntime
 } from "./runtime-homebrew.js";
+import {
+  collectPackagedRuntimeStatus,
+  installPackagedRuntime
+} from "./runtime-packaged.js";
 import { resolveKoedServerPaths } from "./paths.js";
 
 export const usageText = `Usage: koed-server <command> [options]
@@ -30,6 +34,10 @@ Commands:
   models install --json  Download bundled local model with SHA-256 verification
   runtime status --json  Print native bundled-local runtime install state
   runtime install --json Install native bundled-local runtime assets explicitly
+
+Runtime providers:
+  --provider homebrew       Use Homebrew-backed runtime assets (default)
+  --provider packaged       Use packaged runtime resources from the app bundle
 
 Options:
   --json                 Emit JSON output for commands that support it
@@ -52,6 +60,8 @@ export interface KoedServerCliDependencies {
   installModel?: typeof installLocalModel;
   collectRuntimeStatus?: typeof collectHomebrewRuntimeStatus;
   installRuntime?: typeof installHomebrewRuntime;
+  collectPackagedRuntimeStatus?: typeof collectPackagedRuntimeStatus;
+  installPackagedRuntime?: typeof installPackagedRuntime;
   loadEnvironment?: typeof loadRepoEnv;
   resolvePaths?: typeof resolveKoedServerPaths;
   stdout?: Pick<NodeJS.WriteStream, "write">;
@@ -70,10 +80,13 @@ const flagValue = (args: string[], name: string): string | undefined => {
   return index >= 0 ? args[index + 1] : undefined;
 };
 
-const assertRuntimeFlags = (args: string[], command: "status" | "install") => {
+const assertRuntimeFlags = (
+  args: string[],
+  command: "status" | "install"
+): "homebrew" | "packaged" => {
   const provider = flagValue(args, "--provider") ?? "homebrew";
-  if (provider !== "homebrew") {
-    throw new Error("--provider must be homebrew.");
+  if (provider !== "homebrew" && provider !== "packaged") {
+    throw new Error("--provider must be homebrew or packaged.");
   }
   const dependencyMode = flagValue(args, "--dependency-mode");
   if (command === "install" && dependencyMode !== "bundled-local") {
@@ -81,6 +94,7 @@ const assertRuntimeFlags = (args: string[], command: "status" | "install") => {
       "runtime install requires --dependency-mode bundled-local."
     );
   }
+  return provider;
 };
 
 export const runKoedServerCli = async (
@@ -97,6 +111,9 @@ export const runKoedServerCli = async (
     installModel = installLocalModel,
     collectRuntimeStatus = collectHomebrewRuntimeStatus,
     installRuntime = installHomebrewRuntime,
+    collectPackagedRuntimeStatus:
+      collectPackagedRuntime = collectPackagedRuntimeStatus,
+    installPackagedRuntime: installPackaged = installPackagedRuntime,
     loadEnvironment = loadRepoEnv,
     resolvePaths = resolveKoedServerPaths,
     stdout = process.stdout,
@@ -232,13 +249,16 @@ export const runKoedServerCli = async (
     }
 
     if (command === "runtime" && subcommand === "status") {
-      assertRuntimeFlags(args, "status");
+      const provider = assertRuntimeFlags(args, "status");
       const paths = resolvePaths();
       const runtimeEnvironment = {
         ...loadEnvironment(paths.repoRoot),
         ...process.env
       };
-      const result = collectRuntimeStatus(paths, runtimeEnvironment);
+      const result =
+        provider === "packaged"
+          ? collectPackagedRuntime(paths, runtimeEnvironment)
+          : collectRuntimeStatus(paths, runtimeEnvironment);
       if (wantsJson) {
         printJson(stdout, result);
       } else {
@@ -248,13 +268,16 @@ export const runKoedServerCli = async (
     }
 
     if (command === "runtime" && subcommand === "install") {
-      assertRuntimeFlags(args, "install");
+      const provider = assertRuntimeFlags(args, "install");
       const paths = resolvePaths();
       const runtimeEnvironment = {
         ...loadEnvironment(paths.repoRoot),
         ...process.env
       };
-      const result = installRuntime(paths, runtimeEnvironment);
+      const result =
+        provider === "packaged"
+          ? installPackaged(paths, runtimeEnvironment)
+          : installRuntime(paths, runtimeEnvironment);
       if (wantsJson) {
         printJson(stdout, result);
       } else {
