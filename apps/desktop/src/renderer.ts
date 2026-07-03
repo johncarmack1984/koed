@@ -1355,26 +1355,7 @@ const renderShell = () => {
 
   app.innerHTML = `
     <section class="desktop-shell">
-      <section class="startup-screen" data-startup-panel>
-        <div class="startup-card">
-          <div class="brand startup-brand">
-            <img class="brand-logo" src="${koedMarkUrl}" alt="Koed" />
-            <div>
-              <h1>Koed Desktop</h1>
-            </div>
-          </div>
-          <div class="startup-status" aria-live="polite">
-            <p class="eyebrow">Startup progress</p>
-            <h2 data-startup-phase>${escapeHtml(startupPhase)}</h2>
-            <small data-startup-detail>${escapeHtml(startupDetail)}</small>
-          </div>
-          ${renderStatusCards("startup")}
-          ${renderStartupSteps()}
-          <p class="hint" data-startup-hint>${escapeHtml(getStartupHint())}</p>
-        </div>
-      </section>
-
-      <section class="shell${sidebarCollapsed ? " sidebar-collapsed" : ""}" data-main-shell hidden>
+      <section class="shell${sidebarCollapsed ? " sidebar-collapsed" : ""}" data-main-shell>
         <aside class="sidebar" data-sidebar>
           <div class="sidebar-header">
             <button
@@ -1399,6 +1380,13 @@ const renderShell = () => {
             ></span>
           </div>
           <div class="status-groups">
+            <section class="sidebar-startup-status" aria-live="polite">
+              <p class="eyebrow">Startup progress</p>
+              <h2 data-startup-phase>${escapeHtml(startupPhase)}</h2>
+              <small data-startup-detail>${escapeHtml(startupDetail)}</small>
+              <p class="hint" data-startup-hint>${escapeHtml(getStartupHint())}</p>
+            </section>
+            ${renderStartupSteps()}
             ${renderStatusCards("sidebar")}
           </div>
           <div class="sidebar-footer">
@@ -1642,12 +1630,11 @@ const syncStatusCards = () => {
     }
   }
 
-  const showStartupPanel = startupVisible && !desktopReady();
   if (startupPanel) {
-    startupPanel.hidden = !showStartupPanel;
+    startupPanel.hidden = true;
   }
   if (mainShell) {
-    mainShell.hidden = showStartupPanel;
+    mainShell.hidden = false;
   }
 
   if (explorerFrame && explorerEmpty) {
