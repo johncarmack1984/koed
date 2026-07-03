@@ -35,6 +35,7 @@
     "assets:embedding": "pnpm --filter @koed/koed-server exec koed-server models install --kind embedding",
     "assets:reranker": "pnpm --filter @koed/koed-server exec koed-server models install --kind reranker",
     "eval": "pnpm --filter @koed/evals eval",
+    "eval:lcm-summary": "pnpm --filter @koed/evals eval:lcm-summary:live",
     "changeset": "changeset",
     "release:version": "changeset version && node scripts/sync-product-release.mjs --consume-changesets",
     "release:notes": "node scripts/product-release-notes.mjs",

@@ -7,10 +7,29 @@ import {
   type MemoryAnswerWorkerResponse
 } from "./answer-worker.js";
 import type { LcmSummaryServiceHandle } from "./lcm-summary-service.js";
+export { runCodexAppServerJsonTask } from "./codex-app-server-runner.js";
+export type {
+  CodexAppServerJsonTaskConfig,
+  CodexAppServerRunResult
+} from "./codex-app-server-runner.js";
 import { resolveLcmSummaryServiceConfig } from "./lcm-summary-service.js";
 import {
   lcmSummaryLockState,
   resolveLcmSummaryWorkerConfig
+} from "./lcm-summary-worker.js";
+export {
+  LCM_STRUCTURED_SUMMARY_SCHEMA_VERSION,
+  buildLcmSummaryPrompt,
+  parseStructuredLcmSummary,
+  runCodexAppServerLcmSummary,
+  resolveLcmSummaryWorkerConfig
+} from "./lcm-summary-worker.js";
+export type {
+  CodexLcmSummaryRunner,
+  LcmSummaryNode,
+  LcmSummaryPromptResult,
+  LcmSummaryWorkerConfig,
+  StructuredLcmSummary
 } from "./lcm-summary-worker.js";
 
 export type RetrievalScope = "personal";

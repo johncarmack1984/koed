@@ -7,7 +7,7 @@ import { z } from "zod";
 import {
   CodexAppServerTurnError,
   koedAppServerWorkerDeveloperInstructions,
-  runCodexAppServerTurn,
+  runCodexAppServerJsonTask,
   resolveCodexAppServerBinary,
   type CodexAppServerRawEvent,
   type CodexThreadTokenUsage
@@ -76,7 +76,7 @@ export interface LcmSummaryResult {
   error?: string;
 }
 
-type LcmSummaryPromptResult = {
+export type LcmSummaryPromptResult = {
   text: string;
   structuredSummary?: StructuredLcmSummary;
   model: string;
@@ -308,6 +308,24 @@ const lcmSummaryJsonShape = () => ({
   provenance_hints: ["node/source/turn/chunk ids that help trace claims"]
 });
 
+const secretRedactionRequirement =
+  "- Do not reproduce API tokens, credentials, passwords, private keys, bearer tokens, or secret-like literals. If a source item contains a secret-like value, preserve only the durable event, such as that a token was pasted, rotated, revoked, or redacted.";
+
+const secretRedactionOverrideRequirement =
+  "- This redaction rule overrides the instruction to preserve exact identifiers.";
+
+const orderedConflictRequirement =
+  "- When ordered source items or child summaries conflict, prefer the later item unless the later item explicitly says the issue remains unresolved.";
+
+const supersededContextRequirement =
+  "- Preserve older conflicting items only as superseded context, not as active decisions or unresolved questions.";
+
+const fieldPlacementRequirement =
+  "- Put active decisions only in decisions, unresolved or undecided items only in unresolved_questions, stable observations in facts, and durable command/tool results in tool_outcomes.";
+
+const noisyOutputRequirement =
+  "- Compress repetitive logs, lifecycle events, and checklist-style tool output; keep the durable finding or outcome instead of copying every noisy line.";
+
 export const buildLcmSummaryPrompt = (
   node: LcmSummaryNode,
   mode: "summary" | "partial" | "reduce" = "summary"
@@ -323,6 +341,10 @@ export const buildLcmSummaryPrompt = (
           "",
           "Requirements:",
           "- Preserve durable decisions, facts, implementation details, exact identifiers, and open threads from this shard.",
+          secretRedactionRequirement,
+          secretRedactionOverrideRequirement,
+          fieldPlacementRequirement,
+          noisyOutputRequirement,
           "- Set title to a short 3-7 word label for this memory span, without UUIDs or generic words like chat/session.",
           "- Keep provenance hints such as node IDs, source spans, turn IDs, and chunk indexes when useful.",
           "- Do not add anything that is not supported by this shard.",
@@ -335,6 +357,12 @@ export const buildLcmSummaryPrompt = (
             "",
             "Requirements:",
             "- Preserve durable decisions, facts, implementation details, exact identifiers, and open threads.",
+            secretRedactionRequirement,
+            secretRedactionOverrideRequirement,
+            orderedConflictRequirement,
+            supersededContextRequirement,
+            fieldPlacementRequirement,
+            noisyOutputRequirement,
             "- Set title to a short 3-7 word label for the combined memory, without UUIDs or generic words like chat/session.",
             "- Keep provenance hints such as node IDs, source spans, turn IDs, and chunk indexes when useful.",
             "- Do not add anything that is not supported by the shard summaries.",
@@ -347,6 +375,12 @@ export const buildLcmSummaryPrompt = (
               "",
               "Requirements:",
               "- Preserve durable decisions, facts, implementation details, exact identifiers, and open threads.",
+              secretRedactionRequirement,
+              secretRedactionOverrideRequirement,
+              orderedConflictRequirement,
+              supersededContextRequirement,
+              fieldPlacementRequirement,
+              noisyOutputRequirement,
               "- Set title to a short 3-7 word label for the rolled-up memory, without UUIDs or generic words like chat/session.",
               "- Keep provenance hints such as node IDs, source spans, and turn IDs when useful.",
               "- Do not add anything that is not supported by the child summaries.",
@@ -358,6 +392,10 @@ export const buildLcmSummaryPrompt = (
               "",
               "Requirements:",
               "- Preserve concrete user requests, decisions, facts, filenames, commands, model names, tool outcomes, errors, and unresolved questions.",
+              secretRedactionRequirement,
+              secretRedactionOverrideRequirement,
+              fieldPlacementRequirement,
+              noisyOutputRequirement,
               "- Set title to a short 3-7 word label for the conversation span, without UUIDs or generic words like chat/session.",
               "- Mention source items in the same order they occurred when they affect meaning.",
               "- Do not invent details. If a source item is ambiguous, say so compactly.",
@@ -406,7 +444,7 @@ const stripJsonFence = (text: string): string => {
     : unfenced;
 };
 
-const parseStructuredLcmSummary = (text: string): StructuredLcmSummary =>
+export const parseStructuredLcmSummary = (text: string): StructuredLcmSummary =>
   structuredLcmSummarySchema.parse(JSON.parse(stripJsonFence(text)));
 
 const objectPayload = (payload: unknown): Record<string, unknown> =>
@@ -535,7 +573,7 @@ export const runCodexAppServerLcmSummary: CodexLcmSummaryRunner = (
   config,
   timeoutMs
 ): Promise<LcmSummaryPromptResult> =>
-  runCodexAppServerTurn(
+  runCodexAppServerJsonTask(
     prompt,
     {
       appServerBinary: config.appServerBinary,
