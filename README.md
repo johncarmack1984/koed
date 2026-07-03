@@ -25,6 +25,8 @@ need them.
 - Homebrew or packaged native runtime assets for the bundled-local path. External dependency mode does not require Homebrew.
 - Codex installed and signed in.
 
+If you are on Windows, run Koed inside WSL as Linux tooling. Keep `KOED_HOME` and checkout paths on Linux filesystem paths inside WSL; native Windows packaged app support is not shipped in this build.
+
 ### Start Koed
 
 From a fresh clone, run:

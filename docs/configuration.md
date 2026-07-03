@@ -85,8 +85,8 @@ Packaged Desktop, headless local-personal startup, and repair commands all read 
 ## Platform Expectations
 
 - macOS: packaged Desktop and bundled-local provisioning path.
-- Linux and WSL: headless development, smoke, and the same CLI contracts when bundled-local runtime assets are available.
-- Native Windows packaged app support: not shipped in this build; use WSL for local development.
+- Linux and WSL: headless development, smoke, and the same CLI contracts when bundled-local runtime assets are available. Keep `KOED_HOME` and checkout paths on Linux filesystem paths inside WSL.
+- Native Windows packaged app support: not shipped in this build; use WSL for local development. Windows host browsers can reach Koed through WSL localhost forwarding when available, or by browsing the WSL IP directly as a fallback.
 
 ## Required Deployment Values
 
