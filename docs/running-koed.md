@@ -116,6 +116,15 @@ external dependency configuration.
 pnpm --filter @koed/desktop start
 ```
 
+For local packaged-native smoke with Homebrew/Linuxbrew-provided assets, stage the native runtime first and pass it into packaging:
+
+```bash
+pnpm native-runtime:stage:homebrew -- --out /tmp/koed-native-runtime --force
+KOED_NATIVE_RUNTIME_SOURCE_DIR=/tmp/koed-native-runtime pnpm --filter @koed/desktop package:mac
+```
+
+The Homebrew staging helper requires an existing Embedding Service virtualenv at `apps/embedding-service/.venv`, or `KOED_EMBEDDING_VENV_DIR=/path/to/.venv`. It is a development smoke helper and does not create release-quality redistributable native runtime assets.
+
 For renderer development only:
 
 ```bash

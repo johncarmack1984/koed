@@ -54,7 +54,11 @@ MCP-side workers.
    platform/architecture native resources plus `runtime-asset-manifest.json`;
    `koed-server runtime install --provider packaged --dependency-mode bundled-local --json`
    verifies SHA-256, executable bits, PostgreSQL 17, `llama-server`, and loader
-   dependencies before copying resources into `KOED_HOME/runtime`. On macOS,
+   dependencies before copying resources into `KOED_HOME/runtime`. For local
+   packaged-native smoke, `pnpm native-runtime:stage:homebrew` can create a
+   `KOED_NATIVE_RUNTIME_SOURCE_DIR` staging directory from local Homebrew/Linuxbrew
+   formulas and an existing Embedding Service virtualenv; this is a development
+   helper rather than a release-quality runtime distribution. On macOS,
    Linux, and WSL, `koed-server runtime status --provider homebrew --json` can
    inspect Homebrew-backed runtime assets without installing packages, and
    `koed-server runtime install --provider homebrew --dependency-mode bundled-local --json`
