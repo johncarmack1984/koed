@@ -99,6 +99,24 @@ const env = (root: string): NodeJS.ProcessEnv => ({
 
 const host = { platform: "darwin" as const, architecture: "arm64" as const };
 
+const spawnResult = (stdout = "", status = 0, stderr = "") =>
+  ({ stdout, stderr, status, signal: null, pid: 1, output: [] }) as never;
+
+const validationHost = {
+  ...host,
+  spawnSync: (command: string, args: string[]) => {
+    if (args.includes("--version")) {
+      if (command.endsWith("initdb"))
+        return spawnResult("initdb (PostgreSQL) 17.6\n");
+      if (command.endsWith("llama-server"))
+        return spawnResult("llama-server 1.0\n");
+    }
+    if (args[0] === "-L")
+      return spawnResult(`${args[1]}:\n\t/usr/lib/libSystem.B.dylib\n`);
+    return spawnResult();
+  }
+};
+
 afterEach(() => {
   for (const path of temps.splice(0)) {
     rmSync(path, { recursive: true, force: true });
@@ -153,8 +171,8 @@ describe("packaged runtime provisioning", () => {
     writeManifest(root);
     const koedPaths = paths(root);
 
-    const first = installPackagedRuntime(koedPaths, env(root), host);
-    const second = installPackagedRuntime(koedPaths, env(root), host);
+    const first = installPackagedRuntime(koedPaths, env(root), validationHost);
+    const second = installPackagedRuntime(koedPaths, env(root), validationHost);
 
     expect(first.ok).toBe(true);
     expect(first.state).toBe("installed");
@@ -176,6 +194,32 @@ describe("packaged runtime provisioning", () => {
     expect(
       existsSync(resolve(root, "koed-runtime", "postgres", "bin", "psql"))
     ).toBe(true);
+  });
+
+  it("marks installed packaged assets incompatible when validation fails", () => {
+    const root = tempDir();
+    createPackagedPostgres(root);
+    writeManifest(root);
+    const koedPaths = paths(root);
+    const first = installPackagedRuntime(koedPaths, env(root), validationHost);
+
+    const status = collectPackagedRuntimeStatus(koedPaths, env(root), {
+      ...host,
+      spawnSync: (command, args) => {
+        if (args.includes("--version") && command.endsWith("initdb")) {
+          return spawnResult("initdb (PostgreSQL) 16.9\n");
+        }
+        if (args[0] === "-L") return spawnResult(`${args[1]}:\n`);
+        return spawnResult();
+      }
+    });
+
+    expect(first.ok).toBe(true);
+    expect(status.ok).toBe(false);
+    expect(status.state).toBe("incompatible");
+    expect(status.assets[0]?.validation?.errors.join("\n")).toContain(
+      "postgres-17"
+    );
   });
 
   it("reports checksum mismatch as incompatible and does not install", () => {

@@ -1,4 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -154,11 +160,19 @@ describe("local Embedding Service runtime", () => {
     });
     mkdirSync(resolve(root, "vendor", "llama.cpp"), { recursive: true });
     writeFileSync(resolve(root, "apps", "embedding-service", "app.py"), "");
-    writeFileSync(
-      resolve(root, "apps", "embedding-service", ".venv", "bin", "python"),
-      ""
+    const python = resolve(
+      root,
+      "apps",
+      "embedding-service",
+      ".venv",
+      "bin",
+      "python"
     );
-    writeFileSync(resolve(root, "vendor", "llama.cpp", "llama-server"), "");
+    const llama = resolve(root, "vendor", "llama.cpp", "llama-server");
+    writeFileSync(python, "");
+    writeFileSync(llama, "");
+    chmodSync(python, 0o755);
+    chmodSync(llama, 0o755);
 
     expect(localEmbeddingRuntimeAvailable(paths(root), {})).toBe(true);
   });

@@ -182,7 +182,10 @@ const missingRuntime = (
   state: "not_configured",
   message: `Bundled-local native Postgres runtime is missing: ${missing.join(", ")}.`,
   action:
-    "Install bundled Postgres/pgvector resources under KOED_HOME/runtime/postgres or set KOED_POSTGRES_BIN_DIR / KOED_POSTGRES_*_BIN overrides. Source-checkout vendor/postgres is a development fallback.",
+    runtime.artifactSource === "source-checkout" ||
+    runtime.artifactSource === "explicit-override"
+      ? "Install bundled Postgres/pgvector resources with koed-server runtime install --provider homebrew --dependency-mode bundled-local --json, or set KOED_POSTGRES_BIN_DIR / KOED_POSTGRES_*_BIN overrides."
+      : "Inspect native runtime with koed-server runtime status --provider packaged --json, then install packaged assets with koed-server runtime install --provider packaged --dependency-mode bundled-local --json or Homebrew-backed assets with --provider homebrew.",
   details: { missing, artifactSource: runtime.artifactSource },
   paths: safeRuntimePaths(runtime)
 });
@@ -237,6 +240,39 @@ const run = (
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
   });
+
+const commandOutput = (result: SpawnSyncReturns<string>): string =>
+  `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
+
+const validatePostgres17 = (
+  runtime: LocalPostgresRuntimePaths,
+  env: NodeJS.ProcessEnv,
+  spawnSync: SpawnSyncLike
+): LocalPostgresRuntimeStatus | null => {
+  const version = run(runtime.initdbBin, ["--version"], env, spawnSync);
+  const output = commandOutput(version);
+  if (
+    version.status === 0 &&
+    (output === "" ||
+      /PostgreSQL\)?\s+17(?:\.|\s|$)/i.test(output) ||
+      /\(PostgreSQL\)\s+17(?:\.|\s|$)/i.test(output))
+  ) {
+    return null;
+  }
+  return {
+    runtime: "native-postgres",
+    state: "needs_attention",
+    message: "Bundled-local native Postgres must be PostgreSQL 17 compatible.",
+    action:
+      "Run koed-server runtime status --provider packaged --json or koed-server runtime install --provider homebrew --dependency-mode bundled-local --json with PostgreSQL 17 assets.",
+    details: {
+      exitCode: version.status,
+      output,
+      artifactSource: runtime.artifactSource
+    },
+    paths: safeRuntimePaths(runtime)
+  };
+};
 
 const healthyStatus = (
   runtime: LocalPostgresRuntimePaths,
@@ -363,6 +399,10 @@ export const startLocalPostgresRuntime = (
   const missing = runtimeMissing(runtime, exists);
   if (missing.length > 0) {
     return { ok: false, status: missingRuntime(runtime, missing), env };
+  }
+  const versionStatus = validatePostgres17(runtime, env, spawnSync);
+  if (versionStatus) {
+    return { ok: false, status: versionStatus, env };
   }
   mkdirSync(runtime.dataDir, { recursive: true, mode: 0o700 });
   mkdirSync(runtime.runDir, { recursive: true, mode: 0o700 });

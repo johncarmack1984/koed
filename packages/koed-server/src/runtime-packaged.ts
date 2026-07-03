@@ -10,6 +10,10 @@ import {
   statSync,
   writeFileSync
 } from "node:fs";
+import {
+  spawnSync as nodeSpawnSync,
+  type SpawnSyncReturns
+} from "node:child_process";
 import { dirname, relative, resolve } from "node:path";
 import type { KoedServerPaths } from "./paths.js";
 import { resolvePackagedKoedRuntimeRoot } from "./runtime-artifact-source.js";
@@ -33,6 +37,28 @@ export interface PackagedRuntimeAssetManifest {
   assets: PackagedRuntimeAssetManifestEntry[];
 }
 
+export interface PackagedRuntimeAssetValidation {
+  ok: boolean;
+  executablePermissions: Array<{
+    name: string;
+    path: string;
+    ok: boolean;
+  }>;
+  commands: Array<{
+    name: string;
+    command: string;
+    ok: boolean;
+    message?: string;
+  }>;
+  loader: Array<{
+    command: string;
+    ok: boolean;
+    skipped?: boolean;
+    message?: string;
+  }>;
+  errors: string[];
+}
+
 export interface PackagedRuntimeAssetStatus {
   id: string;
   platform: string;
@@ -52,6 +78,7 @@ export interface PackagedRuntimeAssetStatus {
   sourceAvailable: boolean;
   sourceSha256?: string;
   installedSha256?: string;
+  validation?: PackagedRuntimeAssetValidation;
   missing?: string[];
 }
 
@@ -73,10 +100,17 @@ export interface PackagedRuntimeInstallResult extends PackagedRuntimeStatus {
   copiedPaths: string[];
 }
 
+type SpawnSyncLike = (
+  command: string,
+  args: string[],
+  options?: Parameters<typeof nodeSpawnSync>[2]
+) => SpawnSyncReturns<string>;
+
 export interface PackagedRuntimeDependencies {
   platform?: NodeJS.Platform;
   architecture?: NodeJS.Architecture;
   now?: () => Date;
+  spawnSync?: SpawnSyncLike;
 }
 
 const MANIFEST_FILENAME = "runtime-asset-manifest.json";
@@ -124,6 +158,159 @@ const assetFiles = (entry: PackagedRuntimeAssetManifestEntry): string[] =>
       ...Object.values(entry.executablePaths)
     ])
   ].sort();
+
+const executableModeOk = (path: string): boolean =>
+  (statSync(path).mode & 0o111) !== 0;
+
+const run = (
+  command: string,
+  args: string[],
+  spawnSync: SpawnSyncLike
+): SpawnSyncReturns<string> =>
+  spawnSync(command, args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+const commandOutput = (result: SpawnSyncReturns<string>): string =>
+  `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
+
+const postgres17Ok = (output: string): boolean =>
+  /PostgreSQL\)?\s+17(?:\.|\s|$)/i.test(output) ||
+  /\(PostgreSQL\)\s+17(?:\.|\s|$)/i.test(output);
+
+const collectCommandValidation = (
+  installPath: string,
+  executablePaths: Record<string, string>,
+  spawnSync: SpawnSyncLike
+): PackagedRuntimeAssetValidation["commands"] => {
+  const commands: PackagedRuntimeAssetValidation["commands"] = [];
+  const postgresVersionExecutable =
+    executablePaths.pg_config ?? executablePaths.initdb;
+  if (postgresVersionExecutable) {
+    const command = safeResolve(installPath, postgresVersionExecutable);
+    const result = run(command, ["--version"], spawnSync);
+    const output = commandOutput(result);
+    const ok = result.status === 0 && postgres17Ok(output);
+    commands.push({
+      name: "postgres-17",
+      command,
+      ok,
+      ...(ok
+        ? {}
+        : {
+            message:
+              output || `Postgres version check exited ${result.status ?? 1}`
+          })
+    });
+  }
+
+  const llamaServerExecutable = executablePaths.llama_server;
+  if (llamaServerExecutable) {
+    const command = safeResolve(installPath, llamaServerExecutable);
+    const version = run(command, ["--version"], spawnSync);
+    const help =
+      version.status === 0 ? version : run(command, ["--help"], spawnSync);
+    const output = commandOutput(help);
+    const ok = help.status === 0 && /llama/i.test(output);
+    commands.push({
+      name: "llama-server",
+      command,
+      ok,
+      ...(ok
+        ? {}
+        : {
+            message:
+              output || `llama-server validation exited ${help.status ?? 1}`
+          })
+    });
+  }
+  return commands;
+};
+
+const collectLoaderValidation = (
+  platform: string,
+  executablePaths: Record<string, string>,
+  installPath: string,
+  spawnSync: SpawnSyncLike
+): PackagedRuntimeAssetValidation["loader"] => {
+  const tool =
+    platform === "darwin" ? "otool" : platform === "linux" ? "ldd" : undefined;
+  if (!tool) return [];
+  return Object.values(executablePaths).map((relativePath) => {
+    const command = safeResolve(installPath, relativePath);
+    const result = run(
+      tool,
+      platform === "darwin" ? ["-L", command] : [command],
+      spawnSync
+    );
+    const output = commandOutput(result);
+    if (result.error && result.error.message.includes("ENOENT")) {
+      return {
+        command,
+        ok: true,
+        skipped: true,
+        message: `${tool} is not available; loader validation skipped.`
+      };
+    }
+    const missing = /not found/i.test(output);
+    const ok = result.status === 0 && !missing;
+    return {
+      command,
+      ok,
+      ...(ok
+        ? {}
+        : {
+            message: output || `${tool} validation exited ${result.status ?? 1}`
+          })
+    };
+  });
+};
+
+const validateInstalledAsset = (
+  platform: string,
+  installPath: string,
+  executablePaths: Record<string, string>,
+  spawnSync: SpawnSyncLike
+): PackagedRuntimeAssetValidation => {
+  const executablePermissions = Object.entries(executablePaths).map(
+    ([name, relativePath]) => {
+      const path = safeResolve(installPath, relativePath);
+      return { name, path, ok: executableModeOk(path) };
+    }
+  );
+  const commands = collectCommandValidation(
+    installPath,
+    executablePaths,
+    spawnSync
+  );
+  const loader = collectLoaderValidation(
+    platform,
+    executablePaths,
+    installPath,
+    spawnSync
+  );
+  const errors = [
+    ...executablePermissions.flatMap((entry) =>
+      entry.ok ? [] : [`${entry.name} is not executable (${entry.path})`]
+    ),
+    ...commands.flatMap((entry) =>
+      entry.ok ? [] : [`${entry.name} validation failed: ${entry.message}`]
+    ),
+    ...loader.flatMap((entry) =>
+      entry.ok
+        ? []
+        : [`loader validation failed for ${entry.command}: ${entry.message}`]
+    )
+  ];
+  return {
+    ok: errors.length === 0,
+    executablePermissions,
+    commands,
+    loader,
+    errors
+  };
+};
 
 export const sha256PackagedRuntimeFiles = (
   root: string,
@@ -245,7 +432,9 @@ const assetSourceRoot = (
 const assetStatus = (
   paths: KoedServerPaths,
   root: string | undefined,
-  asset: PackagedRuntimeAssetManifestEntry
+  asset: PackagedRuntimeAssetManifestEntry,
+  platform: string,
+  spawnSync: SpawnSyncLike
 ): PackagedRuntimeAssetStatus => {
   const expectedSha = normalizeSha256(asset.sha256);
   const sourceRoot = assetSourceRoot(root, asset);
@@ -266,9 +455,18 @@ const assetStatus = (
       ? sha256PackagedRuntimeFiles(targetRoot, files)
       : undefined;
   const installed = installedSha256 === expectedSha;
+  const validation = installed
+    ? validateInstalledAsset(
+        platform,
+        targetRoot,
+        asset.executablePaths,
+        spawnSync
+      )
+    : undefined;
   const mismatch =
     (sourceSha256 !== undefined && sourceSha256 !== expectedSha) ||
-    (installedSha256 !== undefined && installedSha256 !== expectedSha);
+    (installedSha256 !== undefined && installedSha256 !== expectedSha) ||
+    validation?.ok === false;
   return {
     id: asset.id,
     platform: asset.platform,
@@ -281,12 +479,22 @@ const assetStatus = (
     expectedFiles: asset.expectedFiles,
     executablePaths: asset.executablePaths,
     installPath: targetRoot,
-    state: installed ? "installed" : mismatch ? "incompatible" : "missing",
-    installed,
+    state:
+      installed && validation?.ok !== false
+        ? "installed"
+        : mismatch
+          ? "incompatible"
+          : "missing",
+    installed: installed && validation?.ok !== false,
     sourceAvailable: missingSource.length === 0,
     sourceSha256,
     installedSha256,
-    missing: [...missingSource, ...missingInstalled]
+    validation,
+    missing: [
+      ...missingSource,
+      ...missingInstalled,
+      ...(validation?.errors ?? [])
+    ]
   };
 };
 
@@ -334,6 +542,7 @@ export const collectPackagedRuntimeStatus = (
   const root = resolvePackagedKoedRuntimeRoot(environment);
   const platform = dependencies.platform ?? process.platform;
   const architecture = dependencies.architecture ?? process.arch;
+  const spawnSync = dependencies.spawnSync ?? (nodeSpawnSync as SpawnSyncLike);
   const loaded = readManifest(paths, root);
   if (!loaded.manifest) {
     return {
@@ -376,7 +585,9 @@ export const collectPackagedRuntimeStatus = (
     architecture,
     loaded.path,
     root,
-    matching.map((asset) => assetStatus(paths, root, asset))
+    matching.map((asset) =>
+      assetStatus(paths, root, asset, platform, spawnSync)
+    )
   );
 };
 
@@ -414,7 +625,11 @@ export const installPackagedRuntime = (
   const platform = dependencies.platform ?? process.platform;
   const architecture = dependencies.architecture ?? process.arch;
   const before = collectPackagedRuntimeStatus(paths, environment, dependencies);
-  if (!root || before.assets.length === 0 || before.state === "incompatible") {
+  const sourceChecksumMismatch = before.assets.some(
+    (asset) =>
+      asset.sourceSha256 !== undefined && asset.sourceSha256 !== asset.sha256
+  );
+  if (!root || before.assets.length === 0 || sourceChecksumMismatch) {
     return { ...before, copiedPaths: [] };
   }
   const copiedPaths: string[] = [];

@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import type { KoedServerComponentStatus } from "./types.js";
@@ -228,7 +228,9 @@ const missingRuntime = (
   state: "not_configured",
   message: `Bundled-local native Embedding Service runtime is missing: ${missing.join(", ")}.`,
   action:
-    "Install the Embedding Service runtime under KOED_HOME/runtime/embedding-service and llama-server under KOED_HOME/runtime/llama.cpp, or set KOED_EMBEDDING_PYTHON_BIN / KOED_EMBEDDING_LLAMA_SERVER_BIN overrides. Source-checkout app and vendor paths are development fallbacks.",
+    runtime.artifactSource === "source-checkout"
+      ? "Install native Embedding Service and llama-server assets with koed-server runtime install --provider homebrew --dependency-mode bundled-local --json, or set KOED_EMBEDDING_PYTHON_BIN / KOED_EMBEDDING_LLAMA_SERVER_BIN overrides."
+      : "Inspect native runtime with koed-server runtime status --provider packaged --json, then install packaged assets with koed-server runtime install --provider packaged --dependency-mode bundled-local --json or Homebrew-backed assets with --provider homebrew.",
   details: {
     missing,
     artifactSource: runtime.artifactSource,
@@ -237,17 +239,31 @@ const missingRuntime = (
   paths: runtime
 });
 
+const isExecutable = (path: string): boolean => {
+  try {
+    return (statSync(path).mode & 0o111) !== 0;
+  } catch {
+    return true;
+  }
+};
+
 const runtimeMissing = (
   runtime: LocalEmbeddingRuntimePaths,
   exists: typeof existsSync
 ): string[] =>
   (
     [
-      ["embedding service app", resolve(runtime.appDir, "app.py")],
-      ["python", runtime.pythonBin],
-      ["llama-server", runtime.llamaServerBin]
-    ] satisfies Array<[string, string]>
-  ).flatMap(([name, file]) => (exists(file) ? [] : [`${name} (${file})`]));
+      ["embedding service app", resolve(runtime.appDir, "app.py"), false],
+      ["python", runtime.pythonBin, true],
+      ["llama-server", runtime.llamaServerBin, true]
+    ] satisfies Array<[string, string, boolean]>
+  ).flatMap(([name, file, mustExecute]) => {
+    if (!exists(file)) return [`${name} (${file})`];
+    if (mustExecute && !isExecutable(file)) {
+      return [`${name} is not executable (${file})`];
+    }
+    return [];
+  });
 
 export const localEmbeddingRuntimeAvailable = (
   paths: KoedServerPaths,

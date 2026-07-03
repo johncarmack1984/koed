@@ -127,6 +127,35 @@ describe("Koed server desktop manager", () => {
     ]);
   });
 
+  it("uses packaged runtime install when packaged manifest is present", async () => {
+    const calls: string[][] = [];
+    const manager = createKoedServerManager({
+      repoRoot: "/repo",
+      cliPath: "/repo/cli.js",
+      environment: { KOED_PACKAGED_RESOURCES_PATH: "/resources" },
+      createCliInvocation: (args) => ({
+        command: "/node",
+        args: ["/repo/cli.js", ...args],
+        env: { KOED_REPO_ROOT: "/repo" }
+      }),
+      existsSync: (path) =>
+        path === "/repo/cli.js" ||
+        path === "/resources/koed-runtime/runtime-asset-manifest.json",
+      execFile: (_command, args, _options, callback) => {
+        calls.push(args);
+        callback(null, JSON.stringify({ ok: true, state: "installed" }), "");
+      },
+      spawn: () => childProcess() as never,
+      openExternal: async () => undefined
+    });
+
+    await expect(manager.handlers.runtime_install!()).resolves.toMatchObject({
+      ok: true,
+      state: "installed"
+    });
+    expect(calls[0]).toContain("packaged");
+  });
+
   it("runs explicit stop through koed-server and clears the managed process", async () => {
     const spawned = childProcess();
     const calls: string[][] = [];

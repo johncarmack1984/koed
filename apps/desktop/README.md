@@ -38,13 +38,19 @@ anything with a clear macOS-only message; set
 skip this smoke.
 
 This local package bundles the Electron shell, packaged renderer assets, the
-`@koed/koed-server` control-plane CLI, and JS/service artifacts for API, Worker,
-Explorer, MCP Server, Supported Capture Hook, DB migrations, and runtime package
-dependencies under `Contents/Resources/koed-runtime`. It does not bundle native
-Postgres/pgvector, native Embedding Service assets, or model files, so missing
-native runtime assets may still show as actionable diagnostics. Point the
-packaged app back at a checkout for developer diagnostics by opting into source
-fallbacks explicitly:
+`@koed/koed-server` control-plane CLI, JS/service artifacts for API, Worker,
+Explorer, MCP Server, Supported Capture Hook, DB migrations, Embedding Service
+app files, and runtime package dependencies under
+`Contents/Resources/koed-runtime`. It can also stage native Postgres/pgvector,
+llama-server, and Embedding Service Python runtime assets from
+`KOED_NATIVE_RUNTIME_SOURCE_DIR`; when present, packaging writes a
+platform/architecture `runtime-asset-manifest.json` so `koed-server runtime
+install --provider packaged --dependency-mode bundled-local --json` can verify
+and install them under `KOED_HOME/runtime`. If no native source is staged,
+missing native runtime assets show as actionable `koed-server runtime
+status/install` diagnostics and Homebrew remains the macOS/Linux fallback.
+Point the packaged app back at a checkout for developer diagnostics by opting
+into source fallbacks explicitly:
 
 ```bash
 KOED_REPO_ROOT=/path/to/koed \
@@ -82,8 +88,10 @@ restart Codex and trust updated hooks if prompted before expecting new captures.
   `electron-builder --mac dir` and disables signing/notarization.
 - `desktop:package:smoke:mac` builds the unsigned app and verifies the packaged
   renderer, bundled `koed-server`, and `koed-runtime` JS/service artifact layout
-  can run without checkout overrides. `desktop:package:smoke` currently aliases
-  the macOS smoke and guards non-Darwin platforms before package execution.
+  can run without checkout overrides. Set `KOED_NATIVE_RUNTIME_SOURCE_DIR` to
+  stage native assets into the package manifest for packaged-provider runtime
+  install tests. `desktop:package:smoke` currently aliases the macOS smoke and
+  guards non-Darwin platforms before package execution.
 - `desktop:package:release` builds macOS `dmg` and `zip` artifacts using the
   release packaging config. Signing/notarization requires a local Developer ID
   identity and release credentials; use `desktop:package` for unsigned local

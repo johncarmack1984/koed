@@ -1817,7 +1817,7 @@ const runStatusCardAction = async (
       appendStatusCardLog(cardId, "status refreshed");
     } else if (action.command === "runtime_install") {
       const confirmed = window.confirm(
-        "Install Homebrew-backed Koed runtime assets? This may run `brew install postgresql@17 pgvector llama.cpp` and link selected binaries under KOED_HOME."
+        "Install Koed native runtime assets? Packaged builds use verified bundled assets when a runtime manifest is present; otherwise this may run `brew install postgresql@17 pgvector llama.cpp` and link selected binaries under KOED_HOME."
       );
       if (!confirmed) {
         appendStatusCardLog(cardId, "runtime install cancelled by Operator");

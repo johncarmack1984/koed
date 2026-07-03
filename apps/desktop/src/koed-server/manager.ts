@@ -196,6 +196,23 @@ const parseCreatedApiToken = (output: string): string | null => {
   return match?.[1] ?? null;
 };
 
+const packagedRuntimeManifestPath = (
+  environment: NodeJS.ProcessEnv
+): string | null => {
+  const resourcesPath = environment.KOED_PACKAGED_RESOURCES_PATH?.trim();
+  return resourcesPath
+    ? resolve(resourcesPath, "koed-runtime", "runtime-asset-manifest.json")
+    : null;
+};
+
+const runtimeInstallProvider = (
+  environment: NodeJS.ProcessEnv,
+  existsSync: (path: string) => boolean
+): "packaged" | "homebrew" => {
+  const manifestPath = packagedRuntimeManifestPath(environment);
+  return manifestPath && existsSync(manifestPath) ? "packaged" : "homebrew";
+};
+
 const readDesktopPorts = (
   environment: NodeJS.ProcessEnv
 ): Record<string, string> => {
@@ -547,7 +564,7 @@ export const createKoedServerManager = ({
             "runtime",
             "install",
             "--provider",
-            "homebrew",
+            runtimeInstallProvider(environment, existsSync),
             "--dependency-mode",
             "bundled-local"
           ],

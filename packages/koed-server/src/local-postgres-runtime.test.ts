@@ -169,6 +169,7 @@ describe("local Postgres runtime", () => {
     );
     expect(commands.map((entry) => entry.command)).toEqual([
       resolve(bin, "initdb"),
+      resolve(bin, "initdb"),
       resolve(bin, "pg_ctl"),
       resolve(bin, "pg_ctl"),
       resolve(bin, "psql"),

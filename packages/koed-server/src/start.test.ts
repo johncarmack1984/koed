@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { createServer, type Server } from "node:net";
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -76,11 +77,17 @@ const createNativeResources = (root: string) => {
   mkdirSync(venvBin, { recursive: true });
   mkdirSync(llamaBin, { recursive: true });
   for (const name of ["initdb", "pg_ctl", "psql"]) {
-    writeFileSync(resolve(pgBin, name), "");
+    const path = resolve(pgBin, name);
+    writeFileSync(path, "");
+    chmodSync(path, 0o755);
   }
   writeFileSync(resolve(appDir, "app.py"), "");
-  writeFileSync(resolve(venvBin, "python"), "");
-  writeFileSync(resolve(llamaBin, "llama-server"), "");
+  const python = resolve(venvBin, "python");
+  const llamaServer = resolve(llamaBin, "llama-server");
+  writeFileSync(python, "");
+  writeFileSync(llamaServer, "");
+  chmodSync(python, 0o755);
+  chmodSync(llamaServer, 0o755);
   return {
     pgBin,
     python: resolve(venvBin, "python"),
