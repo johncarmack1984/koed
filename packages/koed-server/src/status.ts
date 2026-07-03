@@ -10,6 +10,7 @@ import {
   resolveActiveIntegrationApiToken
 } from "./credentials.js";
 import { loadRepoEnv, resolveApiUrl, resolveExplorerUrl } from "./env-file.js";
+import { resolveKoedAppRuntime } from "./app-runtime.js";
 import { collectLocalEmbeddingRuntimeStatus } from "./local-embedding-runtime.js";
 import { collectLocalPostgresRuntimeStatus } from "./local-postgres-runtime.js";
 import {
@@ -505,11 +506,16 @@ const inspectMcp = (
   paths: KoedServerPaths,
   deps: Required<KoedServerStatusDependencies>
 ) => {
-  const cliPath = resolve(paths.repoRoot, "packages/mcp-server/dist/cli.js");
+  const appRuntime = resolveKoedAppRuntime(paths, environment, deps.existsSync);
+  const cliPath = appRuntime.mcpCli;
   if (!deps.existsSync(cliPath)) {
     return notConfigured(
-      "MCP Server build output was not found.",
-      "Run pnpm --filter @koed/mcp-server build or koed-server setup codex --json."
+      appRuntime.kind === "packaged"
+        ? "Packaged MCP Server artifact was not found."
+        : "MCP Server build output was not found.",
+      appRuntime.kind === "packaged"
+        ? "Rebuild Koed Desktop packaging so koed-runtime includes the MCP Server and Supported Capture Hook artifacts."
+        : "Run pnpm --filter @koed/mcp-server build or koed-server setup codex --json."
     );
   }
   const token = resolveActiveIntegrationApiToken(

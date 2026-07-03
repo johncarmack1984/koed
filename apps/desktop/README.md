@@ -37,12 +37,14 @@ anything with a clear macOS-only message; set
 `KOED_DESKTOP_PACKAGE_SMOKE_SKIP_NON_DARWIN=1` only in jobs that intentionally
 skip this smoke.
 
-This local package bundles the Electron shell, packaged renderer assets, and the
-`@koed/koed-server` control-plane CLI. It does not yet bundle the full native
-Koed runtime, native dependency assets, or model files, so missing local runtime
-assets may still show as actionable diagnostics. Point the packaged app back at
-a checkout when you want the local control-plane actions to use repo build
-outputs instead of the bundled CLI:
+This local package bundles the Electron shell, packaged renderer assets, the
+`@koed/koed-server` control-plane CLI, and JS/service artifacts for API, Worker,
+Explorer, MCP Server, Supported Capture Hook, DB migrations, and runtime package
+dependencies under `Contents/Resources/koed-runtime`. It does not bundle native
+Postgres/pgvector, native Embedding Service assets, or model files, so missing
+native runtime assets may still show as actionable diagnostics. Point the
+packaged app back at a checkout when you want the local control-plane actions to
+use repo build outputs instead of packaged JS runtime artifacts:
 
 ```bash
 KOED_REPO_ROOT=/path/to/koed \
@@ -78,9 +80,9 @@ restart Codex and trust updated hooks if prompted before expecting new captures.
 - `desktop:package` (`desktop:package:mac`) builds `apps/desktop/release/mac/Koed.app` with
   `electron-builder --mac dir` and disables signing/notarization.
 - `desktop:package:smoke:mac` builds the unsigned app and verifies the packaged
-  renderer and bundled `koed-server` status/doctor/stop command surface can run
-  without checkout overrides. `desktop:package:smoke` currently aliases the
-  macOS smoke and guards non-Darwin platforms before package execution.
+  renderer, bundled `koed-server`, and `koed-runtime` JS/service artifact layout
+  can run without checkout overrides. `desktop:package:smoke` currently aliases
+  the macOS smoke and guards non-Darwin platforms before package execution.
 - `desktop:package:release` builds macOS `dmg` and `zip` artifacts using the
   release packaging config. Signing/notarization requires a local Developer ID
   identity and release credentials; use `desktop:package` for unsigned local

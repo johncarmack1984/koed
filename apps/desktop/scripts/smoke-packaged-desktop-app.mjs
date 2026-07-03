@@ -31,6 +31,7 @@ const bundledCli = resolve(
   "app.asar/node_modules/@koed/koed-server/dist/cli.js"
 );
 const rendererIndex = resolve(resourcesPath, "app-dist/index.html");
+const runtimeRoot = resolve(resourcesPath, "koed-runtime");
 
 const assertExists = (label, path) => {
   if (!existsSync(path)) {
@@ -129,6 +130,23 @@ assertExists("Packaged app executable", executable);
 assertExists("Packaged app asar", appAsarPath);
 assertExists("Packaged renderer", rendererIndex);
 assertExists("Bundled node entrypoint runner", runner);
+for (const [label, relativePath] of [
+  ["Packaged API artifact", "api/dist/index.js"],
+  ["Packaged Worker artifact", "worker/dist/index.js"],
+  ["Packaged Explorer artifact", "explorer-dist/index.html"],
+  ["Packaged MCP Server artifact", "mcp-server/dist/cli.js"],
+  [
+    "Packaged Supported Capture Hook artifact",
+    "mcp-server/dist/capture-hook.js"
+  ],
+  ["Packaged DB package artifact", "api/node_modules/@koed/db/dist/index.js"],
+  [
+    "Packaged DB migration journal",
+    "api/node_modules/@koed/db/drizzle/meta/_journal.json"
+  ]
+]) {
+  assertExists(label, resolve(runtimeRoot, relativePath));
+}
 assertBundledKoedServerSurface();
 
 const status = runBundledServer(["status", "--json"]);

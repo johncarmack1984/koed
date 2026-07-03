@@ -362,6 +362,14 @@ export const createKoedServerManager = ({
           resolvePromise(current);
           return;
         }
+        if (environment.KOED_PACKAGED_DESKTOP === "1") {
+          resolvePromise({
+            ok: false,
+            error:
+              "Explorer credential is not provisioned. Restart Koed so packaged koed-server can create the Desktop API Token without workspace pnpm scripts."
+          });
+          return;
+        }
 
         execFile(
           "pnpm",
