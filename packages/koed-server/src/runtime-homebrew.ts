@@ -278,7 +278,7 @@ const statusFrom = ({
       message:
         "Homebrew-backed bundled-local runtime provisioning is supported on macOS, Linux, and WSL only.",
       action:
-        "Use external dependency mode or a supported Homebrew environment on macOS, Linux, or WSL."
+        "Use external dependency mode or a supported Homebrew/Linuxbrew environment on macOS, Linux, or WSL."
     };
   }
 
@@ -302,7 +302,7 @@ const statusFrom = ({
       message:
         "Homebrew is required for Homebrew-backed bundled-local runtime provisioning.",
       action:
-        "Install Homebrew, then run koed-server runtime install --provider homebrew --dependency-mode bundled-local --json."
+        "Install Homebrew or Linuxbrew on macOS, Linux, or WSL, then run koed-server runtime install --provider homebrew --dependency-mode bundled-local --json."
     };
   }
   const packages = REQUIRED_PACKAGES.map((name) =>
@@ -443,7 +443,7 @@ export const installHomebrewRuntime = (
       message:
         "Homebrew is required before installing bundled-local runtime assets.",
       action:
-        "Install Homebrew, then rerun koed-server runtime install --provider homebrew --dependency-mode bundled-local --json.",
+        "Install Homebrew or Linuxbrew on macOS, Linux, or WSL, then rerun koed-server runtime install --provider homebrew --dependency-mode bundled-local --json.",
       installedPackages: [],
       linkedPaths: []
     };

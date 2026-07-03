@@ -184,8 +184,8 @@ const missingRuntime = (
   action:
     runtime.artifactSource === "source-checkout" ||
     runtime.artifactSource === "explicit-override"
-      ? "Install bundled Postgres/pgvector resources with koed-server runtime install --provider homebrew --dependency-mode bundled-local --json, or set KOED_POSTGRES_BIN_DIR / KOED_POSTGRES_*_BIN overrides."
-      : "Inspect native runtime with koed-server runtime status --provider packaged --json, then install packaged assets with koed-server runtime install --provider packaged --dependency-mode bundled-local --json or Homebrew-backed assets with --provider homebrew.",
+      ? "Install bundled Postgres/pgvector resources with koed-server runtime install --provider homebrew --dependency-mode bundled-local --json on macOS, Linux, or WSL, or set KOED_POSTGRES_BIN_DIR / KOED_POSTGRES_*_BIN overrides."
+      : "Inspect native runtime with koed-server runtime status --provider packaged --json, then install packaged assets with koed-server runtime install --provider packaged --dependency-mode bundled-local --json or Homebrew-backed assets with --provider homebrew on macOS, Linux, or WSL.",
   details: { missing, artifactSource: runtime.artifactSource },
   paths: safeRuntimePaths(runtime)
 });

@@ -185,6 +185,7 @@ describe("local Embedding Service runtime", () => {
 
     expect(status.state).toBe("not_configured");
     expect(JSON.stringify(status)).not.toContain("secret");
+    expect(status.action).toContain("WSL");
     expect(status.details?.missing).toEqual(
       expect.arrayContaining([
         expect.stringContaining("python"),

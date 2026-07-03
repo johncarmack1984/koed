@@ -139,6 +139,7 @@ describe("local Postgres runtime", () => {
 
     expect(status.state).toBe("not_configured");
     expect(status.message).toContain("initdb");
+    expect(status.action).toContain("WSL");
     expect(status.action).toContain("KOED_POSTGRES_BIN_DIR");
   });
 

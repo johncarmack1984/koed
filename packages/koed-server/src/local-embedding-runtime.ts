@@ -229,8 +229,8 @@ const missingRuntime = (
   message: `Bundled-local native Embedding Service runtime is missing: ${missing.join(", ")}.`,
   action:
     runtime.artifactSource === "source-checkout"
-      ? "Install native Embedding Service and llama-server assets with koed-server runtime install --provider homebrew --dependency-mode bundled-local --json, or set KOED_EMBEDDING_PYTHON_BIN / KOED_EMBEDDING_LLAMA_SERVER_BIN overrides."
-      : "Inspect native runtime with koed-server runtime status --provider packaged --json, then install packaged assets with koed-server runtime install --provider packaged --dependency-mode bundled-local --json or Homebrew-backed assets with --provider homebrew.",
+      ? "Install native Embedding Service and llama-server assets with koed-server runtime install --provider homebrew --dependency-mode bundled-local --json on macOS, Linux, or WSL, or set KOED_EMBEDDING_PYTHON_BIN / KOED_EMBEDDING_LLAMA_SERVER_BIN overrides."
+      : "Inspect native runtime with koed-server runtime status --provider packaged --json, then install packaged assets with koed-server runtime install --provider packaged --dependency-mode bundled-local --json or Homebrew-backed assets with --provider homebrew on macOS, Linux, or WSL.",
   details: {
     missing,
     artifactSource: runtime.artifactSource,
