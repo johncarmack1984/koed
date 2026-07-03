@@ -91,6 +91,36 @@ const parseJsonOutput = (label, output) => {
   }
 };
 
+const sourceCheckoutRoot = resolve(desktopRoot, "..", "..");
+
+const sourcePathHits = (value, path = []) => {
+  if (typeof value === "string") {
+    return value.includes(sourceCheckoutRoot) && !value.includes(resourcesPath)
+      ? [{ path: path.join("."), value }]
+      : [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((entry, index) =>
+      sourcePathHits(entry, [...path, String(index)])
+    );
+  }
+  if (value && typeof value === "object") {
+    return Object.entries(value).flatMap(([key, entry]) =>
+      sourcePathHits(entry, [...path, key])
+    );
+  }
+  return [];
+};
+
+const assertNoSourceCheckoutResolution = (label, payload) => {
+  const hits = sourcePathHits(payload);
+  if (hits.length > 0) {
+    throw new Error(
+      `${label} resolved packaged runtime artifacts from source checkout: ${JSON.stringify(hits, null, 2)}`
+    );
+  }
+};
+
 const runBundledServer = (args, env = {}) => {
   const koedHome = mkdtempSync(resolve(tmpdir(), "koed-desktop-smoke-"));
   try {
@@ -104,7 +134,8 @@ const runBundledServer = (args, env = {}) => {
           ...env,
           ELECTRON_RUN_AS_NODE: "1",
           KOED_HOME: koedHome,
-          KOED_REPO_ROOT: resourcesPath,
+          KOED_PACKAGED_DESKTOP: "1",
+          KOED_PACKAGED_RESOURCES_PATH: resourcesPath,
           KOED_RUNTIME_MODE: "local-personal",
           KOED_DEPENDENCY_MODE: "bundled-local",
           WORK_QUEUE_BACKEND: "local"
@@ -161,6 +192,7 @@ if (typeof statusJson.ok !== "boolean" || !statusJson.state) {
     `status --json did not include renderable status fields: ${status.stdout}`
   );
 }
+assertNoSourceCheckoutResolution("status --json", statusJson);
 
 const doctor = runBundledServer(["doctor", "--json"]);
 const doctorJson = parseJsonOutput("doctor --json", doctor.stdout);
@@ -169,6 +201,7 @@ if (typeof doctorJson.ok !== "boolean" || !doctorJson.state) {
     `doctor --json did not include renderable status fields: ${doctor.stdout}`
   );
 }
+assertNoSourceCheckoutResolution("doctor --json", doctorJson);
 
 const stop = runBundledServer(["stop", "--json"]);
 const stopJson = parseJsonOutput("stop --json", stop.stdout);

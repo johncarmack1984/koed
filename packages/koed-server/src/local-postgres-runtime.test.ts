@@ -82,6 +82,53 @@ describe("local Postgres runtime", () => {
     ).toBe("native");
   });
 
+  it("prefers packaged Postgres resources over source checkout in packaged mode", () => {
+    const root = tempDir();
+    mkdirSync(resolve(root, "koed-runtime", "postgres", "bin"), {
+      recursive: true
+    });
+    mkdirSync(resolve(root, "vendor", "postgres", "bin"), {
+      recursive: true
+    });
+    for (const entry of ["initdb", "pg_ctl", "psql"]) {
+      writeFileSync(
+        resolve(root, "koed-runtime", "postgres", "bin", entry),
+        ""
+      );
+      writeFileSync(resolve(root, "vendor", "postgres", "bin", entry), "");
+    }
+
+    const runtime = resolveLocalPostgresRuntimePaths(paths(root), {
+      KOED_PACKAGED_DESKTOP: "1",
+      KOED_PACKAGED_RESOURCES_PATH: root
+    });
+
+    expect(runtime.artifactSource).toBe("packaged-resource");
+    expect(runtime.pgCtlBin).toBe(
+      resolve(root, "koed-runtime", "postgres", "bin", "pg_ctl")
+    );
+  });
+
+  it("rejects source checkout Postgres fallback in packaged mode", () => {
+    const root = tempDir();
+    mkdirSync(resolve(root, "vendor", "postgres", "bin"), {
+      recursive: true
+    });
+    for (const entry of ["initdb", "pg_ctl", "psql"]) {
+      writeFileSync(resolve(root, "vendor", "postgres", "bin", entry), "");
+    }
+
+    const runtime = resolveLocalPostgresRuntimePaths(paths(root), {
+      KOED_PACKAGED_DESKTOP: "1",
+      KOED_PACKAGED_RESOURCES_PATH: root
+    });
+
+    expect(runtime.artifactSource).toBe("koed-home-runtime");
+    expect(runtime.pgCtlBin).toBe(
+      resolve(root, "runtime", "postgres", "bin", "pg_ctl")
+    );
+  });
+
   it("reports missing native binaries with an actionable status", () => {
     const root = tempDir();
     const status = collectLocalPostgresRuntimeStatus(

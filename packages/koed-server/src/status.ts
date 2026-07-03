@@ -515,7 +515,12 @@ const inspectMcp = (
         : "MCP Server build output was not found.",
       appRuntime.kind === "packaged"
         ? "Rebuild Koed Desktop packaging so koed-runtime includes the MCP Server and Supported Capture Hook artifacts."
-        : "Run pnpm --filter @koed/mcp-server build or koed-server setup codex --json."
+        : "Run pnpm --filter @koed/mcp-server build or koed-server setup codex --json.",
+      {
+        artifactSource: appRuntime.artifactSource,
+        runtimeRoot: appRuntime.root,
+        missing: appRuntime.missing
+      }
     );
   }
   const token = resolveActiveIntegrationApiToken(
@@ -541,12 +546,20 @@ const inspectMcp = (
     stdio: ["ignore", "pipe", "pipe"]
   });
   if (result.status === 0) {
-    return healthy("MCP Server doctor passed.");
+    return healthy("MCP Server doctor passed.", {
+      artifactSource: appRuntime.artifactSource,
+      runtimeRoot: appRuntime.root
+    });
   }
   return needsAttention(
     "MCP Server doctor failed.",
     "Run koed-server doctor --json for details.",
-    { stderr: result.stderr.trim(), stdout: result.stdout.trim() }
+    {
+      stderr: result.stderr.trim(),
+      stdout: result.stdout.trim(),
+      artifactSource: appRuntime.artifactSource,
+      runtimeRoot: appRuntime.root
+    }
   );
 };
 

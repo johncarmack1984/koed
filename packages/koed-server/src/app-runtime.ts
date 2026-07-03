@@ -1,11 +1,19 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { KoedServerPaths } from "./paths.js";
+import {
+  canUseSourceCheckoutFallback,
+  isPackagedRuntimeMode,
+  resolvePackagedKoedRuntimeRoot,
+  trimRuntimeValue,
+  type RuntimeArtifactSource
+} from "./runtime-artifact-source.js";
 
 export type KoedAppRuntimeKind = "source" | "packaged";
 
 export interface KoedAppRuntime {
   kind: KoedAppRuntimeKind;
+  artifactSource: RuntimeArtifactSource;
   root: string;
   apiEntry: string;
   workerEntry: string;
@@ -16,16 +24,12 @@ export interface KoedAppRuntime {
   missing: string[];
 }
 
-const packagedRuntimeRoot = (
-  paths: KoedServerPaths,
-  environment: NodeJS.ProcessEnv
-): string =>
-  environment.KOED_JS_RUNTIME_ROOT?.trim()
-    ? resolve(environment.KOED_JS_RUNTIME_ROOT)
-    : resolve(paths.repoRoot, "koed-runtime");
+const koedHomeRuntimeRoot = (paths: KoedServerPaths): string =>
+  resolve(paths.koedHome, "runtime", "koed-runtime");
 
 const packagedRuntime = (
   root: string,
+  artifactSource: RuntimeArtifactSource,
   exists: (path: string) => boolean
 ): KoedAppRuntime => {
   const apiEntry = resolve(root, "api", "dist", "index.js");
@@ -45,6 +49,7 @@ const packagedRuntime = (
   ];
   return {
     kind: "packaged",
+    artifactSource,
     root,
     apiEntry,
     workerEntry,
@@ -83,6 +88,7 @@ const sourceRuntime = (
   ];
   return {
     kind: "source",
+    artifactSource: "source-checkout",
     root,
     apiEntry,
     workerEntry,
@@ -99,23 +105,55 @@ export const resolveKoedAppRuntime = (
   environment: NodeJS.ProcessEnv = process.env,
   exists: (path: string) => boolean = existsSync
 ): KoedAppRuntime => {
-  const explicitPackagedRoot = environment.KOED_JS_RUNTIME_ROOT?.trim();
+  const explicitPackagedRoot = trimRuntimeValue(
+    environment.KOED_JS_RUNTIME_ROOT
+  );
   if (explicitPackagedRoot) {
-    return packagedRuntime(resolve(explicitPackagedRoot), exists);
+    return packagedRuntime(
+      resolve(explicitPackagedRoot),
+      "explicit-override",
+      exists
+    );
   }
 
-  const packaged = packagedRuntime(
-    packagedRuntimeRoot(paths, environment),
+  const koedHomeRuntime = packagedRuntime(
+    koedHomeRuntimeRoot(paths),
+    "koed-home-runtime",
     exists
   );
-  if (
-    environment.KOED_PACKAGED_DESKTOP === "1" ||
-    packaged.missing.length === 0
-  ) {
-    return packaged;
+  if (koedHomeRuntime.missing.length === 0) {
+    return koedHomeRuntime;
   }
 
-  return sourceRuntime(paths, exists);
+  const packagedResourcesRoot = resolvePackagedKoedRuntimeRoot(environment);
+  const packagedResourcesRuntime = packagedResourcesRoot
+    ? packagedRuntime(packagedResourcesRoot, "packaged-resource", exists)
+    : null;
+  if (packagedResourcesRuntime?.missing.length === 0) {
+    return packagedResourcesRuntime;
+  }
+
+  const legacyPackagedRuntime = packagedRuntime(
+    resolve(paths.repoRoot, "koed-runtime"),
+    "packaged-resource",
+    exists
+  );
+  if (legacyPackagedRuntime.missing.length === 0) {
+    return legacyPackagedRuntime;
+  }
+
+  if (
+    isPackagedRuntimeMode(environment) &&
+    !canUseSourceCheckoutFallback(environment)
+  ) {
+    return packagedResourcesRuntime ?? legacyPackagedRuntime ?? koedHomeRuntime;
+  }
+
+  if (canUseSourceCheckoutFallback(environment)) {
+    return sourceRuntime(paths, exists);
+  }
+
+  return packagedResourcesRuntime ?? legacyPackagedRuntime ?? koedHomeRuntime;
 };
 
 export const assertKoedAppRuntimeAvailable = (

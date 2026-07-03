@@ -30,15 +30,20 @@ describe("Koed server desktop manager", () => {
   });
 
   it("defaults packaged Desktop managed local server to bundled-local", () => {
-    expect(
-      createKoedEnvironment("/repo", {}, { desktopManagedLocal: true })
-    ).toMatchObject({
-      KOED_REPO_ROOT: "/repo",
+    const packagedEnvironment = createKoedEnvironment(
+      "/repo",
+      {},
+      { desktopManagedLocal: true, packagedResourcesPath: "/resources" }
+    );
+    expect(packagedEnvironment).toMatchObject({
       KOED_RUNTIME_MODE: "local-personal",
       KOED_DEPENDENCY_MODE: "bundled-local",
       WORK_QUEUE_BACKEND: "local",
-      KOED_AUTO_PORTS: "1"
+      KOED_AUTO_PORTS: "1",
+      KOED_PACKAGED_DESKTOP: "1",
+      KOED_PACKAGED_RESOURCES_PATH: "/resources"
     });
+    expect(packagedEnvironment).not.toHaveProperty("KOED_REPO_ROOT");
     expect(
       createKoedEnvironment(
         "/repo",

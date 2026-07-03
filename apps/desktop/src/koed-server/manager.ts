@@ -255,10 +255,15 @@ const hasHealthyApi = (value: unknown): boolean => {
 export const createKoedEnvironment = (
   repoRoot: string,
   environment: NodeJS.ProcessEnv,
-  options: { desktopManagedLocal?: boolean } = {}
+  options: {
+    desktopManagedLocal?: boolean;
+    packagedResourcesPath?: string;
+  } = {}
 ): NodeJS.ProcessEnv => ({
   ...environment,
-  KOED_REPO_ROOT: environment.KOED_REPO_ROOT ?? repoRoot,
+  ...(!options.desktopManagedLocal || environment.KOED_REPO_ROOT?.trim()
+    ? { KOED_REPO_ROOT: environment.KOED_REPO_ROOT ?? repoRoot }
+    : {}),
   ...(options.desktopManagedLocal
     ? {
         KOED_RUNTIME_MODE: environment.KOED_RUNTIME_MODE ?? "local-personal",
@@ -266,7 +271,11 @@ export const createKoedEnvironment = (
           environment.KOED_DEPENDENCY_MODE ?? "bundled-local",
         WORK_QUEUE_BACKEND: environment.WORK_QUEUE_BACKEND ?? "local",
         KOED_AUTO_PORTS: environment.KOED_AUTO_PORTS ?? "1",
-        KOED_PACKAGED_DESKTOP: environment.KOED_PACKAGED_DESKTOP ?? "1"
+        KOED_PACKAGED_DESKTOP: environment.KOED_PACKAGED_DESKTOP ?? "1",
+        KOED_PACKAGED_RESOURCES_PATH:
+          environment.KOED_PACKAGED_RESOURCES_PATH ??
+          options.packagedResourcesPath ??
+          repoRoot
       }
     : {})
 });

@@ -35,6 +35,10 @@ const { repoRoot, cliPath: koedServerCli } = resolveKoedServerPaths({
   resourcesPath: process.resourcesPath
 });
 const appName = "Koed";
+const koedEnvironment = createKoedEnvironment(repoRoot, process.env, {
+  desktopManagedLocal: app.isPackaged,
+  packagedResourcesPath: process.resourcesPath
+});
 const desktopIconPath = resolve(repoRoot, "apps/desktop/assets/koed-icon.png");
 
 app.setName(appName);
@@ -49,16 +53,14 @@ protocol.registerSchemesAsPrivileged([
 const koedServer = createKoedServerManager({
   repoRoot,
   cliPath: koedServerCli,
-  environment: process.env,
+  environment: koedEnvironment,
   createCliInvocation: (args) =>
     createKoedServerCliInvocation(koedServerCli, args, {
       appIsPackaged: app.isPackaged,
       electronExecPath: process.execPath,
       platform: process.platform,
       resourcesPath: process.resourcesPath,
-      environment: createKoedEnvironment(repoRoot, process.env, {
-        desktopManagedLocal: app.isPackaged
-      }),
+      environment: koedEnvironment,
       existsSync
     }),
   existsSync,

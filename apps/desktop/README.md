@@ -43,11 +43,12 @@ Explorer, MCP Server, Supported Capture Hook, DB migrations, and runtime package
 dependencies under `Contents/Resources/koed-runtime`. It does not bundle native
 Postgres/pgvector, native Embedding Service assets, or model files, so missing
 native runtime assets may still show as actionable diagnostics. Point the
-packaged app back at a checkout when you want the local control-plane actions to
-use repo build outputs instead of packaged JS runtime artifacts:
+packaged app back at a checkout for developer diagnostics by opting into source
+fallbacks explicitly:
 
 ```bash
 KOED_REPO_ROOT=/path/to/koed \
+KOED_ALLOW_PACKAGED_SOURCE_FALLBACK=1 \
   apps/desktop/release/mac/Koed.app/Contents/MacOS/Koed
 ```
 
@@ -91,4 +92,6 @@ restart Codex and trust updated hooks if prompted before expecting new captures.
   templates in `build/` for signed release artifacts.
 - The packaged desktop shell resolves the bundled
   `node_modules/@koed/koed-server/dist/cli.js` by default; `KOED_REPO_ROOT` and
-  `KOED_SERVER_CLI` remain available for developer overrides.
+  `KOED_SERVER_CLI` remain available for developer control-plane overrides.
+  Source-checkout runtime fallback also requires
+  `KOED_ALLOW_PACKAGED_SOURCE_FALLBACK=1`.

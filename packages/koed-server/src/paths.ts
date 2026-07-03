@@ -2,6 +2,10 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  isPackagedRuntimeMode,
+  resolvePackagedResourcesPath
+} from "./runtime-artifact-source.js";
 
 export interface KoedServerPaths {
   koedHome: string;
@@ -30,6 +34,13 @@ export const resolveRepoRoot = (
   const fromEnv = environment.KOED_REPO_ROOT?.trim();
   if (fromEnv) {
     return resolve(fromEnv);
+  }
+
+  if (isPackagedRuntimeMode(environment)) {
+    const resourcesPath = resolvePackagedResourcesPath(environment);
+    if (resourcesPath) {
+      return resourcesPath;
+    }
   }
 
   // dist/ -> package root -> packages/koed-server -> repo root
