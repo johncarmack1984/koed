@@ -88,6 +88,18 @@ mismatch and offer **Fix Codex integration**. The repair action rewrites the
 Koed-managed Codex block and hook config for the currently running Desktop API;
 restart Codex and trust updated hooks if prompted before expecting new captures.
 
+## Packaged First-Run
+
+Packaged Desktop uses `Koed` app metadata, `assets/icon.icns`, and
+`assets/koed-icon.png` for branding. First run starts bundled-local
+`koed-server`, allocates ports, and verifies runtime/model assets under
+`KOED_HOME` before the main window reports healthy. Packaged release
+signing/notarization is not turned on in this repo yet; `desktop:package` and
+`desktop:package:smoke:mac` are unsigned local smoke builds, and
+`desktop:package:release` still needs local Developer ID credentials and
+release setup. Native Windows packaged app support is not shipped here;
+Linux/WSL use is limited to smoke and unpacked-artifact testing.
+
 ## Notes
 
 - `desktop:start` builds the app and launches Electron in source-checkout mode.

@@ -22,7 +22,7 @@ need them.
 
 - macOS, Linux, or WSL.
 - Node.js and pnpm.
-- Homebrew.
+- Homebrew or packaged native runtime assets for the bundled-local path. External dependency mode does not require Homebrew.
 - Codex installed and signed in.
 
 ### Start Koed
@@ -40,6 +40,8 @@ KOED_DEPENDENCY_MODE=bundled-local pnpm desktop:start
 
 Koed opens when setup is complete and configures Codex automatically.
 
+Packaged Desktop follows the same local-personal bundled-local flow, but it starts its managed `koed-server` from the app bundle, prefers packaged native runtime assets, and keeps `KOED_HOME` state outside the source checkout. See [Koed Desktop](apps/desktop/README.md) for packaged first-run, signing/notarization, and smoke details.
+
 To stop Koed later:
 
 ```bash
@@ -50,8 +52,9 @@ node packages/koed-server/dist/cli.js stop --json
 
 The README keeps to one basic local path. For other options, see:
 
-- [Running Koed](docs/running-koed.md) for Docker Compose, manual server
-  commands, alternate ports, smoke tests, and desktop development.
+- [Running Koed](docs/running-koed.md) for external dependency mode, manual
+  server commands, alternate ports, smoke tests, packaged first-run notes, and
+  desktop development.
 - [Configuration](docs/configuration.md) for environment variables, runtime
   modes, model overrides, logging, and production settings.
 - [Codex integration](docs/codex-integration.md) for manual Codex setup and

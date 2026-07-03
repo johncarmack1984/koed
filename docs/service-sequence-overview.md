@@ -24,7 +24,8 @@ MCP-side workers.
 - **Koed Server Control Plane**: the local `koed-server` supervisor surface
   that owns `KOED_HOME`, starts Koed app processes, connects to configured
   dependency endpoints, and reports setup/readiness status for headless and
-  desktop use.
+  desktop use on macOS, Linux, and WSL. Native Windows packaged app support is
+  not part of this build.
 
 ## Local Service Startup
 
@@ -37,7 +38,9 @@ MCP-side workers.
    `runtimeMode=local-personal` and `dependencyMode=bundled-local` unless the
    Operator overrides those values. Desktop bundled-local startup allocates free
    local API, Explorer, Postgres, and Embedding Service ports and persists them
-   under `KOED_HOME/config/local-ports.json` for stable later launches.
+   under `KOED_HOME/config/local-ports.json` for stable later launches. The same
+   control plane uses `KOED_HOME/config`, `run`, `logs`, `data`, `models`,
+   `cache`, and `runtime` as durable local state.
 3. In the current source-checkout path, bare `koed-server` defaults to external
    dependency mode instead of inferring bundled-local from an empty config. The
    Operator starts Postgres/pgvector, Redis/BullMQ, and the Embedding Service
@@ -69,9 +72,11 @@ MCP-side workers.
    under `KOED_HOME/runtime`. Linux packaged native assets target glibc 2.35+
    distributions such as Ubuntu 22.04/Debian 12 or newer; unsupported hosts fail
    with explicit guidance instead of Docker Compose or source-checkout fallback.
-   Model assets are installed out of band with `koed-server models install`,
-   which requires configured artifact URLs and SHA-256 checksums before writing
-   to `KOED_HOME/models`. See `docs/native-runtime-assets.md`.
+   Native Windows packaged app support is not shipped in this build; use WSL for
+   local development. Model assets are installed out of band with
+   `koed-server models install`, which requires configured artifact URLs and
+   SHA-256 checksums before writing to `KOED_HOME/models`. See
+   `docs/native-runtime-assets.md`.
 5. `pnpm smoke:bundled-local -- --full --install-runtime --json` verifies this
    native path with an isolated temporary `KOED_HOME`, optional Homebrew-backed
    runtime install for that temporary home, temporary host ports, native resource

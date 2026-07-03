@@ -2,7 +2,7 @@
 
 Use `.env.example` as the canonical Koed environment example. It is the starting point for local and production deployments.
 
-The README Quickstart covers the basic bundled-local setup. This page is the advanced reference for environment variables, runtime modes, external dependency URLs, and production settings.
+The README Quickstart covers the basic bundled-local setup and packaged Desktop first-run. This page is the advanced reference for environment variables, runtime modes, external dependency URLs, and production settings.
 
 For any local deployment, start by running:
 
@@ -67,6 +67,26 @@ pgvector is enabled, the configured work queue backend is ready, and the
 Embedding Service reports the expected model and dimensions. Doctor repair
 actions point to migrations, pgvector setup, dependency URLs, queue backend, or
 model/runtime mismatch.
+
+## KOED_HOME Layout
+
+Koed-owned local state lives under `KOED_HOME`:
+
+- `config/` for `server.json`, `local-ports.json`, and `explorer-token.json`
+- `run/` for `koed-server.json`, `last-verification.json`, and native runtime state
+- `logs/` for service logs, including `postgres.log`
+- `data/` for native database files, including `data/postgres`
+- `models/` for embedding and reranker model files
+- `cache/` for installer metadata and downloaded artifact cache
+- `runtime/` for bundled or packaged native runtime binaries
+
+Packaged Desktop, headless local-personal startup, and repair commands all read and write this same layout.
+
+## Platform Expectations
+
+- macOS: packaged Desktop and bundled-local provisioning path.
+- Linux and WSL: headless development, smoke, and the same CLI contracts when bundled-local runtime assets are available.
+- Native Windows packaged app support: not shipped in this build; use WSL for local development.
 
 ## Required Deployment Values
 
