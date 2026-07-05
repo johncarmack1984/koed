@@ -2,7 +2,10 @@ import {
   spawnSync as nodeSpawnSync,
   type SpawnSyncReturns
 } from "node:child_process";
-import { writeFileSync as nodeWriteFileSync } from "node:fs";
+import {
+  readFileSync as nodeReadFileSync,
+  writeFileSync as nodeWriteFileSync
+} from "node:fs";
 import { resolve } from "node:path";
 import {
   resolveActiveIntegrationApiToken,
@@ -12,6 +15,7 @@ import {
 import { loadRepoEnv, resolveApiUrl, resolveExplorerUrl } from "./env-file.js";
 import { ensureKoedHome, resolveKoedServerPaths } from "./paths.js";
 import { applyPersistedLocalPorts } from "./ports.js";
+import type { KoedServerRuntimeState } from "./types.js";
 
 export interface KoedServerSetupCodexResult {
   ok: boolean;
@@ -32,6 +36,32 @@ type SpawnSyncLike = (
   args: string[],
   options?: Parameters<typeof nodeSpawnSync>[2]
 ) => SpawnSyncReturns<string>;
+
+const readRuntimeState = (
+  path: string,
+  readFileSync: typeof nodeReadFileSync = nodeReadFileSync
+): KoedServerRuntimeState | null => {
+  try {
+    return JSON.parse(
+      String(readFileSync(path, "utf8"))
+    ) as KoedServerRuntimeState;
+  } catch {
+    return null;
+  }
+};
+
+const applyActiveRuntimeUrls = (
+  environment: NodeJS.ProcessEnv,
+  runtime: KoedServerRuntimeState | null
+): NodeJS.ProcessEnv => ({
+  ...environment,
+  ...(runtime?.apiUrl && !environment.MEMORY_API_URL
+    ? { MEMORY_API_URL: runtime.apiUrl }
+    : {}),
+  ...(runtime?.explorerUrl && !environment.KOED_EXPLORER_URL
+    ? { KOED_EXPLORER_URL: runtime.explorerUrl }
+    : {})
+});
 
 export interface KoedServerSetupOptions {
   environment?: NodeJS.ProcessEnv;
@@ -63,7 +93,10 @@ export const repairCodexIntegration = ({
 > = {}): KoedServerRepairCodexResult => {
   const paths = resolveKoedServerPaths(environment);
   ensureKoedHome(paths);
-  environment = applyPersistedLocalPorts(paths, environment);
+  environment = applyActiveRuntimeUrls(
+    applyPersistedLocalPorts(paths, environment),
+    readRuntimeState(paths.runtimeStatePath)
+  );
   const repoEnv = loadRepoEnv(paths.repoRoot);
   const apiUrl = resolveApiUrl(environment, repoEnv);
   const checkedAt = now().toISOString();
@@ -157,7 +190,10 @@ export const setupCodex = ({
 }: KoedServerSetupOptions = {}): KoedServerSetupCodexResult => {
   const paths = resolveKoedServerPaths(environment);
   ensureKoedHome(paths);
-  environment = applyPersistedLocalPorts(paths, environment);
+  environment = applyActiveRuntimeUrls(
+    applyPersistedLocalPorts(paths, environment),
+    readRuntimeState(paths.runtimeStatePath)
+  );
   const repoEnv = loadRepoEnv(paths.repoRoot);
   const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
@@ -181,7 +217,8 @@ export const setupCodex = ({
     cwd: paths.repoRoot,
     env: childEnv,
     encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 300_000
   });
 
   const payload: KoedServerSetupCodexResult = result.error
