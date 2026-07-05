@@ -27,6 +27,12 @@ describe("KOED_HOME resolution", () => {
     expect(resolveKoedHome({ KOED_HOME: home })).toBe(resolve(home));
   });
 
+  it("rejects documentation placeholder KOED_HOME values", () => {
+    expect(() => resolveKoedHome({ KOED_HOME: "/path/to" })).toThrow(
+      "KOED_HOME is set to the documentation placeholder /path/to."
+    );
+  });
+
   it("resolves packaged resources as repo root when KOED_REPO_ROOT is unset", () => {
     const home = tempDir();
     const resources = tempDir();

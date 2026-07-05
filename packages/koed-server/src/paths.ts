@@ -47,9 +47,22 @@ export const resolveRepoRoot = (
   return resolve(packageDir, "..", "..");
 };
 
+const documentationPlaceholderPath = (value: string): boolean => {
+  const normalized = resolve(value);
+  return normalized === "/path" || normalized === "/path/to" || normalized.startsWith("/path/to/");
+};
+
 export const resolveKoedHome = (
   environment: NodeJS.ProcessEnv = process.env
-): string => resolve(environment.KOED_HOME?.trim() || `${homedir()}/.koed`);
+): string => {
+  const configured = environment.KOED_HOME?.trim();
+  if (configured && documentationPlaceholderPath(configured)) {
+    throw new Error(
+      `KOED_HOME is set to the documentation placeholder ${configured}. Unset KOED_HOME or set it to a writable local state directory such as ${resolve(`${homedir()}/.koed`)}.`
+    );
+  }
+  return resolve(configured || `${homedir()}/.koed`);
+};
 
 export const resolveKoedServerPaths = (
   environment: NodeJS.ProcessEnv = process.env
