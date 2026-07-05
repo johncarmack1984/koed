@@ -1,4 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  type PathLike
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -324,7 +330,7 @@ describe("status and doctor JSON contracts", () => {
       MEMORY_API_TOKEN: "token"
     };
     const dependencies = {
-      existsSync: (filePath: string) =>
+      existsSync: (filePath: PathLike) =>
         String(filePath).startsWith(resolve(root, "koed-runtime")) ||
         String(filePath).endsWith("PG_VERSION"),
       fetch: async (url: string | URL | Request) =>
