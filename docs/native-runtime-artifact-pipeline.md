@@ -45,7 +45,7 @@ The current builder accepts `KOED_NATIVE_RUNTIME_SOURCE_DIR` for local layout te
 
 `.github/workflows/ci.yml` includes a manual `native-runtime-macos-arm64` job. It is intentionally not part of normal pull-request CI because macOS native artifact builds are expensive and should run on dependency bumps or explicit review.
 
-The uploaded artifact contains the runtime tarball, sidecar SHA-256, and provenance metadata.
+The uploaded artifact contains the runtime tarball, sidecar SHA-256, and provenance metadata. When that manual artifact job runs, CI also runs `packaged-desktop-native-smoke`: it downloads the artifact, extracts `koed-runtime/`, validates it, sets `KOED_NATIVE_RUNTIME_SOURCE_DIR`, packages Desktop, and runs the full packaged smoke. The existing `packaged-desktop-smoke` job remains a missing-assets negative smoke and does not set `KOED_NATIVE_RUNTIME_SOURCE_DIR`.
 
 ## Desktop consumption
 

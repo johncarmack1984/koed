@@ -189,6 +189,55 @@ jobs:
       - name: Packaged Desktop missing-asset smoke
         run: pnpm desktop:package:smoke:mac -- --json --missing-assets
 
+  packaged-desktop-native-smoke:
+    name: Packaged Desktop native smoke
+    runs-on: macos-14
+    timeout-minutes: 45
+    needs: native-runtime-macos-arm64
+    if: github.event_name == 'workflow_dispatch' && inputs.build_native_runtime_macos_arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 11.1.2
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 24.13.1
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download native runtime artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: koed-native-runtime-macos-arm64
+          path: /tmp/koed-native-runtime-artifact
+
+      - name: Extract native runtime artifact
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/koed-native-runtime-extracted
+          tarball="$(find /tmp/koed-native-runtime-artifact -name 'koed-native-runtime-macos-arm64-*.tar.gz' -print -quit)"
+          test -n "${tarball}"
+          tar -xzf "${tarball}" -C /tmp/koed-native-runtime-extracted
+          test -d /tmp/koed-native-runtime-extracted/koed-runtime
+
+      - name: Validate native runtime artifact
+        run: pnpm native-runtime:validate -- --runtime-root /tmp/koed-native-runtime-extracted/koed-runtime --platform darwin --json
+
+      - name: Packaged Desktop native smoke
+        env:
+          KOED_NATIVE_RUNTIME_SOURCE_DIR: /tmp/koed-native-runtime-extracted/koed-runtime
+        run: pnpm desktop:package:smoke:mac -- --json
+
   python-dependencies:
     name: Python dependency resolution
     runs-on: blacksmith-4vcpu-ubuntu-2404
