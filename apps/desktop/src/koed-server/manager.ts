@@ -150,20 +150,6 @@ const withDesktopStartLog = (
   };
 };
 
-const summarizeStartFailure = (
-  outputLines: string[],
-  fallback: string
-): string =>
-  [...outputLines]
-    .reverse()
-    .find(
-      (line) =>
-        line.includes("failed with exit code") ||
-        line.includes("ERR_PNPM") ||
-        line.includes("Exit status") ||
-        line.endsWith("Failed")
-    ) ?? fallback;
-
 const resolveKoedHome = (environment: NodeJS.ProcessEnv): string =>
   resolve(environment.KOED_HOME?.trim() || `${homedir()}/.koed`);
 
@@ -313,7 +299,6 @@ export const createKoedServerManager = ({
   createCliInvocation,
   existsSync,
   execFile,
-  spawn,
   openExternal,
   openPath
 }: KoedServerManagerOptions): KoedServerManager => {

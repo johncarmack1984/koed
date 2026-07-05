@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-/* global console, process */
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
@@ -9,14 +8,14 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
-  statSync,
   writeFileSync
 } from "node:fs";
 import { dirname, resolve, relative } from "node:path";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
-const usage = () => `Usage: pnpm native-runtime:stage:homebrew -- --out <dir> [--force] [--json]
+const usage =
+  () => `Usage: pnpm native-runtime:stage:homebrew -- --out <dir> [--force] [--json]
 
 Stages Homebrew/Linuxbrew-provided native runtime assets for local packaged
 Desktop smoke testing. The output is suitable for KOED_NATIVE_RUNTIME_SOURCE_DIR.
@@ -55,7 +54,9 @@ const run = (command, args, options = {}) => {
     ...options
   });
   if (result.error) {
-    throw new Error(`${command} ${args.join(" ")} failed: ${result.error.message}`);
+    throw new Error(
+      `${command} ${args.join(" ")} failed: ${result.error.message}`
+    );
   }
   if (result.status !== 0) {
     const details = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
@@ -126,7 +127,13 @@ const copyPgvectorFiles = ({ pgConfigBin, postgresPrefix, targetPostgres }) => {
     resolve(sharedir, "extension"),
     resolve(postgresPrefix, "share", "postgresql@17", "extension"),
     resolve(postgresPrefix, "share", "postgresql", "extension"),
-    resolve(dirname(postgresPrefix), "..", "share", "postgresql@17", "extension"),
+    resolve(
+      dirname(postgresPrefix),
+      "..",
+      "share",
+      "postgresql@17",
+      "extension"
+    ),
     resolve(dirname(postgresPrefix), "..", "share", "postgresql", "extension")
   ];
   const extensionDir = candidates.find((candidate) =>
@@ -141,7 +148,10 @@ const copyPgvectorFiles = ({ pgConfigBin, postgresPrefix, targetPostgres }) => {
   const files = listDir(extensionDir).filter(
     (name) => name === "vector.control" || /^vector--.*\.sql$/.test(name)
   );
-  if (!files.includes("vector.control") || !files.some((name) => name.endsWith(".sql"))) {
+  if (
+    !files.includes("vector.control") ||
+    !files.some((name) => name.endsWith(".sql"))
+  ) {
     throw new Error(`Incomplete pgvector extension files in ${extensionDir}.`);
   }
 
@@ -150,7 +160,11 @@ const copyPgvectorFiles = ({ pgConfigBin, postgresPrefix, targetPostgres }) => {
     ? ["share/postgresql@17", "share/postgresql"]
     : [relativeSharedir];
   for (const relativeTarget of relativeTargets) {
-    const targetExtensionDir = resolve(targetPostgres, relativeTarget, "extension");
+    const targetExtensionDir = resolve(
+      targetPostgres,
+      relativeTarget,
+      "extension"
+    );
     for (const file of files) {
       copyFile(resolve(extensionDir, file), resolve(targetExtensionDir, file));
     }
@@ -176,7 +190,11 @@ const copyEmbeddingVenv = ({ targetEmbedding }) => {
 
 const validatePostgres = (initdb) => {
   const output = run(initdb, ["--version"]);
-  if (!/PostgreSQL\)?\s+17(?:\.|\s|$)|\(PostgreSQL\)\s+17(?:\.|\s|$)/i.test(output)) {
+  if (
+    !/PostgreSQL\)?\s+17(?:\.|\s|$)|\(PostgreSQL\)\s+17(?:\.|\s|$)/i.test(
+      output
+    )
+  ) {
     throw new Error(`Expected PostgreSQL 17 from ${initdb}; got: ${output}`);
   }
   return output;
@@ -184,7 +202,8 @@ const validatePostgres = (initdb) => {
 
 const validateLlama = (llamaServer) => {
   const version = maybeRun(llamaServer, ["--version"]);
-  const result = version.status === 0 ? version : maybeRun(llamaServer, ["--help"]);
+  const result =
+    version.status === 0 ? version : maybeRun(llamaServer, ["--help"]);
   const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
   if (result.error || result.status !== 0) {
     throw new Error(
@@ -198,13 +217,18 @@ const loaderWarnings = (executables) => {
   const tool = process.platform === "darwin" ? "otool" : "ldd";
   const warnings = [];
   for (const executable of executables) {
-    const args = process.platform === "darwin" ? ["-L", executable] : [executable];
+    const args =
+      process.platform === "darwin" ? ["-L", executable] : [executable];
     const result = maybeRun(tool, args);
     const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
     if (result.error?.code === "ENOENT") {
-      warnings.push(`${tool} is not available; loader validation skipped for ${executable}.`);
+      warnings.push(
+        `${tool} is not available; loader validation skipped for ${executable}.`
+      );
     } else if (result.status !== 0 || /not found/i.test(output)) {
-      warnings.push(`${tool} reported possible loader issues for ${executable}: ${output}`);
+      warnings.push(
+        `${tool} reported possible loader issues for ${executable}: ${output}`
+      );
     }
   }
   return warnings;
@@ -214,7 +238,9 @@ const ensureEmptyOutput = (outDir, force) => {
   if (!existsSync(outDir)) return;
   const entries = readdirSync(outDir);
   if (entries.length > 0 && !force) {
-    throw new Error(`Output directory is not empty: ${outDir}. Pass --force to replace it.`);
+    throw new Error(
+      `Output directory is not empty: ${outDir}. Pass --force to replace it.`
+    );
   }
   rmSync(outDir, { recursive: true, force: true });
 };
@@ -238,11 +264,15 @@ const stage = ({ out, force }) => {
   mkdirSync(targetEmbedding, { recursive: true });
 
   const pgConfigBin = resolve(postgresPrefix, "bin", "pg_config");
-  const pgvector = copyPgvectorFiles({ pgConfigBin, postgresPrefix, targetPostgres });
+  const pgvector = copyPgvectorFiles({
+    pgConfigBin,
+    postgresPrefix,
+    targetPostgres
+  });
   const embeddingVenv = copyEmbeddingVenv({ targetEmbedding });
 
-  const postgresExecutables = ["initdb", "pg_ctl", "psql", "pg_config"].map((name) =>
-    resolve(targetPostgres, "bin", name)
+  const postgresExecutables = ["initdb", "pg_ctl", "psql", "pg_config"].map(
+    (name) => resolve(targetPostgres, "bin", name)
   );
   const llamaServer = resolve(targetLlama, "bin", "llama-server");
   const packagedLlamaServer = resolve(targetLlama, "llama-server");
@@ -255,7 +285,9 @@ const stage = ({ out, force }) => {
   }
   makeExecutable(packagedLlamaServer);
 
-  const postgresVersion = validatePostgres(resolve(targetPostgres, "bin", "initdb"));
+  const postgresVersion = validatePostgres(
+    resolve(targetPostgres, "bin", "initdb")
+  );
   const llamaVersion = validateLlama(packagedLlamaServer);
   const warnings = [
     "Homebrew-staged native runtime assets are for local packaged smoke only; copied binaries may still depend on Homebrew dynamic libraries and are not release-quality redistribution artifacts.",

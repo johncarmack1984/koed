@@ -49,7 +49,11 @@ export const resolveRepoRoot = (
 
 const documentationPlaceholderPath = (value: string): boolean => {
   const normalized = resolve(value);
-  return normalized === "/path" || normalized === "/path/to" || normalized.startsWith("/path/to/");
+  return (
+    normalized === "/path" ||
+    normalized === "/path/to" ||
+    normalized.startsWith("/path/to/")
+  );
 };
 
 export const resolveKoedHome = (

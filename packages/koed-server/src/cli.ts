@@ -121,7 +121,8 @@ const configuredDaemonInvocation = (
     return { command, args: parsed };
   } catch (error) {
     throw new Error(
-      `Could not parse KOED_SERVER_DAEMON_ARGS_JSON: ${error instanceof Error ? error.message : String(error)}`
+      `Could not parse KOED_SERVER_DAEMON_ARGS_JSON: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
     );
   }
 };

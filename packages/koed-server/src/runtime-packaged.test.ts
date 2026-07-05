@@ -233,7 +233,9 @@ describe("packaged runtime provisioning", () => {
         return spawnResult("initdb (PostgreSQL) 17.4\n");
       }
       if (args[0] === "-L") {
-        return spawnResult(`${args[1]}:\n\tlinux-vdso.so.1 (0x00007fffd3dfe000)\n`);
+        return spawnResult(
+          `${args[1]}:\n\tlinux-vdso.so.1 (0x00007fffd3dfe000)\n`
+        );
       }
       return spawnResult();
     };

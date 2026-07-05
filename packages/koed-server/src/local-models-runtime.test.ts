@@ -97,7 +97,9 @@ describe("local model runtime", () => {
     );
 
     expect(status.state).toBe("missing");
-    expect(status.action).toContain("External dependency mode does not download model assets.");
+    expect(status.action).toContain(
+      "External dependency mode does not download model assets."
+    );
     expect(install.ok).toBe(false);
     expect(install.state).toBe("not_configured");
     expect(install.message).toContain("disabled in external dependency mode");

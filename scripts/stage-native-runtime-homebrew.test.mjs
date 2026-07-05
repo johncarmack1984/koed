@@ -14,7 +14,11 @@ import { dirname, resolve } from "node:path";
 import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const script = resolve(repoRoot, "scripts", "stage-native-runtime-homebrew.mjs");
+const script = resolve(
+  repoRoot,
+  "scripts",
+  "stage-native-runtime-homebrew.mjs"
+);
 const temps = [];
 
 const tempDir = (prefix) => {
@@ -39,7 +43,10 @@ const makeFakeHomebrew = () => {
 
   mkdirSync(bin, { recursive: true });
   for (const name of ["pg_ctl", "psql"]) {
-    writeExecutable(resolve(postgres, "bin", name), `#!/bin/sh\necho ${name}\n`);
+    writeExecutable(
+      resolve(postgres, "bin", name),
+      `#!/bin/sh\necho ${name}\n`
+    );
   }
   writeExecutable(
     resolve(postgres, "bin", "initdb"),
@@ -47,11 +54,17 @@ const makeFakeHomebrew = () => {
   );
   writeExecutable(
     resolve(postgres, "bin", "pg_config"),
-    `#!/bin/sh\nif [ \"$1\" = \"--sharedir\" ]; then echo '${sharedir}'; else echo 'PostgreSQL 17.6'; fi\n`
+    `#!/bin/sh\nif [ "$1" = "--sharedir" ]; then echo '${sharedir}'; else echo 'PostgreSQL 17.6'; fi\n`
   );
   mkdirSync(resolve(sharedir, "extension"), { recursive: true });
-  writeFileSync(resolve(sharedir, "extension", "vector.control"), "comment = 'vector'\n");
-  writeFileSync(resolve(sharedir, "extension", "vector--0.8.0.sql"), "-- vector\n");
+  writeFileSync(
+    resolve(sharedir, "extension", "vector.control"),
+    "comment = 'vector'\n"
+  );
+  writeFileSync(
+    resolve(sharedir, "extension", "vector--0.8.0.sql"),
+    "-- vector\n"
+  );
   writeExecutable(
     resolve(llama, "bin", "llama-server"),
     "#!/bin/sh\necho 'llama-server 1.0'\n"
@@ -60,7 +73,7 @@ const makeFakeHomebrew = () => {
 
   writeExecutable(
     resolve(bin, "brew"),
-    `#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Homebrew fake'; exit 0; fi\nif [ \"$1\" = \"--prefix\" ]; then\n  case \"$2\" in\n    postgresql@17) echo '${postgres}' ;;\n    pgvector) echo '${pgvector}' ;;\n    llama.cpp) echo '${llama}' ;;\n    *) echo '${root}' ;;\n  esac\n  exit 0\nfi\necho unsupported >&2\nexit 1\n`
+    `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'Homebrew fake'; exit 0; fi\nif [ "$1" = "--prefix" ]; then\n  case "$2" in\n    postgresql@17) echo '${postgres}' ;;\n    pgvector) echo '${pgvector}' ;;\n    llama.cpp) echo '${llama}' ;;\n    *) echo '${root}' ;;\n  esac\n  exit 0\nfi\necho unsupported >&2\nexit 1\n`
   );
 
   return { root, bin, postgres, llama, pgvector };
@@ -78,21 +91,20 @@ test("stages Homebrew runtime assets into KOED_NATIVE_RUNTIME_SOURCE_DIR layout"
   rmSync(out, { recursive: true, force: true });
   const embeddingVenv = resolve(tempDir("koed-embedding-venv-"), ".venv");
   mkdirSync(resolve(embeddingVenv, "bin"), { recursive: true });
-  writeExecutable(resolve(embeddingVenv, "bin", "python"), "#!/bin/sh\necho python\n");
-
-  const result = spawnSync(
-    process.execPath,
-    [script, "--out", out, "--json"],
-    {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        PATH: `${fake.bin}:${process.env.PATH ?? ""}`,
-        KOED_EMBEDDING_VENV_DIR: embeddingVenv
-      },
-      encoding: "utf8"
-    }
+  writeExecutable(
+    resolve(embeddingVenv, "bin", "python"),
+    "#!/bin/sh\necho python\n"
   );
+
+  const result = spawnSync(process.execPath, [script, "--out", out, "--json"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${fake.bin}:${process.env.PATH ?? ""}`,
+      KOED_EMBEDDING_VENV_DIR: embeddingVenv
+    },
+    encoding: "utf8"
+  });
 
   assert.equal(result.status, 0, result.stderr);
   const json = JSON.parse(result.stdout);
@@ -103,10 +115,34 @@ test("stages Homebrew runtime assets into KOED_NATIVE_RUNTIME_SOURCE_DIR layout"
   assert.ok(existsSync(resolve(out, "postgres", "bin", "pg_ctl")));
   assert.ok(existsSync(resolve(out, "postgres", "bin", "psql")));
   assert.ok(existsSync(resolve(out, "postgres", "bin", "pg_config")));
-  assert.ok(existsSync(resolve(out, "postgres", "share", "postgresql@17", "extension", "vector.control")));
-  assert.ok(existsSync(resolve(out, "postgres", "share", "postgresql@17", "extension", "vector--0.8.0.sql")));
+  assert.ok(
+    existsSync(
+      resolve(
+        out,
+        "postgres",
+        "share",
+        "postgresql@17",
+        "extension",
+        "vector.control"
+      )
+    )
+  );
+  assert.ok(
+    existsSync(
+      resolve(
+        out,
+        "postgres",
+        "share",
+        "postgresql@17",
+        "extension",
+        "vector--0.8.0.sql"
+      )
+    )
+  );
   assert.ok(existsSync(resolve(out, "llama.cpp", "llama-server")));
-  assert.ok(existsSync(resolve(out, "embedding-service", ".venv", "bin", "python")));
+  assert.ok(
+    existsSync(resolve(out, "embedding-service", ".venv", "bin", "python"))
+  );
   assert.match(
     readFileSync(resolve(out, "README.koed-native-runtime.txt"), "utf8"),
     /local packaged smoke testing/
