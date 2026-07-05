@@ -49,7 +49,16 @@ KOED_NATIVE_RUNTIME_SOURCE_DIR=/tmp/koed-native-runtime pnpm desktop:package:mac
 
 `native-runtime:stage:homebrew` is a development smoke helper. It copies Homebrew/Linuxbrew-provided PostgreSQL 17, pgvector extension files, llama-server, and the local `apps/embedding-service/.venv` into the expected staging layout. It does not install Python dependencies; create the Embedding Service `.venv` first, or set `KOED_EMBEDDING_VENV_DIR=/path/to/.venv`. The staged output may still depend on Homebrew dynamic libraries and is not a release-quality redistributable native runtime bundle.
 
-`prepare-koed-runtime.mjs` copies staged assets into packaged `koed-runtime` and writes a platform/architecture manifest with SHA-256 verification. If no native asset source is provided, Desktop still packages JS/service artifacts and Embedding Service app files, while `koed-server runtime status/install` reports missing native assets with Homebrew repair guidance.
+`prepare-koed-runtime.mjs` copies staged assets into packaged `koed-runtime` and writes a platform/architecture manifest with SHA-256 verification. If `KOED_NATIVE_RUNTIME_SOURCE_DIR` is set but no recognized native assets are staged, packaging fails instead of silently producing a missing-native runtime package. If no native asset source is provided, Desktop still packages JS/service artifacts and Embedding Service app files, while `koed-server runtime status/install` reports missing native assets with Homebrew repair guidance.
+
+Native runtime artifacts can be assembled and validated locally with:
+
+```bash
+KOED_NATIVE_RUNTIME_SOURCE_DIR=/path/to/koed-runtime pnpm native-runtime:build:macos-arm64 -- --json
+pnpm native-runtime:validate -- --runtime-root dist/native-runtime/macos-arm64/koed-runtime --platform darwin --json
+```
+
+See `docs/native-runtime-artifact-pipeline.md`.
 
 ## Validation
 

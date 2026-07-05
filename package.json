@@ -51,6 +51,8 @@
     "team-fixture:validate": "node scripts/team-saas-fixture.mjs validate",
     "team-launch:validate": "node scripts/team-saas-launch-validation.mjs",
     "smoke:bundled-local": "node scripts/bundled-local-smoke.mjs",
+    "native-runtime:build:macos-arm64": "node scripts/native-runtime/build-macos-arm64.mjs",
+    "native-runtime:validate": "node scripts/native-runtime/validate-runtime.mjs",
     "test": "node --test scripts/*.test.mjs && pnpm -r --workspace-concurrency=1 test",
     "test:python": "node scripts/python-check.mjs",
     "setup:python": "node scripts/python-setup.mjs",

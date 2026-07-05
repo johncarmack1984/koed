@@ -1,19 +1,15 @@
 #!/usr/bin/env node
 /* global console, process */
-import { createHash } from "node:crypto";
 import {
-  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
-  readdirSync,
-  readFileSync,
   rmSync,
-  statSync,
   writeFileSync
 } from "node:fs";
-import { relative, resolve } from "node:path";
+import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { writeRuntimeAssetManifest } from "../../../scripts/native-runtime/manifest-lib.mjs";
 
 const desktopRoot = resolve(import.meta.dirname, "..");
 const repoRoot = resolve(desktopRoot, "..", "..");
@@ -43,55 +39,6 @@ const deploy = (filter, to) =>
     resolve(runtimeRoot, to)
   ]);
 
-const platformKey = () => {
-  if (process.platform === "darwin") return "macos";
-  if (process.platform === "win32") return "windows";
-  return process.platform;
-};
-
-const listFiles = (root, dir = root) =>
-  readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const path = resolve(dir, entry.name);
-    if (entry.isDirectory()) return listFiles(root, path);
-    return [relative(root, path).replaceAll("\\", "/")];
-  });
-
-const sha256Files = (root, files) => {
-  const hash = createHash("sha256");
-  for (const file of [...new Set(files)].sort()) {
-    const path = resolve(root, file);
-    if (statSync(path).isDirectory()) continue;
-    hash.update(file.replaceAll("\\", "/"));
-    hash.update("\0");
-    hash.update(readFileSync(path));
-    hash.update("\0");
-  }
-  return hash.digest("hex");
-};
-
-const makeExecutableIfPresent = (path) => {
-  if (existsSync(path)) chmodSync(path, 0o755);
-};
-
-const addAsset = ({ assets, id, root, version, executablePaths }) => {
-  if (!existsSync(root)) return;
-  const expectedFiles = listFiles(root);
-  if (expectedFiles.length === 0) return;
-  for (const path of Object.values(executablePaths)) {
-    makeExecutableIfPresent(resolve(root, path));
-  }
-  assets.push({
-    id,
-    platform: platformKey(),
-    architecture: process.arch,
-    version,
-    packagedResourcePath: id,
-    sha256: sha256Files(root, expectedFiles),
-    expectedFiles,
-    executablePaths,
-    installPath: id
-  });
-};
 
 const copyEmbeddingServiceApp = () => {
   const source = resolve(repoRoot, "apps", "embedding-service");
@@ -114,47 +61,8 @@ const copyEmbeddingServiceApp = () => {
   }
 };
 
-const writeNativeManifest = () => {
-  const assets = [];
-  addAsset({
-    assets,
-    id: "postgres",
-    root: resolve(runtimeRoot, "postgres"),
-    version: "postgresql-17-pgvector-packaged",
-    executablePaths: {
-      initdb: "bin/initdb",
-      pg_ctl: "bin/pg_ctl",
-      psql: "bin/psql",
-      pg_config: "bin/pg_config"
-    }
-  });
-  addAsset({
-    assets,
-    id: "llama.cpp",
-    root: resolve(runtimeRoot, "llama.cpp"),
-    version: "llama-server-packaged",
-    executablePaths: { llama_server: "llama-server" }
-  });
-  if (
-    existsSync(
-      resolve(runtimeRoot, "embedding-service", ".venv", "bin", "python")
-    )
-  ) {
-    addAsset({
-      assets,
-      id: "embedding-service",
-      root: resolve(runtimeRoot, "embedding-service"),
-      version: "embedding-service-python-packaged",
-      executablePaths: { python: ".venv/bin/python" }
-    });
-  }
-  if (assets.length === 0) return [];
-  writeFileSync(
-    resolve(runtimeRoot, "runtime-asset-manifest.json"),
-    `${JSON.stringify({ schemaVersion: 1, assets }, null, 2)}\n`
-  );
-  return assets.map((asset) => asset.id);
-};
+const writeNativeManifest = () =>
+  writeRuntimeAssetManifest({ runtimeRoot });
 
 rmSync(runtimeRoot, { recursive: true, force: true });
 mkdirSync(runtimeRoot, { recursive: true });
@@ -184,6 +92,11 @@ if (nativeRuntimeSource) {
   });
 }
 const nativeAssets = writeNativeManifest();
+if (nativeRuntimeSource && nativeAssets.length === 0) {
+  throw new Error(
+    `KOED_NATIVE_RUNTIME_SOURCE_DIR did not contain recognized native assets: ${nativeRuntimeSource}`
+  );
+}
 
 const required = [
   "api/dist/index.js",
