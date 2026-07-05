@@ -279,26 +279,32 @@ export const createKoedEnvironment = (
     desktopManagedLocal?: boolean;
     packagedResourcesPath?: string;
   } = {}
-): NodeJS.ProcessEnv => ({
-  ...environment,
-  ...(!options.desktopManagedLocal || environment.KOED_REPO_ROOT?.trim()
-    ? { KOED_REPO_ROOT: environment.KOED_REPO_ROOT ?? repoRoot }
-    : {}),
-  ...(options.desktopManagedLocal
-    ? {
-        KOED_RUNTIME_MODE: environment.KOED_RUNTIME_MODE ?? "local-personal",
-        KOED_DEPENDENCY_MODE:
-          environment.KOED_DEPENDENCY_MODE ?? "bundled-local",
-        WORK_QUEUE_BACKEND: environment.WORK_QUEUE_BACKEND ?? "local",
-        KOED_AUTO_PORTS: environment.KOED_AUTO_PORTS ?? "1",
-        KOED_PACKAGED_DESKTOP: environment.KOED_PACKAGED_DESKTOP ?? "1",
-        KOED_PACKAGED_RESOURCES_PATH:
-          environment.KOED_PACKAGED_RESOURCES_PATH ??
-          options.packagedResourcesPath ??
-          repoRoot
-      }
-    : {})
-});
+): NodeJS.ProcessEnv => {
+  const dependencyMode = options.desktopManagedLocal
+    ? (environment.KOED_DEPENDENCY_MODE ?? "bundled-local")
+    : environment.KOED_DEPENDENCY_MODE;
+  return {
+    ...environment,
+    ...(!options.desktopManagedLocal || environment.KOED_REPO_ROOT?.trim()
+      ? { KOED_REPO_ROOT: environment.KOED_REPO_ROOT ?? repoRoot }
+      : {}),
+    ...(dependencyMode === "bundled-local" && !environment.KOED_AUTO_PORTS
+      ? { KOED_AUTO_PORTS: "1" }
+      : {}),
+    ...(options.desktopManagedLocal
+      ? {
+          KOED_RUNTIME_MODE: environment.KOED_RUNTIME_MODE ?? "local-personal",
+          KOED_DEPENDENCY_MODE: dependencyMode,
+          WORK_QUEUE_BACKEND: environment.WORK_QUEUE_BACKEND ?? "local",
+          KOED_PACKAGED_DESKTOP: environment.KOED_PACKAGED_DESKTOP ?? "1",
+          KOED_PACKAGED_RESOURCES_PATH:
+            environment.KOED_PACKAGED_RESOURCES_PATH ??
+            options.packagedResourcesPath ??
+            repoRoot
+        }
+      : {})
+  };
+};
 
 export const createKoedServerManager = ({
   repoRoot,
@@ -496,7 +502,7 @@ export const createKoedServerManager = ({
       }
     );
 
-  const start = async () => {
+  const requestDaemonStart = async () => {
     const current = await runJson(["status"], 10_000);
     if (hasHealthyApi(current)) {
       await provisionExplorerCredential();
@@ -504,7 +510,11 @@ export const createKoedServerManager = ({
     }
 
     if (serverProcess && !serverProcess.killed) {
-      return pollUntilReady();
+      return {
+        ok: true,
+        state: "starting",
+        message: "Koed server daemon is already starting."
+      };
     }
     if (!existsSync(cliPath)) {
       return missingCliPayload(repoRoot, cliPath);
@@ -519,7 +529,6 @@ export const createKoedServerManager = ({
     const result = await runJson(["start", "--daemon"], 45_000);
     if (typeof result === "object" && result !== null) {
       const payload = result as {
-        ok?: unknown;
         message?: unknown;
         error?: unknown;
         startedPid?: unknown;
@@ -534,9 +543,18 @@ export const createKoedServerManager = ({
         startOutputLines,
         `${message}${payload.startedPid ? ` pid ${payload.startedPid}` : ""}`
       );
-      if (payload.ok === false) {
-        return withDesktopStartLog(result, startOutputLines);
-      }
+    }
+    return withDesktopStartLog(result, startOutputLines);
+  };
+
+  const start = async () => {
+    const result = await requestDaemonStart();
+    if (
+      typeof result === "object" &&
+      result !== null &&
+      (result as { ok?: unknown }).ok === false
+    ) {
+      return result;
     }
     return pollUntilReady();
   };
@@ -568,6 +586,7 @@ export const createKoedServerManager = ({
       models_install: () => runModelInstallJson(),
       explorer_credential: () => provisionExplorerCredential(),
       start,
+      start_daemon: requestDaemonStart,
       open_external: async (args) => {
         const url = typeof args?.url === "string" ? args.url : "";
         if (!url) {

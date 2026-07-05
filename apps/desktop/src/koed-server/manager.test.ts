@@ -29,6 +29,15 @@ describe("Koed server desktop manager", () => {
     });
   });
 
+  it("enables automatic local ports for source Desktop bundled-local runs", () => {
+    expect(
+      createKoedEnvironment("/repo", { KOED_DEPENDENCY_MODE: "bundled-local" })
+    ).toMatchObject({
+      KOED_REPO_ROOT: "/repo",
+      KOED_AUTO_PORTS: "1"
+    });
+  });
+
   it("defaults packaged Desktop managed local server to bundled-local", () => {
     const packagedEnvironment = createKoedEnvironment(
       "/repo",

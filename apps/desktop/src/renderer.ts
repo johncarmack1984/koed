@@ -41,6 +41,7 @@ type StartupActionId =
   | "refresh-status"
   | "start"
   | "setup_codex"
+  | "repair_codex"
   | "runtime_install"
   | "models_install"
   | "doctor"
@@ -502,6 +503,14 @@ const desktopReady = (): boolean =>
   status?.workerQueues.state === "healthy" &&
   explorerReady();
 
+const commandResultExplicitError = (value: unknown): string | null => {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const payload = value as { error?: unknown };
+  return typeof payload.error === "string" ? payload.error : null;
+};
+
 const commandResultError = (value: unknown): string | null => {
   if (typeof value !== "object" || value === null) {
     return null;
@@ -513,7 +522,7 @@ const commandResultError = (value: unknown): string | null => {
     summary?: unknown;
     ok?: unknown;
   };
-  const error = typeof payload.error === "string" ? payload.error : null;
+  const error = commandResultExplicitError(value);
   if (error) {
     return error;
   }
@@ -805,9 +814,9 @@ const startupLiveConfig: Record<StartupStepId, StartupLiveConfig> = {
               primary: true
             },
             {
-              id: "setup_codex",
-              label: "Rerun setup",
-              title: "Repeat integration provisioning"
+              id: "repair_codex",
+              label: "Fix integration",
+              title: "Rewrite Codex/MCP/Capture Hook configuration"
             }
           ])
         : []
@@ -915,9 +924,9 @@ const readinessChecks: readonly ReadinessCheckDefinition[] = [
       "API Token, MCP Server, Supported Capture Hook, and Codex settings.",
     componentKeys: startupLiveConfig.integration.componentKeys,
     action: {
-      label: "Run setup",
-      command: "setup_codex",
-      timeoutMs: 300_000
+      label: "Fix integration",
+      command: "repair_codex",
+      timeoutMs: 120_000
     }
   },
   {
@@ -1898,7 +1907,7 @@ const ensureDaemonStartRequested = async (
     step
   );
   const startResult = await runWithStartupProbes(step, () =>
-    invokeWithTimeout("start", undefined, 180_000)
+    invokeWithTimeout("start_daemon", undefined, 60_000)
   );
   const startError = commandResultError(startResult);
   if (startError) {
@@ -1944,7 +1953,7 @@ const runStartupSequence = async () => {
         undefined,
         60_000
       );
-      const runtimeStatusError = commandResultError(runtimeStatus);
+      const runtimeStatusError = commandResultExplicitError(runtimeStatus);
       if (runtimeStatusError) {
         throw new Error(
           `koed-server runtime status failed: ${runtimeStatusError}`
@@ -2000,7 +2009,7 @@ const runStartupSequence = async () => {
         undefined,
         60_000
       );
-      const modelStatusError = commandResultError(modelStatus);
+      const modelStatusError = commandResultExplicitError(modelStatus);
       if (modelStatusError) {
         throw new Error(
           `koed-server models status failed: ${modelStatusError}`
@@ -2079,16 +2088,16 @@ const runStartupSequence = async () => {
         "Configuring Codex, MCP Server, Supported Capture Hook, and Explorer credentials.";
       setStartupStep("integration", "running");
       appendStartupLog(
-        "command: koed-server setup codex --json",
+        "command: koed-server repair codex --json",
         undefined,
         "integration"
       );
       const setupResult = await runWithStartupProbes("integration", () =>
-        invokeWithTimeout("setup_codex", undefined, 300_000)
+        invokeWithTimeout("repair_codex", undefined, 120_000)
       );
       const setupError = commandResultError(setupResult);
       if (setupError) {
-        throw new Error(`koed-server setup codex failed: ${setupError}`);
+        throw new Error(`koed-server repair codex failed: ${setupError}`);
       }
       await waitForStartupStepReady("integration");
       setStartupStep("integration", "done");
