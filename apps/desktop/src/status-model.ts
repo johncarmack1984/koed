@@ -246,7 +246,6 @@ export const statusCards = [
       primary: true
     },
     secondaryActions: [
-      { label: "Setup Codex", command: "setup_codex", timeoutMs: 300_000 },
       { label: "Run doctor", command: "doctor", timeoutMs: 90_000 },
       { label: "Copy diagnostics", command: "copy_diagnostics" }
     ]
@@ -265,7 +264,6 @@ export const statusCards = [
       primary: true
     },
     secondaryActions: [
-      { label: "Setup Codex", command: "setup_codex", timeoutMs: 300_000 },
       { label: "Run doctor", command: "doctor", timeoutMs: 90_000 },
       { label: "Refresh", command: "status", timeoutMs: 10_000 }
     ]

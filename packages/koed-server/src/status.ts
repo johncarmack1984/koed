@@ -847,8 +847,7 @@ export const collectKoedServerStatus = async (
     statusWithoutState.mcpServer,
     statusWithoutState.captureHook,
     statusWithoutState.codex,
-    statusWithoutState.lcmSummaryService,
-    statusWithoutState.lastVerification
+    statusWithoutState.lcmSummaryService
   ];
   const state = aggregateState(blockingComponents);
   return { ...statusWithoutState, state, ok: state === "healthy" };
@@ -876,8 +875,15 @@ export const collectKoedServerDoctor = async (
     label: label as string,
     ...(component as KoedServerComponentStatus)
   }));
-  const failed = checks.filter((check) => check.state === "needs_attention");
-  const missing = checks.filter((check) => check.state === "not_configured");
+  const blockingChecks = checks.filter(
+    (check) => check.id !== "lastVerification"
+  );
+  const failed = blockingChecks.filter(
+    (check) => check.state === "needs_attention"
+  );
+  const missing = blockingChecks.filter(
+    (check) => check.state === "not_configured"
+  );
   const summary =
     failed[0]?.message ??
     missing[0]?.message ??
