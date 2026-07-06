@@ -6,6 +6,7 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync
@@ -123,6 +124,7 @@ const listDir = (path) => (existsSync(path) ? readdirSync(path) : []);
 
 const copyPgvectorFiles = ({ pgConfigBin, postgresPrefix, targetPostgres }) => {
   const sharedir = run(pgConfigBin, ["--sharedir"]);
+  const pkglibdir = run(pgConfigBin, ["--pkglibdir"]);
   const candidates = [
     resolve(sharedir, "extension"),
     resolve(postgresPrefix, "share", "postgresql@17", "extension"),
@@ -155,6 +157,21 @@ const copyPgvectorFiles = ({ pgConfigBin, postgresPrefix, targetPostgres }) => {
     throw new Error(`Incomplete pgvector extension files in ${extensionDir}.`);
   }
 
+  const libraryCandidates = [
+    resolve(pkglibdir, "vector.so"),
+    resolve(pkglibdir, "vector.dylib"),
+    resolve(pgConfigBin, "..", "..", "lib", "postgresql", "vector.so"),
+    resolve(pgConfigBin, "..", "..", "lib", "postgresql", "vector.dylib"),
+    resolve(pgConfigBin, "..", "..", "lib", "vector.so"),
+    resolve(pgConfigBin, "..", "..", "lib", "vector.dylib")
+  ];
+  const library = libraryCandidates.find((candidate) => existsSync(candidate));
+  if (!library) {
+    throw new Error(
+      `Could not find pgvector shared library. Expected vector.so or vector.dylib under ${pkglibdir}.`
+    );
+  }
+
   const relativeSharedir = relative(postgresPrefix, sharedir);
   const relativeTargets = relativeSharedir.startsWith("..")
     ? ["share/postgresql@17", "share/postgresql"]
@@ -169,7 +186,21 @@ const copyPgvectorFiles = ({ pgConfigBin, postgresPrefix, targetPostgres }) => {
       copyFile(resolve(extensionDir, file), resolve(targetExtensionDir, file));
     }
   }
-  return { source: extensionDir, files, stagedSharedirs: relativeTargets };
+
+  const relativePkglibdir = relative(postgresPrefix, pkglibdir);
+  const relativeLibraryTargets = relativePkglibdir.startsWith("..")
+    ? ["lib/postgresql"]
+    : [relativePkglibdir];
+  for (const relativeTarget of relativeLibraryTargets) {
+    copyFile(library, resolve(targetPostgres, relativeTarget, "vector.so"));
+  }
+  return {
+    source: extensionDir,
+    library,
+    files,
+    stagedSharedirs: relativeTargets,
+    stagedLibraryDirs: relativeLibraryTargets
+  };
 };
 
 const copyEmbeddingVenv = ({ targetEmbedding }) => {
@@ -200,6 +231,14 @@ const validatePostgres = (initdb) => {
   return output;
 };
 
+const isShellScript = (path) => {
+  try {
+    return readFileSync(path, "utf8").startsWith("#!");
+  } catch {
+    return false;
+  }
+};
+
 const validateLlama = (llamaServer) => {
   const version = maybeRun(llamaServer, ["--version"]);
   const result =
@@ -217,6 +256,7 @@ const loaderWarnings = (executables) => {
   const tool = process.platform === "darwin" ? "otool" : "ldd";
   const warnings = [];
   for (const executable of executables) {
+    if (isShellScript(executable)) continue;
     const args =
       process.platform === "darwin" ? ["-L", executable] : [executable];
     const result = maybeRun(tool, args);
@@ -296,6 +336,7 @@ const stage = ({ out, force }) => {
       resolve(targetPostgres, "bin", "pg_ctl"),
       resolve(targetPostgres, "bin", "psql"),
       resolve(targetPostgres, "bin", "pg_config"),
+      resolve(targetPostgres, "lib", "postgresql", "vector.so"),
       packagedLlamaServer,
       resolve(targetEmbedding, ".venv", "bin", "python")
     ])

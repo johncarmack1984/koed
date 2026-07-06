@@ -146,6 +146,15 @@ app.on("activate", () => {
     void createWindow();
   }
 });
-app.on("before-quit", () => {
-  koedServer.stop();
+let koedServerStoppedForQuit = false;
+app.on("before-quit", (event) => {
+  if (koedServerStoppedForQuit) {
+    return;
+  }
+  event.preventDefault();
+  void (async () => {
+    await koedServer.stop();
+    koedServerStoppedForQuit = true;
+    app.quit();
+  })();
 });

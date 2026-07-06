@@ -48,7 +48,7 @@ export interface KoedServerManagerOptions {
 
 export interface KoedServerManager {
   handlers: Record<string, DesktopCommandHandler>;
-  stop: () => void;
+  stop: () => Promise<unknown>;
 }
 
 type DiagnosticStatus = KoedServerStatus & {
@@ -199,7 +199,8 @@ const runtimeInstallProvider = (
   existsSync: (path: string) => boolean
 ): "packaged" | "homebrew" => {
   const manifestPath = packagedRuntimeManifestPath(environment);
-  return manifestPath && existsSync(manifestPath) ? "packaged" : "homebrew";
+  if (manifestPath && existsSync(manifestPath)) return "packaged";
+  return environment.KOED_PACKAGED_DESKTOP === "1" ? "packaged" : "homebrew";
 };
 
 const readDesktopPorts = (
@@ -544,10 +545,13 @@ export const createKoedServerManager = ({
     return pollUntilReady();
   };
 
-  const stop = () => {
+  const stop = async () => {
+    const result = await runJson(["stop"], 45_000);
     if (serverProcess && !serverProcess.killed) {
       serverProcess.kill("SIGTERM");
     }
+    serverProcess = null;
+    return result;
   };
 
   return {
@@ -555,14 +559,7 @@ export const createKoedServerManager = ({
       status: async () =>
         withDesktopStartLog(await runJson(["status"]), startOutputLines),
       doctor: () => runJson(["doctor"], 45_000),
-      stop: async () => {
-        const result = await runJson(["stop"], 45_000);
-        if (serverProcess && !serverProcess.killed) {
-          serverProcess.kill("SIGTERM");
-        }
-        serverProcess = null;
-        return result;
-      },
+      stop,
       setup_codex: () => runJson(["setup", "codex"], 120_000),
       repair_codex: () => runJson(["repair", "codex"], 120_000),
       runtime_status: () => runRuntimeStatusJson(),

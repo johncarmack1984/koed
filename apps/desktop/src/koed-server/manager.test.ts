@@ -191,6 +191,33 @@ describe("Koed server desktop manager", () => {
     expect(calls[0]).toContain("packaged");
   });
 
+  it("keeps packaged runtime status actionable when packaged manifest is missing", async () => {
+    const calls: string[][] = [];
+    const manager = createKoedServerManager({
+      repoRoot: "/repo",
+      cliPath: "/repo/cli.js",
+      environment: {
+        KOED_PACKAGED_DESKTOP: "1",
+        KOED_PACKAGED_RESOURCES_PATH: "/resources"
+      },
+      createCliInvocation: (args) => ({
+        command: "/node",
+        args: ["/repo/cli.js", ...args],
+        env: { KOED_REPO_ROOT: "/repo" }
+      }),
+      existsSync: (path) => path === "/repo/cli.js",
+      execFile: (_command, args, _options, callback) => {
+        calls.push(args);
+        callback(null, JSON.stringify({ ok: false, state: "missing" }), "");
+      },
+      spawn: () => childProcess() as never,
+      openExternal: async () => undefined
+    });
+
+    await manager.handlers.runtime_status!();
+    expect(calls[0]).toContain("packaged");
+  });
+
   it("runs model status and install through koed-server", async () => {
     const calls: string[][] = [];
     const manager = createKoedServerManager({

@@ -105,28 +105,37 @@ describe("Codex setup wrapper", () => {
       resolve(root, "config/explorer-token.json"),
       JSON.stringify({ apiToken: "desktop_token" })
     );
-    const calls: Array<{ args: string[]; env?: NodeJS.ProcessEnv }> = [];
+    mkdirSync(resolve(root, "packages/mcp-server/dist"), { recursive: true });
+    writeFileSync(resolve(root, "packages/mcp-server/package.json"), "{}");
+    writeFileSync(resolve(root, "packages/mcp-server/dist/cli.js"), "");
+    writeFileSync(
+      resolve(root, "packages/mcp-server/dist/capture-hook.js"),
+      ""
+    );
+    const codexConfigPath = resolve(root, "codex.toml");
+    const hookConfigPath = resolve(root, "hook.json");
 
     const result = repairCodexIntegration({
       environment: {
         KOED_HOME: root,
         KOED_REPO_ROOT: root,
         KOED_AUTO_PORTS: "1",
-        API_HOST_PORT: "43300"
-      },
-      spawnSync: (_command, args, options) => {
-        calls.push({ args, env: options?.env });
-        return spawnResult(0, "configured");
+        API_HOST_PORT: "43300",
+        CODEX_CONFIG_PATH: codexConfigPath,
+        MEMORY_HOOK_CONFIG: hookConfigPath
       },
       now: () => new Date("2026-01-01T00:00:00.000Z")
     });
 
     expect(result.ok).toBe(true);
     expect(result.apiUrl).toBe("http://localhost:43300");
-    expect(calls[0]?.args[0]).toBe(
-      resolve(root, "scripts/configure-codex.mjs")
+    expect(result.command).toBe(`write Codex config using ${root}`);
+    expect(result.stdout).toContain("Codex integration configured.");
+    expect(result.stdout).toContain(
+      `Wrote Codex MCP config: ${codexConfigPath}`
     );
-    expect(calls[0]?.env?.MEMORY_API_URL).toBe("http://localhost:43300");
-    expect(calls[0]?.env?.MEMORY_API_TOKEN).toBe("desktop_token");
+    expect(result.stdout).toContain(
+      `Wrote Capture Hook config: ${hookConfigPath}`
+    );
   });
 });

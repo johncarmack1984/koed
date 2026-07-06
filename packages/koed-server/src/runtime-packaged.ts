@@ -228,6 +228,14 @@ const collectCommandValidation = (
   return commands;
 };
 
+const isShellScript = (path: string): boolean => {
+  try {
+    return readFileSync(path, "utf8").startsWith("#!");
+  } catch {
+    return false;
+  }
+};
+
 const collectLoaderValidation = (
   platform: string,
   executablePaths: Record<string, string>,
@@ -239,6 +247,14 @@ const collectLoaderValidation = (
   if (!tool) return [];
   return Object.values(executablePaths).map((relativePath) => {
     const command = safeResolve(installPath, relativePath);
+    if (isShellScript(command)) {
+      return {
+        command,
+        ok: true,
+        skipped: true,
+        message: "loader validation skipped for shell launcher script."
+      };
+    }
     const result = run(
       tool,
       platform === "darwin" ? ["-L", command] : [command],

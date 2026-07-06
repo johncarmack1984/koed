@@ -40,6 +40,7 @@ const makeFakeHomebrew = () => {
   const pgvector = resolve(root, "opt", "pgvector");
   const llama = resolve(root, "opt", "llama.cpp");
   const sharedir = resolve(postgres, "share", "postgresql@17");
+  const pkglibdir = resolve(postgres, "lib", "postgresql");
 
   mkdirSync(bin, { recursive: true });
   for (const name of ["pg_ctl", "psql"]) {
@@ -54,7 +55,7 @@ const makeFakeHomebrew = () => {
   );
   writeExecutable(
     resolve(postgres, "bin", "pg_config"),
-    `#!/bin/sh\nif [ "$1" = "--sharedir" ]; then echo '${sharedir}'; else echo 'PostgreSQL 17.6'; fi\n`
+    `#!/bin/sh\nif [ "$1" = "--sharedir" ]; then echo '${sharedir}'; elif [ "$1" = "--pkglibdir" ]; then echo '${pkglibdir}'; else echo 'PostgreSQL 17.6'; fi\n`
   );
   mkdirSync(resolve(sharedir, "extension"), { recursive: true });
   writeFileSync(
@@ -65,6 +66,8 @@ const makeFakeHomebrew = () => {
     resolve(sharedir, "extension", "vector--0.8.0.sql"),
     "-- vector\n"
   );
+  mkdirSync(pkglibdir, { recursive: true });
+  writeFileSync(resolve(pkglibdir, "vector.so"), "vector shared library\n");
   writeExecutable(
     resolve(llama, "bin", "llama-server"),
     "#!/bin/sh\necho 'llama-server 1.0'\n"
@@ -138,6 +141,9 @@ test("stages Homebrew runtime assets into KOED_NATIVE_RUNTIME_SOURCE_DIR layout"
         "vector--0.8.0.sql"
       )
     )
+  );
+  assert.ok(
+    existsSync(resolve(out, "postgres", "lib", "postgresql", "vector.so"))
   );
   assert.ok(existsSync(resolve(out, "llama.cpp", "llama-server")));
   assert.ok(

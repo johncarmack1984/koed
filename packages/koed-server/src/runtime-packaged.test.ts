@@ -257,6 +257,37 @@ describe("packaged runtime provisioning", () => {
     expect(status.assets[0]?.validation?.loader[0]?.ok).toBe(true);
   });
 
+  it("skips loader validation for shell launcher scripts", () => {
+    const root = tempDir();
+    createPackagedPostgres(root);
+    writeFileSync(
+      resolve(root, "koed-runtime", "postgres", "bin", "psql"),
+      "#!/bin/sh\nexit 0\n"
+    );
+    writeManifest(root, { platform: "linux", architecture: "x64" });
+    const koedPaths = paths(root);
+    const linuxSpawn = (command: string, args: string[]) => {
+      if (args.includes("--version") && command.endsWith("initdb")) {
+        return spawnResult("initdb (PostgreSQL) 17.4\n");
+      }
+      return spawnResult("not a dynamic executable", 1);
+    };
+
+    installPackagedRuntime(koedPaths, env(root), {
+      ...linuxHost,
+      spawnSync: linuxSpawn
+    });
+    const status = collectPackagedRuntimeStatus(koedPaths, env(root), {
+      ...linuxHost,
+      spawnSync: linuxSpawn
+    });
+
+    const psqlLoader = status.assets[0]?.validation?.loader.find((entry) =>
+      entry.command.endsWith("psql")
+    );
+    expect(psqlLoader).toMatchObject({ ok: true, skipped: true });
+  });
+
   it("reports checksum mismatch as incompatible and does not install", () => {
     const root = tempDir();
     createPackagedPostgres(root);
