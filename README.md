@@ -22,10 +22,12 @@ need them.
 
 - macOS, Linux, or WSL.
 - Node.js and pnpm.
-- Homebrew.
+- Homebrew or packaged native runtime assets for the bundled-local path. External dependency mode does not require Homebrew.
 - Codex installed and signed in.
 
-### Start Koed
+If you are on Windows, run Koed inside WSL as Linux tooling. Keep `KOED_HOME` and checkout paths on Linux filesystem paths inside WSL; native Windows packaged app support is not shipped in this build.
+
+### Start Koed Desktop from source
 
 From a fresh clone, run:
 
@@ -33,12 +35,19 @@ From a fresh clone, run:
 pnpm install
 pnpm env:setup
 pnpm build
-node packages/koed-server/dist/cli.js runtime install --provider homebrew --dependency-mode bundled-local --json
-node packages/koed-server/dist/cli.js models install --kind embedding --json
-KOED_DEPENDENCY_MODE=bundled-local pnpm desktop:start
+pnpm setup:python
+KOED_DEPENDENCY_MODE=bundled-local KOED_AUTO_PORTS=1 pnpm desktop:start
 ```
 
-Koed opens when setup is complete and configures Codex automatically.
+Koed Desktop opens after the build completes. Use the Desktop setup cards to install or verify local runtime assets, download the embedding model, start services, and configure Codex. The app invokes `koed-server` for those setup actions and asks before running the Homebrew-backed runtime install.
+
+`pnpm setup:python` prepares the source-checkout Embedding Service runtime used by Desktop development. Packaged Desktop follows the same local-personal bundled-local flow, but it starts its managed `koed-server` from the app bundle, prefers packaged native runtime assets, and keeps `KOED_HOME` state outside the source checkout. See [Koed Desktop](apps/desktop/README.md) for packaged first-run, signing/notarization, and smoke details.
+
+If setup fails with a path like `/path/to`, unset any placeholder overrides from previous experiments before restarting Desktop:
+
+```bash
+unset KOED_HOME KOED_EMBEDDING_MODEL_PATH KOED_RERANKER_MODEL_PATH
+```
 
 To stop Koed later:
 
@@ -50,8 +59,9 @@ node packages/koed-server/dist/cli.js stop --json
 
 The README keeps to one basic local path. For other options, see:
 
-- [Running Koed](docs/running-koed.md) for Docker Compose, manual server
-  commands, alternate ports, smoke tests, and desktop development.
+- [Running Koed](docs/running-koed.md) for external dependency mode, manual
+  server commands, alternate ports, smoke tests, packaged first-run notes, and
+  desktop development.
 - [Configuration](docs/configuration.md) for environment variables, runtime
   modes, model overrides, logging, and production settings.
 - [Codex integration](docs/codex-integration.md) for manual Codex setup and
