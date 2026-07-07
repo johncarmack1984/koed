@@ -636,7 +636,10 @@ describe("createHttpManagedKmsKeyring", () => {
         id: "dek-1",
         version: 1,
         algorithm: ENCRYPTED_PAYLOAD_MANAGED_KMS_KEY_WRAP_ALGORITHM,
-        ...wrapped
+        ...wrapped,
+        ciphertext: wrapped.ciphertext,
+        nonce: wrapped.nonce!,
+        tag: wrapped.tag!
       },
       aad: Buffer.from("aad")
     });

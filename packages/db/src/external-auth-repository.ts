@@ -117,7 +117,11 @@ const findActiveUser = async (
     })
     .from(users)
     .where(
-      and(eq(users.id, userId), isNull(users.disabledAt), isNull(users.deletedAt))
+      and(
+        eq(users.id, userId),
+        isNull(users.disabledAt),
+        isNull(users.deletedAt)
+      )
     )
     .limit(1);
 

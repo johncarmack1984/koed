@@ -178,9 +178,7 @@ export const registerAuthRoutes = (
       path: "/auth/workos/callback",
       maxAge: workosStateTtlSeconds
     });
-    return reply.redirect(
-      context.workos.client.getAuthorizationUrl({ state })
-    );
+    return reply.redirect(context.workos.client.getAuthorizationUrl({ state }));
   });
 
   app.get("/auth/workos/callback", async (request, reply) => {

@@ -14,7 +14,7 @@ const openApiPaths = openApiDocument.paths as Record<
       responses?: unknown;
       security?: unknown;
       "x-koed-identity"?: string;
-      "x-koed-deployment-modes"?: string[];
+      "x-koed-deployment-modes"?: readonly string[];
     }
   >
 >;

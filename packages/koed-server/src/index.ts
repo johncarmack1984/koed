@@ -33,6 +33,11 @@ export {
   installHomebrewRuntime
 } from "./runtime-homebrew.js";
 export {
+  collectPackagedRuntimeStatus,
+  installPackagedRuntime,
+  sha256PackagedRuntimeFiles
+} from "./runtime-packaged.js";
+export {
   collectUpstreamRegistryStatus,
   listUpstreamBackends,
   refreshUpstreamBackendCapabilities,
@@ -70,6 +75,13 @@ export type {
   RuntimePackageStatus,
   RuntimeProvider
 } from "./runtime-homebrew.js";
+export type {
+  PackagedRuntimeAssetManifest,
+  PackagedRuntimeAssetManifestEntry,
+  PackagedRuntimeAssetStatus,
+  PackagedRuntimeInstallResult,
+  PackagedRuntimeStatus
+} from "./runtime-packaged.js";
 export type {
   UpstreamBackendRecord,
   UpstreamBackendRegistry,

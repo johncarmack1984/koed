@@ -54,6 +54,14 @@ const runtimeBinaries = () => ({
   initdb: { path: "/opt/homebrew/opt/postgresql@17/bin/initdb", exists: true },
   pg_ctl: { path: "/opt/homebrew/opt/postgresql@17/bin/pg_ctl", exists: true },
   psql: { path: "/opt/homebrew/opt/postgresql@17/bin/psql", exists: true },
+  pg_dump: {
+    path: "/opt/homebrew/opt/postgresql@17/bin/pg_dump",
+    exists: true
+  },
+  pg_restore: {
+    path: "/opt/homebrew/opt/postgresql@17/bin/pg_restore",
+    exists: true
+  },
   pg_config: {
     path: "/opt/homebrew/opt/postgresql@17/bin/pg_config",
     exists: true
@@ -255,14 +263,87 @@ describe("JSON command output", () => {
     });
   });
 
+  it("prints packaged runtime status --json", async () => {
+    const stdout = writer();
+
+    const exitCode = await runKoedServerCli(
+      ["runtime", "status", "--provider", "packaged", "--json"],
+      {
+        stdout: stdout.stream,
+        resolvePaths: () => ({ repoRoot: "/repo" }) as never,
+        loadEnvironment: () => ({}),
+        collectPackagedRuntimeStatus: () => ({
+          ok: false,
+          state: "missing",
+          provider: "packaged",
+          platform: "macos",
+          architecture: "arm64",
+          koedHome: "/tmp/koed",
+          manifestPath: "/resources/koed-runtime/runtime-asset-manifest.json",
+          packagedRuntimeRoot: "/resources/koed-runtime",
+          assets: [],
+          message: "missing"
+        })
+      }
+    );
+
+    expect(exitCode).toBe(1);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: false,
+      provider: "packaged",
+      state: "missing"
+    });
+  });
+
+  it("prints packaged runtime install --json", async () => {
+    const stdout = writer();
+
+    const exitCode = await runKoedServerCli(
+      [
+        "runtime",
+        "install",
+        "--provider",
+        "packaged",
+        "--dependency-mode",
+        "bundled-local",
+        "--json"
+      ],
+      {
+        stdout: stdout.stream,
+        resolvePaths: () => ({ repoRoot: "/repo" }) as never,
+        loadEnvironment: () => ({}),
+        installPackagedRuntime: () => ({
+          ok: true,
+          state: "installed",
+          provider: "packaged",
+          platform: "macos",
+          architecture: "arm64",
+          koedHome: "/tmp/koed",
+          manifestPath: "/resources/koed-runtime/runtime-asset-manifest.json",
+          packagedRuntimeRoot: "/resources/koed-runtime",
+          assets: [],
+          message: "installed",
+          copiedPaths: ["/tmp/koed/runtime/postgres"]
+        })
+      }
+    );
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: true,
+      provider: "packaged",
+      state: "installed"
+    });
+  });
+
   it("rejects runtime install without explicit bundled-local dependency mode", async () => {
     const stdout = writer();
 
     const exitCode = await runKoedServerCli(
-      ["runtime", "install", "--provider", "homebrew", "--json"],
+      ["runtime", "install", "--provider", "packaged", "--json"],
       {
         stdout: stdout.stream,
-        installRuntime: () => {
+        installPackagedRuntime: () => {
           throw new Error("must not install");
         }
       }
@@ -272,6 +353,56 @@ describe("JSON command output", () => {
     expect(JSON.parse(stdout.text())).toMatchObject({
       ok: false,
       error: "runtime install requires --dependency-mode bundled-local."
+    });
+  });
+
+  it("never installs packaged runtime assets in external dependency mode", async () => {
+    const stdout = writer();
+
+    const exitCode = await runKoedServerCli(
+      [
+        "runtime",
+        "install",
+        "--provider",
+        "packaged",
+        "--dependency-mode",
+        "external",
+        "--json"
+      ],
+      {
+        stdout: stdout.stream,
+        installPackagedRuntime: () => {
+          throw new Error("must not install");
+        }
+      }
+    );
+
+    expect(exitCode).toBe(1);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: false,
+      error: "runtime install requires --dependency-mode bundled-local."
+    });
+  });
+
+  it("prints start --daemon --json", async () => {
+    const stdout = writer();
+
+    const exitCode = await runKoedServerCli(["start", "--daemon", "--json"], {
+      stdout: stdout.stream,
+      startDaemon: () => ({
+        ok: true,
+        state: "starting",
+        koedHome: "/tmp/koed",
+        message: "Koed server daemon start requested.",
+        startedPid: 42
+      })
+    });
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: true,
+      state: "starting",
+      startedPid: 42
     });
   });
 

@@ -30,10 +30,7 @@ export interface WorkosAuthKitClient {
   }): Promise<WorkosAuthKitAuthentication>;
 }
 
-const required = (
-  value: string | undefined,
-  name: string
-): string => {
+const required = (value: string | undefined, name: string): string => {
   const trimmed = value?.trim();
   if (!trimmed) {
     throw Object.assign(new Error(`${name} is not configured`), {

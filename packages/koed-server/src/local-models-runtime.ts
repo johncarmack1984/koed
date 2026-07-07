@@ -30,6 +30,8 @@ export interface LocalModelManifest {
   pathEnv: string;
   url?: string;
   sha256?: string;
+  defaultUrl?: string;
+  defaultSha256?: string;
 }
 
 export interface LocalModelStatus {
@@ -58,6 +60,8 @@ const MODEL_DEFINITIONS: Record<
     urlEnv: string;
     sha256Env: string;
     pathEnv: string;
+    defaultUrl?: string;
+    defaultSha256?: string;
   }
 > = {
   embedding: {
@@ -65,7 +69,11 @@ const MODEL_DEFINITIONS: Record<
     filename: "Qwen3-Embedding-0.6B-Q8_0.gguf",
     urlEnv: "KOED_EMBEDDING_MODEL_URL",
     sha256Env: "KOED_EMBEDDING_MODEL_SHA256",
-    pathEnv: "KOED_EMBEDDING_MODEL_PATH"
+    pathEnv: "KOED_EMBEDDING_MODEL_PATH",
+    defaultUrl:
+      "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/Qwen3-Embedding-0.6B-Q8_0.gguf",
+    defaultSha256:
+      "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439"
   },
   reranker: {
     key: "qwen3-reranker-0.6b",
@@ -85,6 +93,19 @@ const trimEnv = (
   const value = environment[name]?.trim();
   return value ? value : undefined;
 };
+
+const dependencyMode = (
+  environment: NodeJS.ProcessEnv
+): "bundled-local" | "external" | undefined => {
+  const value = trimEnv(environment, "KOED_DEPENDENCY_MODE");
+  if (value === "bundled-local" || value === "external") {
+    return value;
+  }
+  return undefined;
+};
+
+const modelDownloadBlockedAction = (manifest: LocalModelManifest): string =>
+  `External dependency mode does not download model assets. Switch to bundled-local mode or set ${manifest.pathEnv} to an existing model file.`;
 
 const normalizeSha256 = (value: string | undefined): string | undefined => {
   const normalized = value?.trim().toLowerCase();
@@ -116,8 +137,12 @@ export const resolveLocalModelManifest = (
     urlEnv: definition.urlEnv,
     sha256Env: definition.sha256Env,
     pathEnv: definition.pathEnv,
-    url: trimEnv(environment, definition.urlEnv),
-    sha256: normalizeSha256(trimEnv(environment, definition.sha256Env))
+    url: trimEnv(environment, definition.urlEnv) ?? definition.defaultUrl,
+    sha256: normalizeSha256(
+      trimEnv(environment, definition.sha256Env) ?? definition.defaultSha256
+    ),
+    defaultUrl: definition.defaultUrl,
+    defaultSha256: definition.defaultSha256
   };
 };
 
@@ -133,11 +158,15 @@ export const collectLocalModelStatus = async (
   environment: NodeJS.ProcessEnv = process.env
 ): Promise<LocalModelStatus> => {
   const manifest = resolveLocalModelManifest(paths, kind, environment);
+  const mode = dependencyMode(environment);
   if (!existsSync(manifest.modelPath)) {
     return {
       state: "missing",
       message: `${manifest.key} model is not installed at ${manifest.modelPath}.`,
-      action: `Set ${manifest.urlEnv} and ${manifest.sha256Env}, then run koed-server models install --kind ${kind}.`,
+      action:
+        mode === "external"
+          ? modelDownloadBlockedAction(manifest)
+          : `Run koed-server models install --kind ${kind}. Override ${manifest.urlEnv} and ${manifest.sha256Env} only when using a custom model artifact.`,
       modelPath: manifest.modelPath,
       manifest
     };
@@ -187,6 +216,17 @@ export const installLocalModel = async (
   }: LocalModelInstallDependencies = {}
 ): Promise<LocalModelInstallResult> => {
   const manifest = resolveLocalModelManifest(paths, kind, environment);
+  const mode = dependencyMode(environment);
+  if (mode === "external") {
+    return {
+      ok: false,
+      state: "not_configured",
+      message: `${manifest.key} model downloads are disabled in external dependency mode.`,
+      action: modelDownloadBlockedAction(manifest),
+      modelPath: manifest.modelPath,
+      manifest
+    };
+  }
   if (!manifest.url) {
     return {
       ok: false,

@@ -8,144 +8,74 @@
 
 ## Make your AI remember the work
 
-Koed is a universal memory layer for AI clients. It captures project knowledge,
-coding sessions, decisions, debugging history, and remembered context, then makes
-that memory available through MCP recall.
-
-- Automatic conversation capture with hooks.
-- Seamless recall for prior conversations, project history, and remembered context.
-- Explorer for inspecting captured Koed memory.
-- Postgres + pgvector storage under your control.
-- Local embedding, reranking, and BullMQ or Postgres-backed memory processing.
+Koed helps your AI coding tool remember useful context from previous work, so it
+can bring back project decisions, debugging history, and other details when you
+need them.
 
 ## Quickstart
 
-> [!IMPORTANT]  
-> Koed Desktop/`koed-server` supervision is split from dependency lifecycle. Docker Compose remains a useful external dependency starter; `koed-server` does not own Compose lifecycle. `bundled-local` mode uses native Koed-owned dependencies under `KOED_HOME`; model downloads are explicit `koed-server models install` steps with SHA-256 verification.
->
-> Codex is currently the only supported AI Client integration for capture and recall. Future integrations are tracked separately.
+> [!IMPORTANT]
+> Codex is currently the only supported AI Client integration for capture and
+> recall.
 
-For local personal use with native bundled resources installed, `koed-server start` can run without Docker, external Postgres, or external Redis. From a fresh clone, Docker Compose remains an optional external dependency starter:
+### Requirements
 
-```bash
-pnpm env:setup
-docker compose --env-file .env -f examples/docker-compose/docker-compose.yml up -d --build
-pnpm desktop:start
-```
+- macOS, Linux, or WSL.
+- Node.js and pnpm.
+- Homebrew for the source-checkout bundled-local runtime install. Packaged
+  Desktop can use packaged native runtime assets; external dependency mode does
+  not require Homebrew.
+- Codex installed and signed in.
 
-For native bundled-local validation without Docker, set `KOED_DEPENDENCY_MODE=bundled-local`, ensure native Postgres, pgvector, llama-server, Python, and model assets are present, then run:
+If you are on Windows, run Koed inside WSL as Linux tooling. Keep `KOED_HOME`
+and checkout paths on Linux filesystem paths inside WSL; native Windows
+packaged app support is not shipped in this build.
 
-```bash
-pnpm smoke:bundled-local -- --full --json
-```
+### Start Koed Desktop from source
 
-`pnpm desktop:start` opens Koed Desktop, auto-starts `koed-server`, and runs
-the full Codex bootstrap + health-check sequence before showing the Explorer.
-`koed-server` connects to Postgres, the configured work queue backend, and
-Embedding Service endpoints from `.env`/environment or
-`KOED_HOME/config/server.json`; it does not start or stop Docker Compose
-dependencies. Set `KOED_DEPENDENCY_MODE=bundled-local` to let
-`koed-server start` launch native local Postgres + Embedding Service runtimes
-under `KOED_HOME` and use the Postgres-backed local queue by default.
-For server/private VPS deployments, treat `koed-server` as the product
-deployment unit and Postgres, the queue backend, Embedding Service,
-reverse-proxy/TLS, and backup jobs as dependencies. See
-[Server deployment boundary](docs/server-deployment-boundary.md).
-
-On macOS, Linux, and WSL, native runtime assets can be inspected and explicitly
-installed with Homebrew:
+From a fresh clone, run:
 
 ```bash
-node packages/koed-server/dist/cli.js runtime status --provider homebrew --json
-node packages/koed-server/dist/cli.js runtime install --provider homebrew --dependency-mode bundled-local --json
+pnpm install
+pnpm local:setup
+KOED_DEPENDENCY_MODE=bundled-local KOED_AUTO_PORTS=1 pnpm desktop:start
 ```
 
-Bundled-local model installers are opt-in and require artifact URLs plus
-expected SHA-256 checksums:
+`pnpm local:setup` prepares `.env`, builds the workspace, links the Homebrew-backed bundled-local runtime, and installs the default embedding model.
+
+Koed Desktop opens when setup is complete and configures Codex automatically.
+Packaged Desktop follows the same local-personal bundled-local flow, but it
+starts its managed `koed-server` from the app bundle, prefers packaged native
+runtime assets, and keeps `KOED_HOME` state outside the source checkout. See
+[Koed Desktop](apps/desktop/README.md) for packaged first-run,
+signing/notarization, and smoke details.
+
+If setup fails with a path like `/path/to`, unset any placeholder overrides
+from previous experiments before restarting Desktop:
 
 ```bash
-KOED_EMBEDDING_MODEL_URL=https://example.test/Qwen3-Embedding-0.6B-Q8_0.gguf \
-KOED_EMBEDDING_MODEL_SHA256=<64-hex-sha256> \
-node packages/koed-server/dist/cli.js models install --kind embedding --json
+unset KOED_HOME KOED_EMBEDDING_MODEL_PATH KOED_RERANKER_MODEL_PATH
 ```
 
-To verify the native bundled-local path with isolated ports and a temporary
-`KOED_HOME`, run:
+To stop Koed later:
 
 ```bash
-pnpm smoke:bundled-local -- --full --install-runtime --json
+node packages/koed-server/dist/cli.js stop --json
 ```
 
-Bundled-local smoke requires native bundled resources and an embedding model.
-`--install-runtime` explicitly runs the Homebrew-backed runtime install for the
-temporary `KOED_HOME`; model install still requires `KOED_EMBEDDING_MODEL_URL`
-plus `KOED_EMBEDDING_MODEL_SHA256`. The full smoke verifies API Token creation,
-Capture Hook-like personal ingestion, Projection, queue/embedding work, Memory
-Answer evidence retrieval, Explorer reachability, and cleanup through
-`koed-server stop --json`.
+## Advanced setup and configuration
 
-If you need to rerun only the last-mile client setup manually, use
-`pnpm clients:bootstrap`.
+The README keeps to one basic local path. For other options, see:
 
-The Explorer runs beside the API and is embedded by Koed Desktop:
-
-```text
-http://localhost:5174
-```
-
-If you want the lower-level control-plane commands directly, start the
-long-running supervisor in one terminal:
-
-```bash
-pnpm --filter @koed/koed-server build
-node packages/koed-server/dist/cli.js start
-```
-
-After `koed-server start` reports that the API is ready, run setup from another
-terminal:
-
-```bash
-node packages/koed-server/dist/cli.js setup codex --json
-```
-
-## Connect Codex
-
-`koed-server setup codex --json` performs the same guided Codex setup that
-`pnpm clients:bootstrap` uses after the control plane is running. It creates or
-reuses the local API Token, builds the MCP Server, writes the Codex MCP and
-Supported Capture Hook configuration, writes the app-provisioned Explorer
-credential, verifies capture, and finishes with a doctor check. Koed Desktop
-runs this sequence automatically on startup when Codex is not yet configured.
-The lower-level `pnpm codex:bootstrap`, `pnpm explorer:bootstrap`, and
-`pnpm clients:bootstrap` Local Operator Scripts remain available for development
-and recovery. See [docs/codex-integration.md](docs/codex-integration.md) for
-manual setup and deeper Codex integration details.
-
-## Configuration
-
-Start from `.env.example`:
-
-```bash
-pnpm env:setup
-```
-
-See [Configuration](docs/configuration.md) for all environment variables,
-embedding settings, logging options, AI client values, and production notes.
-
-## Architecture
-
-Koed is composed of the following primary services:
-
-| Path                     | Role                                                                                                |
-| ------------------------ | --------------------------------------------------------------------------------------------------- |
-| `apps/api`               | API for auth, capture policy, memory capture, recall, graph inspection, export, and diagnostics     |
-| `apps/worker`            | Background memory and embedding jobs                                                                |
-| `apps/embedding-service` | Local embedding and reranking service                                                               |
-| `apps/explorer`          | Explorer UI for inspecting captured Koed memory                                                     |
-| `apps/desktop`           | Electron control surface that starts/monitors `koed-server`, runs setup/doctor, and embeds Explorer |
-| `packages/koed-server`   | Local control-plane CLI/supervisor for `KOED_HOME`, service status, setup, and startup              |
-| `packages/mcp-server`    | MCP Server, local answer bridge, and Codex Capture Hook                                             |
-| `packages/db`            | Postgres repositories, migrations, and operator scripts                                             |
+- [Running Koed](docs/running-koed.md) for external dependency mode, manual
+  server commands, alternate ports, smoke tests, packaged first-run notes, and
+  desktop development.
+- [Configuration](docs/configuration.md) for environment variables, runtime
+  modes, model overrides, logging, and production settings.
+- [Codex integration](docs/codex-integration.md) for manual Codex setup and
+  recovery.
+- [Security](docs/security.md), [Backup and restore](docs/backup-restore.md),
+  and [Upgrades](docs/upgrades.md) for operational guidance.
 
 For local Desktop, private VPS, Team Self-Hosted, and cloud deployment
 language, use `koed-server` plus dependencies as the product boundary. API,
@@ -187,17 +117,14 @@ See [docs/backup-restore.md](docs/backup-restore.md) and
 
 ## Releases
 
-Koed currently uses one product release version for the self-hosted
-distribution. Add a changeset for release-noteworthy changes:
+Koed uses one product release version for the self-hosted distribution. Add a
+changeset for release-noteworthy changes:
 
 ```bash
 pnpm changeset
 ```
 
-Select `@koed/koed` and choose the SemVer bump for the deployment as a whole.
-Merging to `main` creates or updates a release pull request. Merging that
-release pull request verifies the release commit, creates a single `vX.Y.Z` tag,
-and publishes a GitHub Release.
+See [docs/upgrades.md](docs/upgrades.md) for upgrade guidance.
 
 ## License
 
@@ -217,7 +144,6 @@ services, and managed add-ons.
 - [Security](docs/security.md)
 - [Backup and restore](docs/backup-restore.md)
 - [Upgrades](docs/upgrades.md)
-- [Database development](docs/database-development.md)
 - [Codex integration](docs/codex-integration.md)
 - [License](docs/license.md)
 - [Commercial feature boundary](docs/commercial-feature-boundary.md)

@@ -40,7 +40,8 @@ if (pool) {
 }
 const repository = pool
   ? createMemorySourceRepository(pool, {
-      envelopeEncryptionProvider: createEnvelopeEncryptionProviderFromEnvironment()
+      envelopeEncryptionProvider:
+        createEnvelopeEncryptionProviderFromEnvironment()
     })
   : null;
 const requireRepository = (): MemorySourceRepository => {

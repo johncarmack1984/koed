@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { createServer, type Server } from "node:net";
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -47,27 +48,56 @@ const healthyStatus = (root: string): KoedServerStatus => ({
   captureHook: { state: "healthy" },
   codex: { state: "healthy", configured: true },
   lcmSummaryService: { state: "healthy" },
+  upstreamBackends: {
+    state: "healthy",
+    registered: 0,
+    validated: 0,
+    stale: 0,
+    failed: 0,
+    notChecked: 0
+  },
   explorer: { state: "healthy", url: "http://localhost:5174" },
   lastVerification: { state: "healthy", checkedAt: "2026-01-01T00:00:00.000Z" }
 });
 
+const createPackagedAppRuntime = (root: string) => {
+  for (const entry of [
+    "koed-runtime/api/dist/index.js",
+    "koed-runtime/worker/dist/index.js",
+    "koed-runtime/embedding-service/dist/index.js",
+    "koed-runtime/explorer-dist/index.html",
+    "koed-runtime/mcp-server/dist/cli.js",
+    "koed-runtime/mcp-server/dist/capture-hook.js",
+    "koed-runtime/api/node_modules/@koed/db/dist/index.js",
+    "koed-runtime/api/node_modules/@koed/db/drizzle/meta/_journal.json"
+  ]) {
+    const path = resolve(root, entry);
+    mkdirSync(resolve(path, ".."), { recursive: true });
+    writeFileSync(path, "");
+  }
+};
+
 const createNativeResources = (root: string) => {
   const pgBin = resolve(root, "vendor", "postgres", "bin");
   const appDir = resolve(root, "apps", "embedding-service");
-  const venvBin = resolve(appDir, ".venv", "bin");
+  const serviceDist = resolve(appDir, "dist");
   const llamaBin = resolve(root, "vendor", "llama.cpp");
   mkdirSync(pgBin, { recursive: true });
-  mkdirSync(venvBin, { recursive: true });
+  mkdirSync(serviceDist, { recursive: true });
   mkdirSync(llamaBin, { recursive: true });
   for (const name of ["initdb", "pg_ctl", "psql"]) {
-    writeFileSync(resolve(pgBin, name), "");
+    const path = resolve(pgBin, name);
+    writeFileSync(path, "");
+    chmodSync(path, 0o755);
   }
-  writeFileSync(resolve(appDir, "app.py"), "");
-  writeFileSync(resolve(venvBin, "python"), "");
-  writeFileSync(resolve(llamaBin, "llama-server"), "");
+  const serviceEntry = resolve(serviceDist, "index.js");
+  const llamaServer = resolve(llamaBin, "llama-server");
+  writeFileSync(serviceEntry, "");
+  writeFileSync(llamaServer, "");
+  chmodSync(llamaServer, 0o755);
   return {
     pgBin,
-    python: resolve(venvBin, "python"),
+    serviceEntry,
     llamaServer: resolve(llamaBin, "llama-server")
   };
 };
@@ -265,18 +295,27 @@ describe("start supervisor", () => {
       resolve(resources.pgBin, "pg_ctl")
     );
     expect(commands.map((command) => command.args.join(" "))).toContain(
-      "--filter @koed/api --filter @koed/worker --filter @koed/explorer build"
+      "--filter @koed/api --filter @koed/worker --filter @koed/embedding-service --filter @koed/explorer build"
     );
-    const buildEnv = commands.at(-1)?.env;
+    const buildEnv = commands.find((command) =>
+      command.args.includes("@koed/embedding-service")
+    )?.env;
     expect(buildEnv?.WORK_QUEUE_BACKEND).toBe("local");
     expect(buildEnv?.KOED_MODELS_DIR).toBe(resolve(root, "models"));
+    expect(buildEnv?.EMBEDDING_MODEL).toBe("qwen3-0.6b");
+    expect(buildEnv?.MODEL_KEY).toBe("qwen3-0.6b");
     expect(buildEnv?.EMBEDDING_MODEL_PATH).toBe(
       resolve(root, "models", "Qwen3-Embedding-0.6B-Q8_0.gguf")
     );
     expect(buildEnv?.DATABASE_URL).toBe(
       "postgres://koed:koed-local-postgres@127.0.0.1:25432/koed"
     );
-    expect(spawned[0]?.command).toBe(resources.python);
+    expect(spawned[0]?.command).toBe(process.execPath);
+    expect(spawned[0]?.args).toEqual([resources.serviceEntry]);
+    expect(spawned[0]?.env?.LLAMA_SERVER_BINARY).toBe(resources.llamaServer);
+    expect(spawned[0]?.env?.MODEL_PATH).toBe(
+      resolve(root, "models", "Qwen3-Embedding-0.6B-Q8_0.gguf")
+    );
     expect(spawned.map((entry) => entry.args.join(" "))).toContain(
       "--filter @koed/worker start"
     );
@@ -367,9 +406,7 @@ describe("start supervisor", () => {
     expect(commands.some((command) => command.command === "docker")).toBe(
       false
     );
-    expect(commands.map((command) => command.command)).toContain(
-      resolve(root, "vendor", "postgres", "bin", "pg_ctl")
-    );
+    expect(commands.map((command) => command.command)).not.toContain("docker");
   });
 
   it("allows bundled-local models split across directories for native runtime", async () => {
@@ -415,7 +452,9 @@ describe("start supervisor", () => {
       collectStatus: async () => healthyStatus(root)
     });
 
-    const buildEnv = commands.at(-1)?.env;
+    const buildEnv = commands.find((command) =>
+      command.args.includes("@koed/embedding-service")
+    )?.env;
     expect(buildEnv?.EMBEDDING_MODEL_PATH).toBe(
       resolve(embeddingDir, "embedding.gguf")
     );
@@ -572,6 +611,66 @@ describe("start supervisor", () => {
     expect(credential.apiToken).toBe("koed_test_token");
   });
 
+  it("starts packaged app services without workspace pnpm scripts", async () => {
+    const root = tempDir();
+    createPackagedAppRuntime(root);
+    const commands: Array<{ command: string; args: string[] }> = [];
+    const spawned: Array<{
+      command: string;
+      args: string[];
+      cwd?: string;
+      env?: NodeJS.ProcessEnv;
+    }> = [];
+
+    await startKoedServer({
+      environment: {
+        KOED_HOME: root,
+        KOED_REPO_ROOT: root,
+        KOED_PACKAGED_DESKTOP: "1",
+        KOED_DEPENDENCY_MODE: "external",
+        DATABASE_URL: "postgres://operator/db",
+        REDIS_URL: "redis://operator:6379",
+        EMBEDDING_SERVICE_URL: "http://operator:8000"
+      },
+      timeoutMs: 1,
+      pollIntervalMs: 1,
+      spawnSync: (command, args) => {
+        commands.push({ command, args });
+        return spawnResult();
+      },
+      spawn: (command, args, options) => {
+        spawned.push({
+          command,
+          args,
+          cwd: options?.cwd?.toString(),
+          env: options?.env
+        });
+        return child(spawned.length);
+      },
+      collectStatus: async () => healthyStatus(root)
+    });
+
+    expect(commands).toEqual([]);
+    expect(spawned[0]?.args).toEqual([
+      resolve(root, "koed-runtime/api/dist/index.js")
+    ]);
+    expect(spawned[1]?.args).toEqual([
+      resolve(root, "koed-runtime/worker/dist/index.js")
+    ]);
+    expect(spawned[1]?.env?.EMBEDDING_SERVICE_TOKEN).toBeDefined();
+    expect(spawned[1]?.env?.EMBEDDING_SERVICE_TOKEN).not.toBe("");
+    expect(spawned[1]?.env?.EMBEDDING_MODEL).toBe("qwen3-0.6b");
+    expect(spawned[2]?.args[0]).toMatch(/explorer-static-server\.js$/);
+    expect(spawned[2]?.args.slice(1)).toEqual([
+      resolve(root, "koed-runtime/explorer-dist"),
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "5174"
+    ]);
+    expect(spawned.map((entry) => entry.command)).not.toContain("pnpm");
+  });
+
   it("starts app services without managing external dependencies", async () => {
     const root = tempDir();
     const commands: Array<{ command: string; args: string[] }> = [];
@@ -600,7 +699,7 @@ describe("start supervisor", () => {
 
     expect(commands.map((command) => command.args.join(" "))).toEqual([
       resolve(root, "scripts/setup-env.mjs"),
-      "--filter @koed/api --filter @koed/worker --filter @koed/explorer build"
+      "--filter @koed/api --filter @koed/worker --filter @koed/embedding-service --filter @koed/explorer build"
     ]);
     expect(commands.some((command) => command.command === "docker")).toBe(
       false

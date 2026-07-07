@@ -571,7 +571,7 @@ describeDb("memory repository visibility", () => {
           tenantId: team.id,
           objectClass: "memory_event",
           teamId: team.id,
-          teamWorkspaceId: workspace!.id
+          workspaceId: workspace!.id
         },
         rowFamily: "team_memory_event"
       }
@@ -789,7 +789,7 @@ describeDb("memory repository visibility", () => {
       [owner.id]
     );
     expect(rawEncryptedRows.rows[0]).toMatchObject({ count: 2 });
-    expect(rawEncryptedRows.rows[0].ciphertext).not.toContain(
+    expect(rawEncryptedRows.rows[0]!.ciphertext).not.toContain(
       "commercial Memory Event payload"
     );
 
@@ -1894,7 +1894,7 @@ describeDb("memory repository visibility", () => {
       expect(encrypted.rows).toHaveLength(1);
       const row = encrypted.rows[0]!;
       const decrypted = await decryptEnvelopeToUtf8(provider, {
-        version: row.envelope_version,
+        version: row.envelope_version as 1,
         providerMode: row.provider_mode,
         keyId: row.key_id,
         keyVersion: row.key_version,
@@ -3596,7 +3596,7 @@ describeDb("memory repository visibility", () => {
       {
         syncRelationshipId: fixture.sync.relationship.id,
         idempotencyKey: "package-1",
-        packageManifest,
+        packageManifest: packageManifest as unknown as Record<string, unknown>,
         packageChecksum: "sha256:package",
         totalBytes: 20
       }
@@ -3606,7 +3606,7 @@ describeDb("memory repository visibility", () => {
       {
         syncRelationshipId: fixture.sync.relationship.id,
         idempotencyKey: "package-1",
-        packageManifest: replayManifest,
+        packageManifest: replayManifest as unknown as Record<string, unknown>,
         packageChecksum: "sha256:ignored",
         totalBytes: 20
       }

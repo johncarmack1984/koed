@@ -112,7 +112,9 @@ const resolveCredentialOperationFamilies = (
   const requested = Array.from(new Set(families));
   if (requested.some((family) => !allowed.has(family))) {
     throw Object.assign(
-      new Error("Device credential operation families exceed enrollment challenge"),
+      new Error(
+        "Device credential operation families exceed enrollment challenge"
+      ),
       { statusCode: 400 }
     );
   }

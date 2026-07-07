@@ -128,26 +128,21 @@ const persistEncryptedMemoryNodeTextField = async (
     plaintext: string;
   }
 ): Promise<void> => {
-  await upsertEncryptedFieldPayloadWithClient(
-    client,
-    input.actor,
-    provider,
-    {
-      sourceTable: "memory_nodes",
-      sourceId: input.nodeId,
-      sourceColumn: input.sourceColumn,
-      plaintext: input.plaintext,
-      visibility: input.visibility,
-      rowFamily: "memory_node",
-      scope: {
-        tenantId: input.actor.userId,
-        objectClass: "memory_node"
-      },
-      aad: {
-        nodeId: input.nodeId
-      }
+  await upsertEncryptedFieldPayloadWithClient(client, input.actor, provider, {
+    sourceTable: "memory_nodes",
+    sourceId: input.nodeId,
+    sourceColumn: input.sourceColumn,
+    plaintext: input.plaintext,
+    visibility: input.visibility,
+    rowFamily: "memory_node",
+    scope: {
+      tenantId: input.actor.userId,
+      objectClass: "memory_node"
+    },
+    aad: {
+      nodeId: input.nodeId
     }
-  );
+  });
 };
 
 const mapMemoryNode = (row: MemoryNodeRow): MemoryNodeRecord => ({

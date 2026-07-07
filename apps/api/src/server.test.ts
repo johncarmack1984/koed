@@ -330,6 +330,10 @@ type CapabilitiesResponse = {
     objectStorage: string;
     deploymentTlsRequired: boolean;
   };
+  authenticatedCapabilities: {
+    available: boolean;
+    endpoint: string;
+  };
   providers: string[];
   capabilities: Record<
     string,
@@ -337,6 +341,7 @@ type CapabilitiesResponse = {
       availability: string;
       description: string;
       endpoints?: string[];
+      requiresAuthentication?: boolean;
     }
   >;
 };
@@ -477,7 +482,7 @@ type OpenApiResponse = { paths: Record<string, unknown> };
 type MemoryQuestionResponse = { question: MemoryQuestionDetailRecord };
 type MemoryQuestionsResponse = { questions: MemoryQuestionDetailRecord[] };
 
-const createFakeRepository = (): MemorySourceRepository => {
+const createFakeRepository = () => {
   const users = new Map<string, UserRecord>();
   const sessions = new Map<string, string>();
   const tokens = new Map<string, ApiTokenRecord & { tokenHash: string }>();
@@ -842,7 +847,7 @@ const createFakeRepository = (): MemorySourceRepository => {
     };
   };
 
-  return {
+  const repository = {
     health: async () => true,
     async countUsers() {
       return users.size;
@@ -1581,7 +1586,7 @@ const createFakeRepository = (): MemorySourceRepository => {
         : null;
     },
     async createTeamSessionShareGrant(actor, input) {
-      const access = await this.getTeamWorkspaceAccess(
+      const access = await this.getTeamWorkspaceAccess!(
         actor,
         input.teamWorkspaceId
       );
@@ -1645,7 +1650,7 @@ const createFakeRepository = (): MemorySourceRepository => {
       ) {
         return null;
       }
-      const access = await this.getTeamWorkspaceAccess(
+      const access = await this.getTeamWorkspaceAccess!(
         actor,
         input.teamWorkspaceId
       );
@@ -1675,7 +1680,7 @@ const createFakeRepository = (): MemorySourceRepository => {
       return revoked;
     },
     async listTeamSessionShareGrants(actor, input) {
-      const access = await this.getTeamWorkspaceAccess(
+      const access = await this.getTeamWorkspaceAccess!(
         actor,
         input.teamWorkspaceId
       );
@@ -2753,7 +2758,7 @@ const createFakeRepository = (): MemorySourceRepository => {
         }));
     },
     async listMemoryClusters(actor, input = {}) {
-      const items = await this.listMemoryBrowserItems(actor, input);
+      const items = await this.listMemoryBrowserItems!(actor, input);
       const groups = new Map<
         string,
         {
@@ -2784,33 +2789,33 @@ const createFakeRepository = (): MemorySourceRepository => {
       return [...groups.values()];
     },
     async listMemoriesInCluster(actor, clusterId, input = {}) {
-      const items = await this.listMemoryBrowserItems(actor, input);
+      const items = await this.listMemoryBrowserItems!(actor, input);
       return items.filter((item) => item.clusterId === clusterId);
     },
     async updateMemoryPresentation(actor, nodeId, input) {
-      const memory = await this.getVisibleMemoryNode(actor, nodeId);
+      const memory = await this.getVisibleMemoryNode!(actor, nodeId);
       if (!memory) return null;
       if (input.summaryText) memory.summaryText = input.summaryText;
       if (input.pinned !== undefined)
         memory.pinnedAt = input.pinned ? new Date().toISOString() : null;
       if (input.visibility) memory.visibility = input.visibility;
       return (
-        (await this.listMemoryBrowserItems(actor)).find(
+        (await this.listMemoryBrowserItems!(actor)).find(
           (item) => item.id === nodeId
         ) ?? null
       );
     },
     async deleteMemory(actor, nodeId) {
-      const memory = await this.getVisibleMemoryNode(actor, nodeId);
+      const memory = await this.getVisibleMemoryNode!(actor, nodeId);
       if (!memory) return false;
       invalidatedNodes.add(memory.id);
       return true;
     },
     async getLcmGraphOverview(actor) {
-      const visibleNodes = await this.listLcmGraphNodes(actor, {
+      const visibleNodes = await this.listLcmGraphNodes!(actor, {
         includeInvalidated: true
       });
-      const visibleEvents = await this.listLcmGraphEvents(actor, {
+      const visibleEvents = await this.listLcmGraphEvents!(actor, {
         includeInvalidated: true
       });
       return {
@@ -2911,7 +2916,7 @@ const createFakeRepository = (): MemorySourceRepository => {
     },
     async getLcmGraphNode(actor, nodeId, input = {}) {
       const node = (
-        await this.listLcmGraphNodes(actor, {
+        await this.listLcmGraphNodes!(actor, {
           includeInvalidated: input.includeInvalidated,
           query: nodeId,
           limit: 1
@@ -2920,7 +2925,7 @@ const createFakeRepository = (): MemorySourceRepository => {
       if (!node) return null;
       const sourceIds = nodeSources.get(nodeId) ?? [];
       const sources = (
-        await this.listLcmGraphEvents(actor, {
+        await this.listLcmGraphEvents!(actor, {
           includeInvalidated: true,
           limit: 500
         })
@@ -2939,7 +2944,7 @@ const createFakeRepository = (): MemorySourceRepository => {
       };
     },
     async updateLcmGraphNode(actor, nodeId, input) {
-      const memory = await this.getVisibleMemoryNode(actor, nodeId);
+      const memory = await this.getVisibleMemoryNode!(actor, nodeId);
       if (!memory) return null;
       if (input.summaryText) {
         memory.summaryText = input.summaryText;
@@ -2947,10 +2952,10 @@ const createFakeRepository = (): MemorySourceRepository => {
         summaryCorrections.set(nodeId, "user-corrected");
       }
       if (input.visibility) memory.visibility = input.visibility;
-      return this.getLcmGraphNode(actor, nodeId);
+      return this.getLcmGraphNode!(actor, nodeId);
     },
     async invalidateLcmGraphNode(actor, nodeId) {
-      return this.deleteMemory(actor, nodeId);
+      return this.deleteMemory!(actor, nodeId);
     },
     async listLcmGraphEvents(actor, input = {}) {
       return events
@@ -3060,7 +3065,7 @@ const createFakeRepository = (): MemorySourceRepository => {
         });
     },
     async listLcmGraphThreads(actor, input = {}) {
-      const visibleEvents = await this.listLcmGraphEvents(actor, {
+      const visibleEvents = await this.listLcmGraphEvents!(actor, {
         ...input,
         limit: 500
       });
@@ -3290,7 +3295,7 @@ const createFakeRepository = (): MemorySourceRepository => {
     },
     async getLcmGraphEvent(actor, eventId, input = {}) {
       const event = (
-        await this.listLcmGraphEvents(actor, {
+        await this.listLcmGraphEvents!(actor, {
           includeInvalidated: input.includeInvalidated,
           query: eventId,
           limit: 1
@@ -3306,27 +3311,28 @@ const createFakeRepository = (): MemorySourceRepository => {
         : (event ?? null);
     },
     async updateLcmGraphEvent(actor, eventId, input) {
-      const event = await this.getLcmGraphEvent(actor, eventId);
+      const event = await this.getLcmGraphEvent!(actor, eventId);
       if (!event) return null;
       const raw = events.find((candidate) => candidate.id === eventId);
       if (raw && input.visibility) raw.visibility = input.visibility;
       if (input.invalidated) invalidatedEvents.add(eventId);
-      return this.getLcmGraphEvent(actor, eventId, {
+      return this.getLcmGraphEvent!(actor, eventId, {
         includeInvalidated: Boolean(input.invalidated)
       });
     },
     async invalidateLcmGraphEvent(actor, eventId) {
-      const event = await this.getLcmGraphEvent(actor, eventId);
+      const event = await this.getLcmGraphEvent!(actor, eventId);
       if (!event) return false;
       invalidatedEvents.add(eventId);
       return true;
     },
     async exportMemoryRecords(actor) {
-      const overview = await this.getLcmGraphOverview(actor);
+      const overview = await this.getLcmGraphOverview!(actor);
       const nodes = await Promise.all(
-        (await this.listLcmGraphNodes(actor, { includeInvalidated: true })).map(
-          (node) =>
-            this.getLcmGraphNode(actor, node.id, { includeInvalidated: true })
+        (
+          await this.listLcmGraphNodes!(actor, { includeInvalidated: true })
+        ).map((node) =>
+          this.getLcmGraphNode!(actor, node.id, { includeInvalidated: true })
         )
       );
       return {
@@ -3335,7 +3341,7 @@ const createFakeRepository = (): MemorySourceRepository => {
         nodes: nodes.filter((node): node is NonNullable<typeof node> =>
           Boolean(node)
         ),
-        events: await this.listLcmGraphEvents(actor, {
+        events: await this.listLcmGraphEvents!(actor, {
           includeInvalidated: true
         })
       };
@@ -3510,7 +3516,8 @@ const createFakeRepository = (): MemorySourceRepository => {
         )
       } satisfies ExpandedMemoryNode;
     }
-  };
+  } satisfies Partial<MemorySourceRepository>;
+  return repository as unknown as MemorySourceRepository;
 };
 
 describe("api health", () => {
@@ -3922,12 +3929,12 @@ describe("api health", () => {
         deploymentTlsRequired: true
       }
     });
-    expect(cloud.capabilities["auth.workos"].availability).toBe("unavailable");
-    expect(cloud.capabilities["auth.deviceEnrollment"]).toMatchObject({
+    expect(cloud.capabilities["auth.workos"]!.availability).toBe("unavailable");
+    expect(cloud.capabilities["auth.deviceEnrollment"]!).toMatchObject({
       availability: "available",
       requiresAuthentication: true
     });
-    expect(cloud.capabilities["memory.crossIdentitySync"].availability).toBe(
+    expect(cloud.capabilities["memory.crossIdentitySync"]!.availability).toBe(
       "unavailable"
     );
     expect(cloudResponse.body).not.toContain("WORKOS_API_KEY");
@@ -4087,7 +4094,7 @@ describe("api health", () => {
 
     const capabilities = jsonBody<CapabilitiesResponse>(response);
     expect(capabilities.auth.providers).toEqual(["local", "workos"]);
-    expect(capabilities.capabilities["auth.workos"].availability).toBe(
+    expect(capabilities.capabilities["auth.workos"]!.availability).toBe(
       "partial"
     );
     expect(response.body).not.toContain("sk_test_hidden");
@@ -5891,7 +5898,7 @@ describe("account and access flows", () => {
         const payload: unknown = init?.body
           ? (JSON.parse(String(init.body)) as unknown)
           : undefined;
-        const upstreamResponse = await upstreamApp.inject({
+        const upstreamResponse = (await upstreamApp.inject({
           method: (init?.method ?? "GET") as
             | "GET"
             | "POST"
@@ -5900,8 +5907,12 @@ describe("account and access flows", () => {
             | "DELETE",
           url: `${parsedUrl.pathname}${parsedUrl.search}`,
           headers: init?.headers as Record<string, string>,
-          payload
-        });
+          payload: payload as Record<string, unknown> | undefined
+        })) as unknown as {
+          body: string;
+          statusCode: number;
+          headers: Record<string, string | string[] | undefined>;
+        };
         return new Response(upstreamResponse.body, {
           status: Number(upstreamResponse.statusCode),
           headers: {

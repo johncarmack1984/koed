@@ -95,19 +95,12 @@ describe("local edge upstream routing", () => {
         upstreamBackend: backend(),
         deviceCredential: credential(["capture_writes"]),
         capturePolicy: {
-          id: "policy",
-          ownerUserId: "user",
-          targetType: "global",
-          projectId: null,
-          projectName: null,
-          projectPath: null,
-          threadId: null,
-          threadName: null,
           captureState: "enabled",
           visibility: "personal",
+          paused: false,
           pauseUntil: null,
-          createdAt: "2026-01-01T00:00:00.000Z",
-          updatedAt: "2026-01-01T00:00:00.000Z"
+          source: "default",
+          policy: null
         }
       })
     ).toMatchObject({
@@ -124,19 +117,12 @@ describe("local edge upstream routing", () => {
         upstreamBackend: backend({ routePolicy: { captureWrites: "enabled" } }),
         deviceCredential: credential(["capture_writes"]),
         capturePolicy: {
-          id: "policy",
-          ownerUserId: "user",
-          targetType: "global",
-          projectId: null,
-          projectName: null,
-          projectPath: null,
-          threadId: null,
-          threadName: null,
           captureState: "disabled",
           visibility: "personal",
+          paused: false,
           pauseUntil: null,
-          createdAt: "2026-01-01T00:00:00.000Z",
-          updatedAt: "2026-01-01T00:00:00.000Z"
+          source: "default",
+          policy: null
         }
       })
     ).toMatchObject({
@@ -147,17 +133,10 @@ describe("local edge upstream routing", () => {
 
   it("blocks capture writes when Capture Policy is paused/ask or not personal", () => {
     const basePolicy = {
-      id: "policy",
-      ownerUserId: "user",
-      targetType: "global" as const,
-      projectId: null,
-      projectName: null,
-      projectPath: null,
-      threadId: null,
-      threadName: null,
+      paused: false,
       pauseUntil: null,
-      createdAt: "2026-01-01T00:00:00.000Z",
-      updatedAt: "2026-01-01T00:00:00.000Z"
+      source: "default" as const,
+      policy: null
     };
 
     expect(
@@ -186,8 +165,10 @@ describe("local edge upstream routing", () => {
         capturePolicy: {
           ...basePolicy,
           captureState: "enabled",
-          visibility: "private"
-        }
+          visibility: "team"
+        } as unknown as Parameters<
+          typeof resolveLocalEdgeRouteDecision
+        >[0]["capturePolicy"]
       })
     ).toMatchObject({
       action: "deny_fail_closed",

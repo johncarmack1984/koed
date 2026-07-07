@@ -2,7 +2,9 @@
 
 Use `.env.example` as the canonical Koed environment example. It is the starting point for local and production deployments.
 
-For a local deployment, run:
+The README Quickstart covers the basic bundled-local setup and packaged Desktop first-run. This page is the advanced reference for environment variables, runtime modes, external dependency URLs, and production settings.
+
+For any local deployment, start by running:
 
 ```bash
 pnpm env:setup
@@ -114,6 +116,26 @@ management, sync/offload, or admin operations. Operators must explicitly enable
 allowed operation families with `koed-server upstream policy`; later routing and
 sync work must consume the cached capabilities and route policy before enabling
 remote-dependent surfaces.
+
+## KOED_HOME Layout
+
+Koed-owned local state lives under `KOED_HOME`:
+
+- `config/` for `server.json`, `local-ports.json`, and `explorer-token.json`
+- `run/` for `koed-server.json`, `last-verification.json`, and native runtime state
+- `logs/` for service logs, including `postgres.log`
+- `data/` for native database files, including `data/postgres`
+- `models/` for embedding and reranker model files
+- `cache/` for installer metadata and downloaded artifact cache
+- `runtime/` for bundled or packaged native runtime binaries
+
+Packaged Desktop, headless local-personal startup, and repair commands all read and write this same layout.
+
+## Platform Expectations
+
+- macOS: packaged Desktop and bundled-local provisioning path.
+- Linux and WSL: headless development, smoke, and the same CLI contracts when bundled-local runtime assets are available. Packaged Linux native assets require glibc 2.35+ on Ubuntu 22.04/Debian 12 or newer. Keep `KOED_HOME` and checkout paths on Linux filesystem paths inside WSL, not `/mnt/<drive>`.
+- Native Windows packaged app support: not shipped in this build; use WSL for local development. Windows host browsers can reach Koed through WSL localhost forwarding when available, or by browsing the WSL IP directly as a fallback.
 
 ## Required Deployment Values
 
@@ -250,14 +272,14 @@ policy, or full URLs containing customer content.
 - `WORK_QUEUE_BACKEND`: `bullmq` by default for Redis/BullMQ queues. Set `local` to use the Postgres-backed `local_work_queue` table for API/Worker jobs; this does not require Redis for job queues, though Redis may still be used for rate-limit or cache stores if configured.
 - `EMBEDDING_SERVICE_HOST_PORT`: host port mapped to the Embedding Service dependency container when using the Docker Compose starter. Default `3800`.
 - `EMBEDDING_SERVICE_URL`: explicit Embedding Service URL consumed by `koed-server`, API, and Worker in external dependency mode. For the Docker Compose starter, use `http://localhost:${EMBEDDING_SERVICE_HOST_PORT}`.
-- `KOED_EMBEDDING_MODEL_URL` / `KOED_EMBEDDING_MODEL_SHA256`: artifact URL and expected SHA-256 used by `koed-server models install --kind embedding`. Install writes to `KOED_HOME/models` unless `KOED_EMBEDDING_MODEL_PATH` overrides the destination.
+- `KOED_EMBEDDING_MODEL_URL` / `KOED_EMBEDDING_MODEL_SHA256`: optional custom artifact URL and expected SHA-256 used by `koed-server models install --kind embedding`. When unset, Koed installs the default pinned Qwen embedding model. Install writes to `KOED_HOME/models` unless `KOED_EMBEDDING_MODEL_PATH` overrides the destination.
 - `KOED_RERANKER_MODEL_URL` / `KOED_RERANKER_MODEL_SHA256`: artifact URL and expected SHA-256 used by `koed-server models install --kind reranker`. Install writes to `KOED_HOME/models` unless `KOED_RERANKER_MODEL_PATH` overrides the destination.
 - `KOED_BUNDLED_POSTGRES_MODE`: deprecated. Bundled-local Postgres is native-only; `compose` is ignored and missing native binaries report setup guidance.
-- `KOED_POSTGRES_BIN_DIR`: directory containing native `initdb`, `pg_ctl`, `psql`, `pg_dump`, and `pg_restore` binaries for bundled-local Postgres. Defaults to `KOED_HOME/runtime/postgres/bin`, with source-checkout `vendor/postgres/bin` only as a development fallback. Individual startup binary overrides are also available with `KOED_POSTGRES_INITDB_BIN`, `KOED_POSTGRES_PG_CTL_BIN`, and `KOED_POSTGRES_PSQL_BIN`; hosted backup commands may use `PSQL_BIN`, `PG_DUMP_BIN`, and `PG_RESTORE_BIN` for external database operators.
+- `KOED_POSTGRES_BIN_DIR`: directory containing native `initdb`, `pg_ctl`, `psql`, `pg_dump`, and `pg_restore` binaries for bundled-local Postgres. Defaults to `KOED_HOME/runtime/postgres/bin`, then packaged Desktop resources when running packaged Desktop, with source-checkout `vendor/postgres/bin` only as a development fallback. Individual startup binary overrides are also available with `KOED_POSTGRES_INITDB_BIN`, `KOED_POSTGRES_PG_CTL_BIN`, and `KOED_POSTGRES_PSQL_BIN`; hosted backup commands may use `PSQL_BIN`, `PG_DUMP_BIN`, and `PG_RESTORE_BIN` for external database operators.
 - `KOED_POSTGRES_DATA_DIR`, `KOED_POSTGRES_RUN_DIR`, `KOED_POSTGRES_LOG_PATH`: optional native bundled-local Postgres data, socket/runtime, and log paths. Defaults live under `KOED_HOME`.
 - `KOED_BUNDLED_EMBEDDING_MODE`: deprecated. Bundled-local Embedding Service is native-only; `compose` is ignored and missing native assets report setup guidance.
-- `KOED_EMBEDDING_PYTHON_BIN`: Python executable for the native bundled-local Embedding Service. Defaults to `KOED_HOME/runtime/embedding-service/.venv/bin/python`, with source-checkout `apps/embedding-service/.venv/bin/python` only as a development fallback.
-- `KOED_EMBEDDING_LLAMA_SERVER_BIN`: llama-server executable for the native bundled-local Embedding Service. Defaults to `KOED_HOME/runtime/llama.cpp/llama-server`, with source-checkout `vendor/llama.cpp/llama-server` only as a development fallback; the Docker default `EMBEDDING_LLAMA_SERVER_BINARY=/opt/llama.cpp/llama-server` is ignored for native auto-detection unless overridden with this setting.
+- `KOED_EMBEDDING_LLAMA_SERVER_BIN`: llama-server executable for the native bundled-local Embedding Service. Defaults to `KOED_HOME/runtime/llama.cpp/llama-server`, then packaged Desktop resources when running packaged Desktop, with source-checkout `vendor/llama.cpp/llama-server` only as a development fallback; the Docker default `EMBEDDING_LLAMA_SERVER_BINARY=/opt/llama.cpp/llama-server` is ignored for native auto-detection unless overridden with this setting.
+- `KOED_PACKAGED_DESKTOP=1`: selects packaged Desktop resolver behavior. Packaged mode does not use source-checkout fallbacks unless `KOED_ALLOW_PACKAGED_SOURCE_FALLBACK=1` is set for developer diagnostics. `status --json` and `doctor --json` include runtime artifact source diagnostics such as `koed-home-runtime`, `packaged-resource`, or `source-checkout`.
 - `KOED_EMBEDDING_HOST`, `KOED_EMBEDDING_PORT`: host and port for the native bundled-local Embedding Service. Defaults to `127.0.0.1` and `EMBEDDING_SERVICE_HOST_PORT`/`3800`.
 - `koed-server runtime status --provider homebrew --json`: macOS, Linux, and WSL diagnostic command for Homebrew-backed native runtime assets. It does not install packages or mutate Homebrew state.
 - `koed-server runtime install --provider homebrew --dependency-mode bundled-local --json`: explicit macOS, Linux, and WSL install command that may run Homebrew for missing `postgresql@17`, `pgvector`, and `llama.cpp`, links selected binaries under `KOED_HOME/runtime`, and writes metadata under `KOED_HOME/cache`.

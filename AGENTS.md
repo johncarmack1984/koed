@@ -10,15 +10,18 @@ If you are helping an Operator or User get started in a fresh clone, begin here:
 4. `docs/configuration.md` → environment and deployment settings
 5. `CONTEXT.md` → product language and canonical terms
 
-Fresh-clone bootstrap should assume Docker Desktop (or another running Docker daemon) is required before Koed startup. The happy path is:
+Fresh-clone bootstrap should follow the README bundled-local Quickstart. The happy path avoids Docker and uses Koed-owned native local dependencies under `KOED_HOME`:
 
 ```bash
+pnpm install
 pnpm env:setup
-docker compose -f examples/docker-compose/docker-compose.yml up -d --build
-pnpm desktop:start
+pnpm build
+node packages/koed-server/dist/cli.js runtime install --provider homebrew --dependency-mode bundled-local --json
+node packages/koed-server/dist/cli.js models install --kind embedding --json
+KOED_DEPENDENCY_MODE=bundled-local pnpm desktop:start
 ```
 
-If Docker is unavailable, surface that first instead of proceeding to Koed startup.
+If Homebrew or native runtime installation is unavailable, surface that first instead of silently switching to Docker or another external dependency path. Docker Compose and other external dependency starters are advanced documentation paths.
 
 If you are making code changes, keep using the contributor guidance below.
 
@@ -32,8 +35,8 @@ If you are making code changes, keep using the contributor guidance below.
 
 ## Architecture Documentation
 
-- Update `docs/service-sequence-overview.md` whenever a change affects service ordering, service boundaries, ingestion, Projection, LCM summarisation, retrieval, embedding, storage, or AI-client integration flow.
-- If a change does not require a sequence overview update, say so explicitly in the final response or PR description.
+- Update documentation in `/docs` whenever a change affects service ordering, service boundaries, ingestion, Projection, LCM summarisation, retrieval, embedding, storage, or AI-client integration flow.
+- If a change does not require documentation updates, say so explicitly in the final response or PR description.
 
 ## Planning And TODOs
 
@@ -59,6 +62,7 @@ If you are making code changes, keep using the contributor guidance below.
 
 - Use the repository pull request template at `.github/pull_request_template.md` when drafting PR descriptions.
 - Before creating a PR, validate that the change satisfies all acceptance criteria for the linked ticket. If any acceptance criterion is not met, state that explicitly in the PR description with the reason.
+- Before pushing PR updates, run the cheap CI-equivalent local checks that apply to the touched files, including formatting, linting, and typechecking. Use full `pnpm fmt:prettier:check`, `pnpm lint`, and relevant `pnpm --filter ... typecheck` / `pnpm --filter ... build` checks when feasible; if local untracked files block a full check, run a targeted equivalent and call out the limitation before pushing.
 - After opening or updating a PR, watch CI with `gh run watch` or equivalent until checks finish, unless the user asks not to wait.
 - Before adding or omitting a changeset, tell the user whether the issue appears release-noteworthy, recommend a bump level, justify the recommendation, and ask for confirmation. Err toward a minor bump for user-visible features, configuration changes, deployment/runtime changes, or meaningful behavior changes. Reserve major bumps for explicit breaking changes, and patch bumps for narrow fixes or documentation-only release notes.
 
