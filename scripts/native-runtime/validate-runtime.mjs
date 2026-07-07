@@ -76,6 +76,13 @@ const executableChecks = (runtimeRoot) => [
   ]
 ];
 
+const pythonImportChecks = [
+  "fastapi",
+  "huggingface_hub",
+  "pydantic",
+  "uvicorn"
+];
+
 const validateExecutables = (runtimeRoot) =>
   executableChecks(runtimeRoot).flatMap(([name, command, args, pattern]) => {
     if (!existsSync(command))
@@ -94,18 +101,82 @@ const validateExecutables = (runtimeRoot) =>
     ];
   });
 
-const collectMachOFiles = (runtimeRoot) =>
-  [
+const validateEmbeddingPythonImports = (runtimeRoot) => {
+  const python = resolve(
+    runtimeRoot,
+    "embedding-service",
+    ".venv",
+    "bin",
+    "python"
+  );
+  if (!existsSync(python)) {
+    return [
+      {
+        name: "embedding-service-python-imports",
+        command: python,
+        ok: false,
+        output: "missing python"
+      }
+    ];
+  }
+  const result = run(python, [
+    "-c",
+    `import importlib.util, sys; missing = [name for name in ${JSON.stringify(pythonImportChecks)} if importlib.util.find_spec(name) is None]; print("missing=" + ",".join(missing)); sys.exit(1 if missing else 0)`
+  ]);
+  const output = `${result.stdout}\n${result.stderr}`.trim();
+  return [
+    {
+      name: "embedding-service-python-imports",
+      command: result.command,
+      ok: result.status === 0,
+      output
+    }
+  ];
+};
+
+const pgConfigValue = (runtimeRoot, flag) => {
+  const pgConfig = resolve(runtimeRoot, "postgres", "bin", "pg_config");
+  if (!existsSync(pgConfig)) return undefined;
+  const result = run(pgConfig, [flag]);
+  if (result.status !== 0 || result.error) return undefined;
+  return result.stdout.trim();
+};
+
+const collectLoaderFiles = (runtimeRoot, platform) => {
+  const files = [
     resolve(runtimeRoot, "postgres", "bin", "initdb"),
     resolve(runtimeRoot, "postgres", "bin", "pg_ctl"),
     resolve(runtimeRoot, "postgres", "bin", "psql"),
     resolve(runtimeRoot, "postgres", "bin", "pg_config"),
-    resolve(runtimeRoot, "postgres", "lib", "postgresql", "vector.dylib"),
     resolve(runtimeRoot, "llama.cpp", "llama-server")
-  ].filter(existsSync);
+  ];
+  const pkglibdir = pgConfigValue(runtimeRoot, "--pkglibdir");
+  if (pkglibdir) {
+    files.push(
+      resolve(pkglibdir, platform === "darwin" ? "vector.dylib" : "vector.so")
+    );
+  } else {
+    files.push(
+      resolve(
+        runtimeRoot,
+        "postgres",
+        "lib",
+        platform === "darwin" ? "vector.dylib" : "vector.so"
+      ),
+      resolve(
+        runtimeRoot,
+        "postgres",
+        "lib",
+        "postgresql",
+        platform === "darwin" ? "vector.dylib" : "vector.so"
+      )
+    );
+  }
+  return files.filter(existsSync);
+};
 
 const validateMacLoaders = (runtimeRoot) =>
-  collectMachOFiles(runtimeRoot).map((file) => {
+  collectLoaderFiles(runtimeRoot, "darwin").map((file) => {
     const result = run("otool", ["-L", file]);
     const output = `${result.stdout}\n${result.stderr}`;
     const forbidden = [
@@ -141,7 +212,7 @@ const validateLinuxLoaders = (runtimeRoot) => {
   ) {
     throw new Error("Linux native runtime artifacts require glibc 2.35+.");
   }
-  return collectMachOFiles(runtimeRoot).map((file) => {
+  return collectLoaderFiles(runtimeRoot, "linux").map((file) => {
     const result = run("ldd", [file]);
     const output = `${result.stdout}\n${result.stderr}`;
     return {
@@ -151,6 +222,87 @@ const validateLinuxLoaders = (runtimeRoot) => {
       output: output.trim()
     };
   });
+};
+
+const validatePostgresExtensions = (runtimeRoot) => {
+  const tempRoot = mkdtempSync(
+    resolve(tmpdir(), "koed-postgres-extensions-validate-")
+  );
+  const dataDir = resolve(tempRoot, "data");
+  const socketDir = resolve(tempRoot, "socket");
+  const logPath = resolve(tempRoot, "postgres.log");
+  const initdb = resolve(runtimeRoot, "postgres", "bin", "initdb");
+  const pgCtl = resolve(runtimeRoot, "postgres", "bin", "pg_ctl");
+  const psql = resolve(runtimeRoot, "postgres", "bin", "psql");
+  const port = String(55000 + Math.floor(Math.random() * 5000));
+  const steps = [];
+  try {
+    const mkdir = run("mkdir", ["-p", socketDir]);
+    steps.push(mkdir);
+    failOnBad(mkdir);
+    const init = run(initdb, [
+      "-D",
+      dataDir,
+      "--auth=trust",
+      "--username=koed"
+    ]);
+    steps.push(init);
+    failOnBad(init);
+    const start = run(pgCtl, [
+      "-D",
+      dataDir,
+      "-l",
+      logPath,
+      "-o",
+      `-p ${port} -k ${socketDir}`,
+      "start"
+    ]);
+    steps.push(start);
+    failOnBad(start);
+    const createPgcrypto = run(psql, [
+      "-h",
+      socketDir,
+      "-p",
+      port,
+      "-U",
+      "koed",
+      "-d",
+      "postgres",
+      "-c",
+      "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+    ]);
+    steps.push(createPgcrypto);
+    failOnBad(createPgcrypto);
+    const createVector = run(psql, [
+      "-h",
+      socketDir,
+      "-p",
+      port,
+      "-U",
+      "koed",
+      "-d",
+      "postgres",
+      "-c",
+      "CREATE EXTENSION IF NOT EXISTS vector;"
+    ]);
+    steps.push(createVector);
+    failOnBad(createVector);
+    return { ok: true, steps };
+  } catch (error) {
+    return {
+      ok: false,
+      steps,
+      error: error instanceof Error ? error.message : String(error),
+      log: existsSync(logPath)
+        ? run("tail", ["-100", logPath]).stdout
+        : undefined
+    };
+  } finally {
+    if (existsSync(pgCtl) && existsSync(dataDir)) {
+      run(pgCtl, ["-D", dataDir, "stop", "-m", "fast"]);
+    }
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
 };
 
 const validatePackagedProvider = (runtimeRoot) => {
@@ -204,20 +356,28 @@ const runValidation = (options) => {
   if (!existsSync(runtimeRoot))
     throw new Error(`runtime root missing: ${runtimeRoot}`);
   const executables = validateExecutables(runtimeRoot);
+  const pythonImports = validateEmbeddingPythonImports(runtimeRoot);
   const loaders =
     options.platform === "darwin"
       ? validateMacLoaders(runtimeRoot)
       : options.platform === "linux"
         ? validateLinuxLoaders(runtimeRoot)
         : [];
+  const postgresExtensions = validatePostgresExtensions(runtimeRoot);
   const packagedProvider = validatePackagedProvider(runtimeRoot);
   const errors = [
     ...executables
       .filter((entry) => !entry.ok)
       .map((entry) => `${entry.name} failed: ${entry.output ?? entry.message}`),
+    ...pythonImports
+      .filter((entry) => !entry.ok)
+      .map((entry) => `${entry.name} failed: ${entry.output}`),
     ...loaders
       .filter((entry) => !entry.ok)
       .map((entry) => `${entry.file} loader failed: ${entry.output}`),
+    ...(postgresExtensions.ok
+      ? []
+      : [`Postgres extension validation failed: ${postgresExtensions.error}`]),
     ...(packagedProvider.skipped || packagedProvider.ok
       ? []
       : ["packaged provider validation failed"])
@@ -227,7 +387,9 @@ const runValidation = (options) => {
     runtimeRoot,
     platform: options.platform,
     executables,
+    pythonImports,
     loaders,
+    postgresExtensions,
     packagedProvider,
     errors
   };
