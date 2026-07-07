@@ -87,12 +87,16 @@ describe("Homebrew runtime provisioning", () => {
       "/opt/homebrew/opt/postgresql@17/bin/initdb",
       "/opt/homebrew/opt/postgresql@17/bin/pg_ctl",
       "/opt/homebrew/opt/postgresql@17/bin/psql",
+      "/opt/homebrew/opt/postgresql@17/bin/pg_dump",
+      "/opt/homebrew/opt/postgresql@17/bin/pg_restore",
       "/opt/homebrew/opt/postgresql@17/bin/pg_config",
       "/opt/homebrew/opt/llama.cpp/bin/llama-server",
       "/opt/homebrew/share/postgresql@17/extension/vector.control",
       resolve(root, "runtime", "postgres", "bin", "initdb"),
       resolve(root, "runtime", "postgres", "bin", "pg_ctl"),
       resolve(root, "runtime", "postgres", "bin", "psql"),
+      resolve(root, "runtime", "postgres", "bin", "pg_dump"),
+      resolve(root, "runtime", "postgres", "bin", "pg_restore"),
       resolve(root, "runtime", "llama.cpp", "llama-server")
     ]);
     const calls: string[][] = [];
@@ -139,6 +143,8 @@ describe("Homebrew runtime provisioning", () => {
       "/opt/homebrew/opt/postgresql@17/bin/initdb",
       "/opt/homebrew/opt/postgresql@17/bin/pg_ctl",
       "/opt/homebrew/opt/postgresql@17/bin/psql",
+      "/opt/homebrew/opt/postgresql@17/bin/pg_dump",
+      "/opt/homebrew/opt/postgresql@17/bin/pg_restore",
       "/opt/homebrew/opt/postgresql@17/bin/pg_config",
       "/opt/homebrew/opt/llama.cpp/bin/llama-server",
       "/opt/homebrew/share/postgresql@17/extension/vector.control"
@@ -197,6 +203,14 @@ describe("Homebrew runtime provisioning", () => {
         [
           "/opt/homebrew/opt/postgresql@17/bin/initdb",
           resolve(root, "runtime", "postgres", "bin", "initdb")
+        ],
+        [
+          "/opt/homebrew/opt/postgresql@17/bin/pg_dump",
+          resolve(root, "runtime", "postgres", "bin", "pg_dump")
+        ],
+        [
+          "/opt/homebrew/opt/postgresql@17/bin/pg_restore",
+          resolve(root, "runtime", "postgres", "bin", "pg_restore")
         ],
         [
           "/opt/homebrew/opt/llama.cpp/bin/llama-server",

@@ -15,6 +15,14 @@ import {
   installHomebrewRuntime
 } from "./runtime-homebrew.js";
 import { resolveKoedServerPaths } from "./paths.js";
+import {
+  listUpstreamBackends,
+  refreshUpstreamBackendCapabilities,
+  registerUpstreamBackend,
+  removeUpstreamBackend,
+  updateUpstreamBackendRoutePolicy,
+  type UpstreamRoutePolicyUpdate
+} from "./upstream-registry.js";
 
 export const usageText = `Usage: koed-server <command> [options]
 
@@ -30,6 +38,11 @@ Commands:
   models install --json  Download bundled local model with SHA-256 verification
   runtime status --json  Print native bundled-local runtime install state
   runtime install --json Install native bundled-local runtime assets explicitly
+  upstream list --json   List registered upstream backend status
+  upstream register --json Register or update an upstream backend
+  upstream refresh --json Refresh cached upstream capabilities
+  upstream policy --json  Update explicit upstream route-policy families
+  upstream remove --json Remove an upstream backend
 
 Options:
   --json                 Emit JSON output for commands that support it
@@ -52,6 +65,11 @@ export interface KoedServerCliDependencies {
   installModel?: typeof installLocalModel;
   collectRuntimeStatus?: typeof collectHomebrewRuntimeStatus;
   installRuntime?: typeof installHomebrewRuntime;
+  listUpstreams?: typeof listUpstreamBackends;
+  registerUpstream?: typeof registerUpstreamBackend;
+  refreshUpstream?: typeof refreshUpstreamBackendCapabilities;
+  updateUpstreamPolicy?: typeof updateUpstreamBackendRoutePolicy;
+  removeUpstream?: typeof removeUpstreamBackend;
   loadEnvironment?: typeof loadRepoEnv;
   resolvePaths?: typeof resolveKoedServerPaths;
   stdout?: Pick<NodeJS.WriteStream, "write">;
@@ -70,6 +88,14 @@ const flagValue = (args: string[], name: string): string | undefined => {
   return index >= 0 ? args[index + 1] : undefined;
 };
 
+const requireFlagValue = (args: string[], name: string): string => {
+  const value = flagValue(args, name);
+  if (!value) {
+    throw new Error(`${name} is required.`);
+  }
+  return value;
+};
+
 const assertRuntimeFlags = (args: string[], command: "status" | "install") => {
   const provider = flagValue(args, "--provider") ?? "homebrew";
   if (provider !== "homebrew") {
@@ -81,6 +107,31 @@ const assertRuntimeFlags = (args: string[], command: "status" | "install") => {
       "runtime install requires --dependency-mode bundled-local."
     );
   }
+};
+
+const routePolicyFlags: Array<{
+  flag: string;
+  key: keyof UpstreamRoutePolicyUpdate;
+}> = [
+  { flag: "--personal-memory-read", key: "personalMemoryRead" },
+  { flag: "--team-workspace-read", key: "teamWorkspaceRead" },
+  { flag: "--share-grant-management", key: "shareGrantManagement" },
+  { flag: "--capture-writes", key: "captureWrites" },
+  { flag: "--sync", key: "sync" },
+  { flag: "--admin", key: "admin" }
+];
+
+const parseRoutePolicyUpdate = (args: string[]): UpstreamRoutePolicyUpdate => {
+  const update: UpstreamRoutePolicyUpdate = {};
+  for (const { flag, key } of routePolicyFlags) {
+    const value = flagValue(args, flag);
+    if (!value) continue;
+    if (value !== "enabled" && value !== "disabled") {
+      throw new Error(`${flag} must be enabled or disabled.`);
+    }
+    update[key] = value;
+  }
+  return update;
 };
 
 export const runKoedServerCli = async (
@@ -97,6 +148,11 @@ export const runKoedServerCli = async (
     installModel = installLocalModel,
     collectRuntimeStatus = collectHomebrewRuntimeStatus,
     installRuntime = installHomebrewRuntime,
+    listUpstreams = listUpstreamBackends,
+    registerUpstream = registerUpstreamBackend,
+    refreshUpstream = refreshUpstreamBackendCapabilities,
+    updateUpstreamPolicy = updateUpstreamBackendRoutePolicy,
+    removeUpstream = removeUpstreamBackend,
     loadEnvironment = loadRepoEnv,
     resolvePaths = resolveKoedServerPaths,
     stdout = process.stdout,
@@ -255,6 +311,73 @@ export const runKoedServerCli = async (
         ...process.env
       };
       const result = installRuntime(paths, runtimeEnvironment);
+      if (wantsJson) {
+        printJson(stdout, result);
+      } else {
+        stdout.write(`${result.message}\n`);
+      }
+      return result.ok ? 0 : 1;
+    }
+
+    if (command === "upstream" && subcommand === "list") {
+      const paths = resolvePaths();
+      const result = listUpstreams(paths);
+      if (wantsJson) {
+        printJson(stdout, result);
+      } else {
+        stdout.write(`${result.message}\n`);
+      }
+      return result.ok ? 0 : 1;
+    }
+
+    if (command === "upstream" && subcommand === "register") {
+      const paths = resolvePaths();
+      const result = registerUpstream(paths, {
+        url: requireFlagValue(args, "--url"),
+        id: flagValue(args, "--id"),
+        displayName: flagValue(args, "--name"),
+        profile: flagValue(args, "--profile")
+      });
+      if (wantsJson) {
+        printJson(stdout, result);
+      } else {
+        stdout.write(`${result.message}\n`);
+      }
+      return result.ok ? 0 : 1;
+    }
+
+    if (command === "upstream" && subcommand === "refresh") {
+      const paths = resolvePaths();
+      const result = await refreshUpstream(
+        paths,
+        requireFlagValue(args, "--id")
+      );
+      if (wantsJson) {
+        printJson(stdout, result);
+      } else {
+        stdout.write(`${result.message}\n`);
+      }
+      return result.ok ? 0 : 1;
+    }
+
+    if (command === "upstream" && subcommand === "policy") {
+      const paths = resolvePaths();
+      const result = updateUpstreamPolicy(
+        paths,
+        requireFlagValue(args, "--id"),
+        parseRoutePolicyUpdate(args)
+      );
+      if (wantsJson) {
+        printJson(stdout, result);
+      } else {
+        stdout.write(`${result.message}\n`);
+      }
+      return result.ok ? 0 : 1;
+    }
+
+    if (command === "upstream" && subcommand === "remove") {
+      const paths = resolvePaths();
+      const result = removeUpstream(paths, requireFlagValue(args, "--id"));
       if (wantsJson) {
         printJson(stdout, result);
       } else {

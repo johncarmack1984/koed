@@ -1,0 +1,1 @@
+CREATE INDEX "audit_events_activation_team_idx" ON "audit_events" USING btree (("metadata" ->> 'teamId'),"created_at" DESC NULLS LAST,"audit_sequence" DESC NULLS LAST) WHERE "audit_events"."action" like 'analytics.activation.%' and "audit_events"."metadata" ? 'teamId';

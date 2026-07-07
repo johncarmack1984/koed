@@ -1,0 +1,6 @@
+ALTER TABLE "memory_embeddings" ADD COLUMN "queryable_vector_strategy" text DEFAULT 'trusted_backend_pgvector_v1' NOT NULL;--> statement-breakpoint
+ALTER TABLE "memory_embeddings" ADD COLUMN "search_boundary" text DEFAULT 'owner_user_dynamic_grants' NOT NULL;--> statement-breakpoint
+ALTER TABLE "memory_embeddings" ADD COLUMN "canonical_embedding_state" text DEFAULT 'not_stored' NOT NULL;--> statement-breakpoint
+ALTER TABLE "memory_embeddings" ADD CONSTRAINT "memory_embeddings_queryable_vector_strategy_check" CHECK ("memory_embeddings"."queryable_vector_strategy" in ('trusted_backend_pgvector_v1'));--> statement-breakpoint
+ALTER TABLE "memory_embeddings" ADD CONSTRAINT "memory_embeddings_search_boundary_check" CHECK ("memory_embeddings"."search_boundary" in ('owner_user_dynamic_grants'));--> statement-breakpoint
+ALTER TABLE "memory_embeddings" ADD CONSTRAINT "memory_embeddings_canonical_embedding_state_check" CHECK ("memory_embeddings"."canonical_embedding_state" in ('not_stored', 'encrypted_payload'));

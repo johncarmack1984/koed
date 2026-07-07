@@ -143,10 +143,15 @@ describe("start supervisor", () => {
         "EXPLORER_WEB_HOST_PORT=5174",
         "DATABASE_URL=postgres://repo/db",
         "REDIS_URL=redis://repo:6379",
-        "EMBEDDING_SERVICE_URL=http://repo:3800"
+        "EMBEDDING_SERVICE_URL=http://repo:3800",
+        "EMBEDDING_SERVICE_TOKEN=repo-token"
       ].join("\n")
     );
-    const spawned: Array<{ command: string; args: string[] }> = [];
+    const spawned: Array<{
+      command: string;
+      args: string[];
+      env?: NodeJS.ProcessEnv;
+    }> = [];
 
     await startKoedServer({
       environment: {
@@ -155,15 +160,17 @@ describe("start supervisor", () => {
         KOED_DEPENDENCY_MODE: "external",
         API_HOST_PORT: "4545",
         EXPLORER_WEB_HOST_PORT: "5574",
+        EXPLORER_WEB_HOST: "0.0.0.0",
         DATABASE_URL: "postgres://operator/db",
         REDIS_URL: "redis://operator:6379",
-        EMBEDDING_SERVICE_URL: "http://operator:3800"
+        EMBEDDING_SERVICE_URL: "http://operator:3800",
+        EMBEDDING_SERVICE_TOKEN: "operator-token"
       },
       timeoutMs: 1,
       pollIntervalMs: 1,
       spawnSync: () => spawnResult(),
-      spawn: (command, args) => {
-        spawned.push({ command, args });
+      spawn: (command, args, options) => {
+        spawned.push({ command, args, env: options?.env });
         const child = new EventEmitter() as EventEmitter & {
           pid: number;
           kill: () => boolean;
@@ -184,6 +191,14 @@ describe("start supervisor", () => {
     expect(
       spawned.find((entry) => entry.args.includes("preview"))?.args
     ).toContain("5574");
+    expect(
+      spawned.find((entry) => entry.args.includes("preview"))?.args
+    ).toContain("0.0.0.0");
+    expect(
+      spawned
+        .filter((entry) => entry.args.includes("start"))
+        .map((entry) => entry.env?.EMBEDDING_SERVICE_TOKEN)
+    ).toEqual(["operator-token", "operator-token"]);
   });
 
   it("starts bundled-local native Postgres and Embedding Service without Docker", async () => {

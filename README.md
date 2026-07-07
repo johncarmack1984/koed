@@ -45,17 +45,23 @@ the full Codex bootstrap + health-check sequence before showing the Explorer.
 Embedding Service endpoints from `.env`/environment or
 `KOED_HOME/config/server.json`; it does not start or stop Docker Compose
 dependencies. Set `KOED_DEPENDENCY_MODE=bundled-local` to let
-`koed-server start` launch native local Postgres + Embedding Service runtimes under
-`KOED_HOME` and use the Postgres-backed local queue by default.
+`koed-server start` launch native local Postgres + Embedding Service runtimes
+under `KOED_HOME` and use the Postgres-backed local queue by default.
+For server/private VPS deployments, treat `koed-server` as the product
+deployment unit and Postgres, the queue backend, Embedding Service,
+reverse-proxy/TLS, and backup jobs as dependencies. See
+[Server deployment boundary](docs/server-deployment-boundary.md).
 
-On macOS, native runtime assets can be inspected and explicitly installed with Homebrew:
+On macOS, Linux, and WSL, native runtime assets can be inspected and explicitly
+installed with Homebrew:
 
 ```bash
 node packages/koed-server/dist/cli.js runtime status --provider homebrew --json
 node packages/koed-server/dist/cli.js runtime install --provider homebrew --dependency-mode bundled-local --json
 ```
 
-Bundled-local model installers are opt-in and require artifact URLs plus expected SHA-256 checksums:
+Bundled-local model installers are opt-in and require artifact URLs plus
+expected SHA-256 checksums:
 
 ```bash
 KOED_EMBEDDING_MODEL_URL=https://example.test/Qwen3-Embedding-0.6B-Q8_0.gguf \
@@ -63,13 +69,20 @@ KOED_EMBEDDING_MODEL_SHA256=<64-hex-sha256> \
 node packages/koed-server/dist/cli.js models install --kind embedding --json
 ```
 
-To verify the native bundled-local path with isolated ports and a temporary `KOED_HOME`, run:
+To verify the native bundled-local path with isolated ports and a temporary
+`KOED_HOME`, run:
 
 ```bash
 pnpm smoke:bundled-local -- --full --install-runtime --json
 ```
 
-Bundled-local smoke requires native bundled resources and an embedding model. `--install-runtime` explicitly runs the Homebrew-backed runtime install for the temporary `KOED_HOME`; model install still requires `KOED_EMBEDDING_MODEL_URL` plus `KOED_EMBEDDING_MODEL_SHA256`. The full smoke verifies API Token creation, Capture Hook-like personal ingestion, Projection, queue/embedding work, Memory Answer evidence retrieval, Explorer reachability, and cleanup through `koed-server stop --json`.
+Bundled-local smoke requires native bundled resources and an embedding model.
+`--install-runtime` explicitly runs the Homebrew-backed runtime install for the
+temporary `KOED_HOME`; model install still requires `KOED_EMBEDDING_MODEL_URL`
+plus `KOED_EMBEDDING_MODEL_SHA256`. The full smoke verifies API Token creation,
+Capture Hook-like personal ingestion, Projection, queue/embedding work, Memory
+Answer evidence retrieval, Explorer reachability, and cleanup through
+`koed-server stop --json`.
 
 If you need to rerun only the last-mile client setup manually, use
 `pnpm clients:bootstrap`.
@@ -134,6 +147,11 @@ Koed is composed of the following primary services:
 | `packages/mcp-server`    | MCP Server, local answer bridge, and Codex Capture Hook                                             |
 | `packages/db`            | Postgres repositories, migrations, and operator scripts                                             |
 
+For local Desktop, private VPS, Team Self-Hosted, and cloud deployment
+language, use `koed-server` plus dependencies as the product boundary. API,
+Worker, and Explorer remain useful implementation names for code, logs, and
+troubleshooting.
+
 ## Security Notes
 
 Koed assumes the operator controls the deployment. The API supports bearer API
@@ -142,9 +160,12 @@ tokens for AI-client integrations. Local operators create tokens with
 hashes. Postgres and Redis should stay on private Docker/internal networks in
 production deployments. See [docs/security.md](docs/security.md).
 
-Memory payloads remain plaintext at the application layer in Postgres in the
-current build. Protect the database, volumes, backups, and administrator access
-with deployment-level controls.
+Local personal deployments may keep operational Memory rows in Postgres unless
+app-layer encryption is configured. Private VPS, Team Self-Hosted, and
+Koed-managed cloud deployments should configure envelope encryption for
+human-readable Memory and evidence payloads; queryable vectors still remain
+sensitive trusted-boundary data. Protect the database, volumes, backups, and
+administrator access with deployment-level controls.
 
 Report suspected vulnerabilities privately. See [SECURITY.md](SECURITY.md) for
 supported versions, the reporting channel, and guidance on not disclosing user
@@ -182,15 +203,21 @@ and publishes a GitHub Release.
 
 Koed is licensed under the GNU Affero General Public License version 3 only
 (`AGPL-3.0-only`). See [LICENSE](LICENSE), [CONTRIBUTING.md](CONTRIBUTING.md),
-and [docs/license.md](docs/license.md).
+and [docs/license.md](docs/license.md). See
+[Commercial Feature Boundary](docs/commercial-feature-boundary.md) for the
+launch recommendation on public distribution, Team Self-Hosted, hosted-only
+services, and managed add-ons.
 
 ## Learn More
 
 - [Running Koed](docs/running-koed.md)
 - [Configuration](docs/configuration.md)
+- [Server deployment boundary](docs/server-deployment-boundary.md)
+- [Hosted database roles](docs/hosted-database-roles.md)
 - [Security](docs/security.md)
 - [Backup and restore](docs/backup-restore.md)
 - [Upgrades](docs/upgrades.md)
 - [Database development](docs/database-development.md)
 - [Codex integration](docs/codex-integration.md)
 - [License](docs/license.md)
+- [Commercial feature boundary](docs/commercial-feature-boundary.md)

@@ -449,7 +449,7 @@ const localServiceEnv = (
           repoEnv.EMBEDDING_SERVICE_URL ??
           embeddingServiceUrl),
     EMBEDDING_SERVICE_TOKEN:
-      repoEnv.EMBEDDING_SERVICE_TOKEN ?? environment.EMBEDDING_SERVICE_TOKEN,
+      environment.EMBEDDING_SERVICE_TOKEN ?? repoEnv.EMBEDDING_SERVICE_TOKEN,
     EMBEDDING_MODEL:
       repoEnv.EMBEDDING_MODEL_KEY ??
       environment.EMBEDDING_MODEL_KEY ??
@@ -821,6 +821,10 @@ export const startKoedServer = async ({
         return "5174";
       }
     })();
+    const explorerHost =
+      environment.EXPLORER_WEB_HOST ??
+      refreshedRepoEnv.EXPLORER_WEB_HOST ??
+      "127.0.0.1";
 
     const children = {
       ...(nativeEmbeddingProcess
@@ -853,7 +857,7 @@ export const startKoedServer = async ({
           "vite",
           "preview",
           "--host",
-          "127.0.0.1",
+          explorerHost,
           "--port",
           explorerPort
         ],

@@ -42,6 +42,8 @@ export interface HomebrewRuntimeBinaries {
   initdb: HomebrewRuntimeBinaryStatus;
   pg_ctl: HomebrewRuntimeBinaryStatus;
   psql: HomebrewRuntimeBinaryStatus;
+  pg_dump: HomebrewRuntimeBinaryStatus;
+  pg_restore: HomebrewRuntimeBinaryStatus;
   pg_config: HomebrewRuntimeBinaryStatus;
   llama_server: HomebrewRuntimeBinaryStatus;
 }
@@ -236,6 +238,8 @@ const emptyBinaries = (): HomebrewRuntimeBinaries => ({
   initdb: { path: "", exists: false },
   pg_ctl: { path: "", exists: false },
   psql: { path: "", exists: false },
+  pg_dump: { path: "", exists: false },
+  pg_restore: { path: "", exists: false },
   pg_config: { path: "", exists: false },
   llama_server: { path: "", exists: false }
 });
@@ -319,6 +323,13 @@ const statusFrom = ({
     initdb: binary(binaryPaths, "initdb", postgresBin("initdb"), exists),
     pg_ctl: binary(binaryPaths, "pg_ctl", postgresBin("pg_ctl"), exists),
     psql: binary(binaryPaths, "psql", postgresBin("psql"), exists),
+    pg_dump: binary(binaryPaths, "pg_dump", postgresBin("pg_dump"), exists),
+    pg_restore: binary(
+      binaryPaths,
+      "pg_restore",
+      postgresBin("pg_restore"),
+      exists
+    ),
     pg_config: binary(
       binaryPaths,
       "pg_config",
@@ -349,6 +360,8 @@ const statusFrom = ({
     exists(resolve(koedRuntime.postgresBinDir, "initdb")) &&
     exists(resolve(koedRuntime.postgresBinDir, "pg_ctl")) &&
     exists(resolve(koedRuntime.postgresBinDir, "psql")) &&
+    exists(resolve(koedRuntime.postgresBinDir, "pg_dump")) &&
+    exists(resolve(koedRuntime.postgresBinDir, "pg_restore")) &&
     exists(koedRuntime.llamaServerBin);
   const ok = missing.length === 0 && linked;
   return {
@@ -500,6 +513,14 @@ export const installHomebrewRuntime = (
     [
       afterInstall.binaries.psql.path,
       resolve(afterInstall.koedRuntime.postgresBinDir, "psql")
+    ],
+    [
+      afterInstall.binaries.pg_dump.path,
+      resolve(afterInstall.koedRuntime.postgresBinDir, "pg_dump")
+    ],
+    [
+      afterInstall.binaries.pg_restore.path,
+      resolve(afterInstall.koedRuntime.postgresBinDir, "pg_restore")
     ],
     [
       afterInstall.binaries.pg_config.path,

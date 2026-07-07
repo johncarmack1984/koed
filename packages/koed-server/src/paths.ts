@@ -19,6 +19,7 @@ export interface KoedServerPaths {
   serverConfigPath: string;
   localPortsPath: string;
   explorerTokenPath: string;
+  upstreamBackendsPath: string;
   repoRoot: string;
 }
 
@@ -61,6 +62,7 @@ export const resolveKoedServerPaths = (
     serverConfigPath: resolve(koedHome, "config", "server.json"),
     localPortsPath: resolve(koedHome, "config", "local-ports.json"),
     explorerTokenPath: resolve(koedHome, "config", "explorer-token.json"),
+    upstreamBackendsPath: resolve(koedHome, "config", "upstream-backends.json"),
     repoRoot
   };
 };
