@@ -24,6 +24,8 @@ export interface KoedServerPaths {
   localPortsPath: string;
   explorerTokenPath: string;
   upstreamBackendsPath: string;
+  projectTeamWorkspaceLinksPath: string;
+  upstreamEnrollmentsPath: string;
   repoRoot: string;
 }
 
@@ -94,6 +96,16 @@ export const resolveKoedServerPaths = (
     localPortsPath: resolve(koedHome, "config", "local-ports.json"),
     explorerTokenPath: resolve(koedHome, "config", "explorer-token.json"),
     upstreamBackendsPath: resolve(koedHome, "config", "upstream-backends.json"),
+    projectTeamWorkspaceLinksPath: resolve(
+      koedHome,
+      "config",
+      "project-team-workspaces.json"
+    ),
+    upstreamEnrollmentsPath: resolve(
+      koedHome,
+      "run",
+      "upstream-enrollments.json"
+    ),
     repoRoot
   };
 };
