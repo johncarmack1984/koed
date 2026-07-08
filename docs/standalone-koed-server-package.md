@@ -110,6 +110,19 @@ Required `koed-runtime` files:
 - `mcp-server/dist/capture-hook.js`
 - `explorer-dist/index.html`
 
+The initial CI artifact build is produced by:
+
+```bash
+pnpm build
+pnpm koed-server:package -- --platform linux --arch x64 --json
+```
+
+The script stages production JS/service runtime files with `pnpm deploy`,
+writes `koed-server-package-manifest.json` and `README.txt`, validates the
+required runtime files, rejects native runtime assets, model files, and Python
+embedding leftovers, then emits a deterministic tarball and `.sha256` under
+`dist/koed-server-package/<platform>-<arch>/`.
+
 The package may be platform-specific even when most contents are JS. Platform
 specificity is useful for launchers, packaged Node runtime decisions, signature
 metadata, and install policy. Linux should distinguish at least `linux-x64` and
