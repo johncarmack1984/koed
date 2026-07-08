@@ -16,6 +16,11 @@ import {
   registerAuthRoutes,
   sessionCookieName
 } from "../auth/index.js";
+import { registerAnalyticsRoutes } from "../analytics/index.js";
+import {
+  createWorkosAuthKitClient,
+  type WorkosAuthKitClient
+} from "../auth/workos.js";
 import { registerApiTokenRoutes } from "../api-tokens/index.js";
 import {
   type CacheProvider,
@@ -27,6 +32,7 @@ import {
   resetMemoryRateLimitStore,
   type RateLimitStore
 } from "../infra/index.js";
+import { registerLocalEdgeRoutes } from "../local-edge/routes.js";
 import {
   canReceiveGraphStreamPayload,
   createGraphStreamService,
@@ -42,7 +48,12 @@ import {
   registerRecallRoutes,
   shouldIgnoreGraphStreamPayload
 } from "../memory/index.js";
-import { lcmCompactQueueName, memoryEmbedQueueName } from "@koed/shared";
+import {
+  createEnvelopeEncryptionProviderFromEnvironment,
+  type EnvelopeEncryptionProvider,
+  lcmCompactQueueName,
+  memoryEmbedQueueName
+} from "@koed/shared";
 import { registerTeamRoutes } from "../team/index.js";
 import { resolveApiServerConfig } from "./config.js";
 import {
@@ -57,6 +68,7 @@ import {
   setRequestLogContext
 } from "./logging.js";
 import { registerOperationalRoutes } from "./operational-routes.js";
+import type { ApiRouteContext } from "./context.js";
 
 export {
   canReceiveGraphStreamPayload,
@@ -69,6 +81,11 @@ interface BuildServerOptions {
   runMemoryJobsInlineForTests?: boolean;
   rateLimitStore?: RateLimitStore;
   cacheProvider?: CacheProvider;
+  upstreamBackendsPath?: string;
+  fetch?: typeof fetch;
+  resolveUpstreamAuthorization?: ApiRouteContext["localEdge"]["resolveUpstreamAuthorization"];
+  workosClient?: WorkosAuthKitClient;
+  envelopeEncryptionProvider?: EnvelopeEncryptionProvider;
 }
 
 const normalizeOrigin = (value: string): string => value.replace(/\/+$/, "");
@@ -98,6 +115,35 @@ const requestPathname = (request: FastifyRequest): string => {
     return request.url.split("?")[0] ?? request.url;
   }
 };
+
+const upstreamCredentialEnvironmentName = (backendId: string): string =>
+  `KOED_UPSTREAM_CREDENTIAL_${backendId.replace(/[^a-zA-Z0-9]/g, "_").toUpperCase()}`;
+
+const normalizeUpstreamAuthorization = (
+  value: string | undefined
+): string | null => {
+  const trimmed = value?.trim();
+  if (!trimmed || /[\r\n]/.test(trimmed)) {
+    return null;
+  }
+  if (/^(?:Bearer|Koed-Device)\s+\S+/i.test(trimmed)) {
+    return trimmed;
+  }
+  return `Koed-Device ${trimmed}`;
+};
+
+const defaultResolveUpstreamAuthorization: ApiRouteContext["localEdge"]["resolveUpstreamAuthorization"] =
+  (backend) => {
+    if (backend.credential?.status !== "configured") {
+      return null;
+    }
+    const reference = backend.credential.reference?.trim();
+    return normalizeUpstreamAuthorization(
+      reference
+        ? process.env[reference]
+        : process.env[upstreamCredentialEnvironmentName(backend.id)]
+    );
+  };
 
 export const buildServer = async (options: BuildServerOptions = {}) => {
   const config = resolveApiServerConfig();
@@ -141,8 +187,16 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   if (pool) {
     await runDbMigrations(pool);
   }
+  const envelopeEncryptionProvider: EnvelopeEncryptionProvider | undefined =
+    options.envelopeEncryptionProvider ??
+    createEnvelopeEncryptionProviderFromEnvironment();
   const repository =
-    options.repository ?? (pool ? createMemorySourceRepository(pool) : null);
+    options.repository ??
+    (pool
+      ? createMemorySourceRepository(pool, {
+          envelopeEncryptionProvider
+        })
+      : null);
   const createQueue = <TJobData>(name: string) =>
     createMemoryJobQueue<TJobData>(name, {
       backend: config.queueBackend,
@@ -314,11 +368,27 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
       graphCacheTtlSeconds: config.cache.graphCacheTtlSeconds,
       hashCacheKey: hashSecret
     },
+    encryption: {
+      envelopeEncryptionProvider
+    },
     capture: {
       scheduleMemoryEventProcessing,
       scheduleProjectedMemoryEventProcessing,
       resolveCapturePolicyForRequest,
       rejectUnsupportedCapturePolicy
+    },
+    localEdge: {
+      upstreamBackendsPath:
+        options.upstreamBackendsPath ?? config.upstreamBackendsPath,
+      fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
+      resolveUpstreamAuthorization:
+        options.resolveUpstreamAuthorization ??
+        defaultResolveUpstreamAuthorization
+    },
+    workos: {
+      client:
+        options.workosClient ??
+        createWorkosAuthKitClient(config.workos, options.fetch)
     }
   };
   graphStreamService = await createGraphStreamService({
@@ -392,13 +462,17 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     repository,
     embeddingQueue,
     compactionQueue,
+    envelopeEncryptionProvider,
+    alertFetch: options.fetch ?? globalThis.fetch.bind(globalThis),
     runCompactionInline,
     enqueueEmbedding
   });
 
   registerAuthRoutes(app, routeContext);
+  registerAnalyticsRoutes(app, routeContext);
   registerApiTokenRoutes(app, routeContext);
   registerTeamRoutes(app, routeContext);
+  registerLocalEdgeRoutes(app, routeContext);
   registerCaptureRoutes(app, routeContext);
   registerRawConversationRoutes(app, routeContext);
   registerRecallRoutes(app, routeContext);
