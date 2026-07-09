@@ -123,6 +123,22 @@ required runtime files, rejects native runtime assets, model files, and Python
 embedding leftovers, then emits a deterministic tarball and `.sha256` under
 `dist/koed-server-package/<platform>-<arch>/`.
 
+The release workflow publishes supported standalone app-runtime targets as
+GitHub Release assets:
+
+```text
+koed-server-<version>-<platform>-<arch>.tar.gz
+koed-server-<version>-<platform>-<arch>.tar.gz.sha256
+koed-server-app-runtime-<version>-<platform>-<arch>.manifest.json
+koed-release-artifacts-<version>.json
+```
+
+The release metadata JSON separates Desktop assets, `koed-server`
+app-runtime packages, native runtime artifacts, and model artifacts so Desktop
+or headless install flows can reference the supported package versions and
+download URLs without treating native runtime or model assets as part of the
+app-runtime package.
+
 The package may be platform-specific even when most contents are JS. Platform
 specificity is useful for launchers, packaged Node runtime decisions, signature
 metadata, and install policy. Linux should distinguish at least `linux-x64` and
