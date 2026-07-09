@@ -28,7 +28,10 @@ node packages/koed-server/dist/cli.js team workspace link \
 ```
 
 Use `--backend-id <id>` if the local Project mapping should record which
-registered backend owns the Team Workspace. The backend id is metadata only.
+registered backend owns the Team Workspace. `--upstream-backend-id <id>` is
+accepted as the same value for local-edge setup flows. The backend id is not a
+secret; it tells MCP which enrolled upstream should receive Team Workspace
+recall requests.
 
 Inspect or remove mappings:
 
@@ -88,12 +91,15 @@ KOED_TEAM_MEMORY_DOGFOOD=1 koed-mcp
 
 With that flag, `memory_answer` resolves the current Project root against
 `KOED_HOME/config/project-team-workspaces.json` and includes the mapped
-`team_workspace_id` on Team recall requests.
+`team_workspace_id` on Team recall requests. If the mapping also has a backend
+id, MCP sends the request through the local `koed-server` local-edge upstream
+proxy. The local API Token authenticates only to the local backend; the local
+backend uses the enrolled scoped upstream device credential for the Team
+Workspace request and does not forward the API Token upstream.
 
-Current caveat: MCP still normally has only an API Token, so Team Workspace
-recall requests fail closed unless the local backend has a session or scoped
-device credential path available to that request. The expected failure is:
-session cookie or scoped device credential required for Team Workspace recall.
+Team Workspace recall still fails closed when no mapped backend id is available,
+the upstream backend is not enrolled, the upstream capability cache is stale, or
+the upstream route policy does not explicitly enable Team Workspace read.
 
 ## Cleanup
 

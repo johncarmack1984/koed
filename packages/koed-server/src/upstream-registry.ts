@@ -305,7 +305,7 @@ const sanitizeCredentialReference = (
     return undefined;
   }
   if (
-    trimmed.length > 120 ||
+    trimmed.length > 240 ||
     /[\s?#]/.test(trimmed) ||
     /(?:token|secret|password|bearer|cookie|authorization)/i.test(trimmed)
   ) {

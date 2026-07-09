@@ -30,6 +30,13 @@ export {
   ENCRYPTED_PACKAGE_MANIFEST_VERSION,
   encryptedPackageObjectClasses
 } from "./encrypted-package.js";
+export {
+  deleteUpstreamCredentialSecret,
+  parseUpstreamCredentialReference,
+  readUpstreamCredentialAuthorization,
+  storeUpstreamCredentialSecret,
+  upstreamCredentialReferenceFor
+} from "./upstream-credential-store.js";
 export type {
   EncryptedPayloadEnvelope,
   EncryptedPayloadProvenance,
@@ -53,6 +60,10 @@ export type {
   EncryptedPackageManifest,
   EncryptedPackageObjectClass
 } from "./encrypted-package.js";
+export type {
+  UpstreamCredentialSecretInput,
+  UpstreamCredentialSecretStoreDeps
+} from "./upstream-credential-store.js";
 
 export type HealthStatus = "ok" | "degraded" | "error";
 

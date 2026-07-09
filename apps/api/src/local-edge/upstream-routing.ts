@@ -148,7 +148,10 @@ export const resolveLocalEdgeRouteDecision = (input: {
   requestedMode?: LocalEdgeRouteMode;
   upstreamBackend?: LocalEdgeUpstreamBackend | null;
   upstreamBackendId?: string | null;
-  deviceCredential?: DeviceCredentialRecord | null;
+  deviceCredential?: Pick<
+    DeviceCredentialRecord,
+    "upstreamBackendId" | "operationFamilies"
+  > | null;
   upstreamCredentialAvailable?: boolean;
   capturePolicy?: CapturePolicy | null;
   now?: Date;
@@ -421,7 +424,10 @@ const capabilityState = (
 const credentialState = (input: {
   upstreamBackendId?: string | null;
   operationFamily: LocalEdgeOperationFamily;
-  deviceCredential?: DeviceCredentialRecord | null;
+  deviceCredential?: Pick<
+    DeviceCredentialRecord,
+    "upstreamBackendId" | "operationFamilies"
+  > | null;
 }): LocalEdgeRouteDecision["credentialState"] => {
   const credential = input.deviceCredential;
   if (!credential) {

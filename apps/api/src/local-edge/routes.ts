@@ -261,7 +261,12 @@ export const registerLocalEdgeRoutes = (
 ) => {
   const {
     requireRepository,
-    auth: { authenticateSession, authenticateDeviceCredential, hashSecret },
+    auth: {
+      authenticateSession,
+      authenticateApiToken,
+      authenticateDeviceCredential,
+      hashSecret
+    },
     rateLimit: {
       memoryRead: memoryReadRateLimit,
       memoryWrite: memoryWriteRateLimit
@@ -282,7 +287,6 @@ export const registerLocalEdgeRoutes = (
     { preHandler: memoryWriteRateLimit },
     async (request) => {
       const repo = requireRepository();
-      await authenticateSession(request);
       const input = createDeviceEnrollmentChallengeSchema.parse(request.body);
       const pendingCredential = pendingDeviceCredentialFromInput(
         input.pending_credential,
@@ -327,7 +331,6 @@ export const registerLocalEdgeRoutes = (
     { preHandler: memoryReadRateLimit },
     async (request) => {
       const repo = requireRepository();
-      await authenticateSession(request);
       const params = deviceEnrollmentChallengeParamsSchema.parse(
         request.params
       );
@@ -509,7 +512,6 @@ export const registerLocalEdgeRoutes = (
     "/v1/local-edge/device-credentials/status",
     { preHandler: memoryReadRateLimit },
     async (request) => {
-      assertLocalEdgeRuntimeProfile(context.config.deploymentProfile);
       const authContext = await authenticateDeviceCredential(request);
 
       return {
@@ -580,7 +582,15 @@ export const registerLocalEdgeRoutes = (
     async (request, reply) => {
       assertLocalEdgeRuntimeProfile(context.config.deploymentProfile);
       const repo = requireRepository();
-      const authContext = await authenticateDeviceCredential(request);
+      const authHeader = request.headers.authorization?.trim() ?? "";
+      const authScheme = authHeader.split(/\s+/, 1)[0]?.toLowerCase();
+      const authContext =
+        authScheme === "bearer"
+          ? {
+              user: await authenticateApiToken(request),
+              credential: null
+            }
+          : await authenticateDeviceCredential(request);
       const input = localEdgeUpstreamOperationSchema.parse(request.body);
       const registry = upstreamRegistry();
       const upstreamBackend = upstreamBackendById(
@@ -604,7 +614,14 @@ export const registerLocalEdgeRoutes = (
         requestedMode: input.requested_mode,
         upstreamBackend,
         upstreamBackendId: input.upstream_backend_id,
-        deviceCredential: authContext.credential,
+        deviceCredential:
+          authContext.credential ??
+          (upstreamBackend && resolveUpstreamAuthorization(upstreamBackend)
+            ? {
+                upstreamBackendId: input.upstream_backend_id,
+                operationFamilies: [input.operation_family]
+              }
+            : null),
         upstreamCredentialAvailable: upstreamBackend
           ? Boolean(resolveUpstreamAuthorization(upstreamBackend))
           : false,

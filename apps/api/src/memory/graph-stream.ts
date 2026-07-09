@@ -146,6 +146,8 @@ export const createGraphStreamService = async ({
     }
   >();
   let graphListenClient: GraphListenClient | null = null;
+  let graphListenReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let closing = false;
 
   const scheduleGraphUpdate = (payload: GraphUpdatePayload) => {
     const action = graphUpdateActionForPayload(payload);
@@ -231,7 +233,23 @@ export const createGraphStreamService = async ({
     });
   };
 
-  if (pool) {
+  const scheduleGraphListenerReconnect = () => {
+    if (closing || !pool || graphListenReconnectTimer) {
+      return;
+    }
+    graphListenReconnectTimer = setTimeout(() => {
+      graphListenReconnectTimer = null;
+      void startGraphListener();
+    }, 1500);
+    graphListenReconnectTimer.unref?.();
+  };
+
+  const startGraphListener = async () => {
+    if (closing || !pool) {
+      return;
+    }
+    graphListenClient?.release();
+    graphListenClient = null;
     try {
       graphListenClient = await pool.connect();
       await graphListenClient.query("LISTEN koed_graph_updates");
@@ -273,6 +291,9 @@ export const createGraphStreamService = async ({
           },
           "graph update listener failed"
         );
+        graphListenClient?.release();
+        graphListenClient = null;
+        scheduleGraphListenerReconnect();
       });
     } catch (error) {
       graphListenClient?.release();
@@ -288,8 +309,11 @@ export const createGraphStreamService = async ({
         },
         "could not start graph update listener"
       );
+      scheduleGraphListenerReconnect();
     }
-  }
+  };
+
+  await startGraphListener();
 
   const registerRoutes = () => {
     app.options("/v1/memory/graph/stream", async (request, reply) => {
@@ -350,6 +374,7 @@ export const createGraphStreamService = async ({
   };
 
   const close = () => {
+    closing = true;
     for (const client of graphStreamClients) {
       client.reply.raw.end();
     }
@@ -358,7 +383,12 @@ export const createGraphStreamService = async ({
       clearTimeout(pending.timer);
     }
     pendingGraphUpdates.clear();
+    if (graphListenReconnectTimer) {
+      clearTimeout(graphListenReconnectTimer);
+      graphListenReconnectTimer = null;
+    }
     graphListenClient?.release();
+    graphListenClient = null;
   };
 
   return { registerRoutes, close };

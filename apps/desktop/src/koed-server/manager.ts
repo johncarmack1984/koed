@@ -130,6 +130,14 @@ const diagnosticStatus = ({
     captureHook: component("Run setup"),
     codex: { ...component("Run setup"), configured: false },
     lcmSummaryService: component(),
+    upstreamBackends: {
+      ...component("Connect Team Backend"),
+      registered: 0,
+      validated: 0,
+      stale: 0,
+      failed: 0,
+      notChecked: 0
+    },
     explorer: { ...component("Start Koed"), url: "" },
     lastVerification: { ...component("Run doctor"), checkedAt: null },
     details: {
@@ -449,6 +457,37 @@ const packageComponent = (
     }
   };
 };
+
+const backendIdFromResult = (value: unknown): string | null => {
+  if (!value || typeof value !== "object") return null;
+  const backend = (value as { backend?: unknown }).backend;
+  if (!backend || typeof backend !== "object") return null;
+  const id = (backend as { id?: unknown }).id;
+  return typeof id === "string" && id.trim() ? id.trim() : null;
+};
+
+const activationUrlFromResult = (value: unknown): string | null => {
+  if (!value || typeof value !== "object") return null;
+  const enrollment = (value as { enrollment?: unknown }).enrollment;
+  if (!enrollment || typeof enrollment !== "object") return null;
+  const activationUrl = (enrollment as { activationUrl?: unknown })
+    .activationUrl;
+  return typeof activationUrl === "string" && activationUrl.trim()
+    ? activationUrl.trim()
+    : null;
+};
+
+const resultOk = (value: unknown): boolean =>
+  Boolean(value && typeof value === "object" && (value as { ok?: unknown }).ok);
+
+const resultMessage = (value: unknown): string =>
+  value && typeof value === "object"
+    ? String(
+        (value as { message?: unknown; error?: unknown }).message ??
+          (value as { error?: unknown }).error ??
+          ""
+      )
+    : "";
 
 const bundledLocalDatabaseUrl = (environment: NodeJS.ProcessEnv): string => {
   const ports = readDesktopPorts(environment);
@@ -827,6 +866,114 @@ export const createKoedServerManager = ({
     return pollUntilReady();
   };
 
+  const connectTeamBackend = async (args?: Record<string, unknown>) => {
+    const url = typeof args?.url === "string" ? args.url.trim() : "";
+    if (!url) {
+      return { ok: false, error: "Team Backend URL is required." };
+    }
+    const registerResult = await runJson(
+      [
+        "upstream",
+        "register",
+        "--url",
+        url,
+        "--name",
+        "Team Backend",
+        "--profile",
+        "team_self_hosted"
+      ],
+      45_000
+    );
+    if (!resultOk(registerResult)) {
+      return registerResult;
+    }
+    const backendId = backendIdFromResult(registerResult);
+    if (!backendId) {
+      return {
+        ok: false,
+        error: "Upstream registration did not return a backend id."
+      };
+    }
+    const refreshResult = await runJson(
+      ["upstream", "refresh", "--id", backendId],
+      45_000
+    );
+    if (!resultOk(refreshResult)) {
+      return refreshResult;
+    }
+    const policyResult = await runJson(
+      [
+        "upstream",
+        "policy",
+        "--id",
+        backendId,
+        "--team-workspace-read",
+        "enabled",
+        "--share-grant-management",
+        "enabled"
+      ],
+      45_000
+    );
+    if (!resultOk(policyResult)) {
+      return policyResult;
+    }
+    const enrollResult = await runJson(
+      ["upstream", "enroll", "start", "--id", backendId],
+      60_000
+    );
+    if (!resultOk(enrollResult)) {
+      return enrollResult;
+    }
+    const activationUrl = activationUrlFromResult(enrollResult);
+    if (activationUrl) {
+      await openExternal(activationUrl);
+    }
+    return {
+      ok: true,
+      backendId,
+      activationUrl,
+      register: registerResult,
+      refresh: refreshResult,
+      policy: policyResult,
+      enrollment: enrollResult,
+      message: activationUrl
+        ? "Team Backend enrollment started. Complete approval in the browser."
+        : resultMessage(enrollResult)
+    };
+  };
+
+  const disconnectTeamBackend = async (args?: Record<string, unknown>) => {
+    const backendId =
+      typeof args?.backendId === "string" && args.backendId.trim()
+        ? args.backendId.trim()
+        : null;
+    if (backendId) {
+      return await runJson(
+        ["upstream", "disconnect", "--id", backendId],
+        45_000
+      );
+    }
+    const statusResult = await runJson(["status"], 10_000);
+    const details =
+      statusResult && typeof statusResult === "object"
+        ? (statusResult as KoedServerStatus).upstreamBackends?.details
+        : undefined;
+    const backends = Array.isArray(
+      (details as { backends?: unknown } | undefined)?.backends
+    )
+      ? ((details as { backends: Array<{ id?: unknown }> }).backends ?? [])
+      : [];
+    const firstBackendId =
+      typeof backends[0]?.id === "string" ? backends[0].id : null;
+    if (!firstBackendId) {
+      return { ok: false, error: "No upstream Team Backend is registered." };
+    }
+    return await runJson(
+      ["upstream", "disconnect", "--id", firstBackendId],
+      45_000
+    );
+  };
+
   const stop = async () => {
     const result = await runJson(["stop"], 45_000);
     if (serverProcess && !serverProcess.killed) {
@@ -854,6 +1001,8 @@ export const createKoedServerManager = ({
       package_status: () => runPackageStatusJson(),
       package_install: (args) => runPackageInstallJson(args),
       explorer_credential: () => provisionExplorerCredential(),
+      upstream_connect: connectTeamBackend,
+      upstream_disconnect: disconnectTeamBackend,
       start,
       start_daemon: requestDaemonStart,
       open_external: async (args) => {

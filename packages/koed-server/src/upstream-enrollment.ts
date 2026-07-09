@@ -1,7 +1,12 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import {
+  deleteUpstreamCredentialSecret,
+  readUpstreamCredentialAuthorization,
+  storeUpstreamCredentialSecret
+} from "@koed/shared";
 import type { KoedServerPaths } from "./paths.js";
 import {
   collectUpstreamRegistryStatus,
@@ -28,6 +33,9 @@ export interface UpstreamEnrollmentRecord {
   state: UpstreamEnrollmentState;
   activationUrl: string | null;
   requestedOperationFamilies: string[];
+  challengeId?: string;
+  credentialKeyId?: string;
+  credentialReference?: string;
   createdAt: string;
   updatedAt: string;
   expiresAt: string | null;
@@ -48,6 +56,7 @@ export interface UpstreamEnrollmentSummary {
   state: UpstreamEnrollmentState;
   activationUrl: string | null;
   requestedOperationFamilies: string[];
+  challengeId?: string;
   createdAt: string;
   updatedAt: string;
   expiresAt: string | null;
@@ -69,8 +78,10 @@ export interface UpstreamEnrollmentDeps {
   readFileSync?: typeof readFileSync;
   writeFileSync?: typeof writeFileSync;
   renameSync?: typeof renameSync;
+  fetch?: typeof fetch;
   now?: () => Date;
   randomId?: () => string;
+  randomBytes?: typeof randomBytes;
 }
 
 const depsWithDefaults = (
@@ -80,8 +91,10 @@ const depsWithDefaults = (
   readFileSync: deps.readFileSync ?? readFileSync,
   writeFileSync: deps.writeFileSync ?? writeFileSync,
   renameSync: deps.renameSync ?? renameSync,
+  fetch: deps.fetch ?? globalThis.fetch.bind(globalThis),
   now: deps.now ?? (() => new Date()),
-  randomId: deps.randomId ?? randomUUID
+  randomId: deps.randomId ?? randomUUID,
+  randomBytes: deps.randomBytes ?? randomBytes
 });
 
 const defaultStore = (now: string): UpstreamEnrollmentStore => ({
@@ -144,6 +157,17 @@ const normalizeRecord = (
   requestedOperationFamilies: Array.isArray(record.requestedOperationFamilies)
     ? record.requestedOperationFamilies.filter(isOperationFamily)
     : [],
+  ...(typeof record.challengeId === "string" && record.challengeId.trim()
+    ? { challengeId: record.challengeId.trim().slice(0, 120) }
+    : {}),
+  ...(typeof record.credentialKeyId === "string" &&
+  record.credentialKeyId.trim()
+    ? { credentialKeyId: record.credentialKeyId.trim().slice(0, 160) }
+    : {}),
+  ...(typeof record.credentialReference === "string" &&
+  record.credentialReference.trim()
+    ? { credentialReference: record.credentialReference.trim().slice(0, 180) }
+    : {}),
   createdAt: typeof record.createdAt === "string" ? record.createdAt : now,
   updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : now,
   expiresAt: typeof record.expiresAt === "string" ? record.expiresAt : null,
@@ -203,7 +227,7 @@ const sanitizeCredential = (
       ...(typeof credential.reference === "string" &&
       credential.reference.trim() &&
       !isSecretKey(credential.reference)
-        ? { reference: credential.reference.trim().slice(0, 120) }
+        ? { reference: credential.reference.trim().slice(0, 240) }
         : {})
     };
   }
@@ -239,22 +263,29 @@ const writeStore = (
 const summarizeEnrollment = (
   record: UpstreamEnrollmentRecord,
   backend?: UpstreamBackendSummary
-): UpstreamEnrollmentSummary => ({
-  backendId: record.backendId,
-  requestId: record.requestId,
-  state: record.state,
-  activationUrl: record.activationUrl,
-  requestedOperationFamilies: record.requestedOperationFamilies,
-  createdAt: record.createdAt,
-  updatedAt: record.updatedAt,
-  expiresAt: record.expiresAt,
-  ...(record.failureReason ? { failureReason: record.failureReason } : {}),
-  ...(record.failureMessage ? { failureMessage: record.failureMessage } : {}),
-  credential:
+): UpstreamEnrollmentSummary => {
+  const credential =
     record.state === "revoked"
       ? (record.credential ?? { status: "revoked" })
-      : (backend?.credential ?? record.credential ?? { status: "unknown" })
-});
+      : backend?.credential.status === "configured" ||
+          backend?.credential.status === "revoked"
+        ? backend.credential
+        : (record.credential ?? backend?.credential ?? { status: "unknown" });
+  return {
+    backendId: record.backendId,
+    requestId: record.requestId,
+    state: record.state,
+    activationUrl: record.activationUrl,
+    requestedOperationFamilies: record.requestedOperationFamilies,
+    ...(record.challengeId ? { challengeId: record.challengeId } : {}),
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    expiresAt: record.expiresAt,
+    ...(record.failureReason ? { failureReason: record.failureReason } : {}),
+    ...(record.failureMessage ? { failureMessage: record.failureMessage } : {}),
+    credential
+  };
+};
 
 const routePolicyOperationFamilies = (
   routePolicy: UpstreamRoutePolicy
@@ -281,6 +312,176 @@ const browserEnrollmentOperationFamilies = (
 
 const expiresAtFor = (now: Date): string =>
   new Date(now.getTime() + 10 * 60 * 1000).toISOString();
+
+const randomSecret = (
+  deps: Required<UpstreamEnrollmentDeps>,
+  bytes = 32
+): string => deps.randomBytes(bytes).toString("base64url");
+
+const challengeHashFor = (
+  backendId: string,
+  requestId: string,
+  secret: string
+): string =>
+  createHash("sha256")
+    .update(`${backendId}:${requestId}:${secret}`)
+    .digest("hex");
+
+const approvalUrlFor = (
+  backend: UpstreamBackendSummary,
+  challengeId: string
+): string =>
+  new URL(
+    `device-enrollment/${encodeURIComponent(challengeId)}`,
+    `${backend.baseUrl}/`
+  ).toString();
+
+const jsonFetch = async (
+  deps: Required<UpstreamEnrollmentDeps>,
+  url: URL,
+  init: RequestInit
+): Promise<{
+  status: number;
+  ok: boolean;
+  payload: Record<string, unknown>;
+}> => {
+  const response = await deps.fetch(url, {
+    ...init,
+    headers: {
+      accept: "application/json",
+      ...(init.body === undefined
+        ? {}
+        : { "content-type": "application/json" }),
+      ...init.headers
+    }
+  });
+  const payload = (await response.json().catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
+  return { status: response.status, ok: response.ok, payload };
+};
+
+const createUpstreamChallenge = async (
+  backend: UpstreamBackendSummary,
+  input: {
+    backendId: string;
+    challengeHash: string;
+    credentialKeyId: string;
+    verifierSecret: string;
+    operationFamilies: string[];
+    requestId: string;
+    expiresAt: string | null;
+  },
+  deps: Required<UpstreamEnrollmentDeps>
+): Promise<{ challengeId: string; activationUrl: string }> => {
+  const result = await jsonFetch(
+    deps,
+    new URL(
+      "v1/local-edge/device-enrollments/challenges",
+      `${backend.baseUrl}/`
+    ),
+    {
+      method: "POST",
+      body: JSON.stringify({
+        challenge_hash: input.challengeHash,
+        upstream_backend_id: input.backendId,
+        device_instance_id: "koed-local-edge",
+        device_label: "Koed local edge",
+        requested_operation_families: input.operationFamilies,
+        pending_credential: {
+          credential_key_id: input.credentialKeyId,
+          verifier_kind: "secret_hash",
+          verifier_secret: input.verifierSecret,
+          operation_families: input.operationFamilies
+        },
+        metadata: {
+          source: "koed-server-upstream-enroll",
+          requestId: input.requestId
+        },
+        ttl_seconds: 600
+      })
+    }
+  );
+  if (!result.ok) {
+    throw new Error(
+      typeof result.payload.error === "string"
+        ? result.payload.error
+        : `Upstream challenge creation failed with HTTP ${result.status}.`
+    );
+  }
+  const challenge = result.payload.challenge;
+  const rawChallengeId =
+    challenge && typeof challenge === "object" && "id" in challenge
+      ? (challenge as { id?: unknown }).id
+      : "";
+  const challengeId = typeof rawChallengeId === "string" ? rawChallengeId : "";
+  if (!challengeId) {
+    throw new Error(
+      "Upstream challenge response did not include a challenge id."
+    );
+  }
+  return {
+    challengeId,
+    activationUrl: approvalUrlFor(backend, challengeId)
+  };
+};
+
+const readUpstreamChallengeStatus = async (
+  backend: UpstreamBackendSummary,
+  challengeId: string,
+  deps: Required<UpstreamEnrollmentDeps>
+): Promise<"pending" | "approved" | "denied" | "expired" | "unknown"> => {
+  const result = await jsonFetch(
+    deps,
+    new URL(
+      `v1/local-edge/device-enrollments/challenges/${encodeURIComponent(
+        challengeId
+      )}`,
+      `${backend.baseUrl}/`
+    ),
+    { method: "GET" }
+  );
+  if (!result.ok) {
+    return "unknown";
+  }
+  const challenge = result.payload.challenge;
+  const rawStatus =
+    challenge && typeof challenge === "object" && "status" in challenge
+      ? (challenge as { status?: unknown }).status
+      : "";
+  const status = typeof rawStatus === "string" ? rawStatus : "";
+  return status === "pending" ||
+    status === "approved" ||
+    status === "denied" ||
+    status === "expired"
+    ? status
+    : "unknown";
+};
+
+const remoteCredentialIsActive = async (
+  paths: KoedServerPaths,
+  backend: UpstreamBackendSummary,
+  reference: string | undefined,
+  deps: Required<UpstreamEnrollmentDeps>
+): Promise<boolean> => {
+  const authorization = readUpstreamCredentialAuthorization(
+    paths.koedHome,
+    reference
+  );
+  if (!authorization) {
+    return false;
+  }
+  const result = await jsonFetch(
+    deps,
+    new URL("v1/local-edge/device-credentials/status", `${backend.baseUrl}/`),
+    {
+      method: "GET",
+      headers: { authorization }
+    }
+  );
+  return result.ok;
+};
 
 const latestEnrollment = (
   store: UpstreamEnrollmentStore,
@@ -361,11 +562,11 @@ const materializeState = (
   return record;
 };
 
-export const startUpstreamEnrollment = (
+export const startUpstreamEnrollment = async (
   paths: KoedServerPaths,
   id: string,
   deps: UpstreamEnrollmentDeps = {}
-): UpstreamEnrollmentResult => {
+): Promise<UpstreamEnrollmentResult> => {
   const resolvedDeps = depsWithDefaults(deps);
   const backendId = validateBackendId(id);
   const now = resolvedDeps.now();
@@ -416,47 +617,81 @@ export const startUpstreamEnrollment = (
     };
   }
 
-  const store = readStore(paths, resolvedDeps);
+  let store = readStore(paths, resolvedDeps);
   const existing = latestEnrollment(store, backendId);
   if (existing) {
-    const materialized = materializeState(existing, now, backend);
-    if (materialized.state !== existing.state) {
-      store.enrollments = store.enrollments.map((entry) =>
-        entry.backendId === existing.backendId &&
-        entry.requestId === existing.requestId
-          ? materialized
-          : entry
-      );
-      store.updatedAt = nowIso;
-      writeStore(paths, store, resolvedDeps);
-    }
+    const current = await getUpstreamEnrollmentStatus(
+      paths,
+      backendId,
+      resolvedDeps
+    );
     if (
-      materialized.state === "pending" ||
-      materialized.state === "approved" ||
-      materialized.state === "exchanged" ||
-      materialized.state === "revoked" ||
-      materialized.state === "failed"
+      current.state === "pending" ||
+      current.state === "approved" ||
+      current.state === "exchanged" ||
+      current.state === "revoked"
     ) {
-      return {
-        ok: true,
-        state: materialized.state,
-        backend,
-        enrollment: summarizeEnrollment(materialized, backend),
-        message: `Upstream enrollment for ${backendId} is already ${materialized.state}.`
-      };
+      return current;
     }
+    store = readStore(paths, resolvedDeps);
+  }
+
+  const requestId = resolvedDeps.randomId();
+  const verifierSecret = randomSecret(resolvedDeps);
+  const challengeSecret = randomSecret(resolvedDeps);
+  const challengeHash = challengeHashFor(backendId, requestId, challengeSecret);
+  const credentialKeyId = `koed_${createHash("sha256")
+    .update(`${backendId}:${requestId}:${verifierSecret}`)
+    .digest("hex")
+    .slice(0, 40)}`;
+  const expiresAt = expiresAtFor(now);
+  const { reference } = storeUpstreamCredentialSecret(paths.koedHome, {
+    backendId,
+    credentialKeyId,
+    secret: verifierSecret
+  });
+
+  let challenge: { challengeId: string; activationUrl: string };
+  try {
+    challenge = await createUpstreamChallenge(
+      backend,
+      {
+        backendId,
+        challengeHash,
+        credentialKeyId,
+        verifierSecret,
+        operationFamilies,
+        requestId,
+        expiresAt
+      },
+      resolvedDeps
+    );
+  } catch (error) {
+    deleteUpstreamCredentialSecret(paths.koedHome, reference);
+    return {
+      ok: false,
+      state: "failed",
+      backend,
+      message:
+        error instanceof Error
+          ? error.message
+          : "Failed to create upstream enrollment challenge."
+    };
   }
 
   const record: UpstreamEnrollmentRecord = {
     backendId,
-    requestId: resolvedDeps.randomId(),
+    requestId,
     state: "pending",
-    activationUrl: null,
+    activationUrl: challenge.activationUrl,
     requestedOperationFamilies: operationFamilies,
+    challengeId: challenge.challengeId,
+    credentialKeyId,
+    credentialReference: reference,
     createdAt: nowIso,
     updatedAt: nowIso,
-    expiresAt: expiresAtFor(now),
-    credential: backend.credential
+    expiresAt,
+    credential: { status: "unknown", reference }
   };
   store.enrollments.push(record);
   store.updatedAt = nowIso;
@@ -466,19 +701,19 @@ export const startUpstreamEnrollment = (
     state: "pending",
     backend,
     enrollment: summarizeEnrollment(record, backend),
-    message: `Started upstream enrollment for ${backendId}. Open Explorer and create a browser-mediated device enrollment challenge to approve this device.`
+    message: `Started upstream enrollment for ${backendId}. Open the activation URL to approve this local edge.`
   };
 };
 
-export const getUpstreamEnrollmentStatus = (
+export const getUpstreamEnrollmentStatus = async (
   paths: KoedServerPaths,
   id: string,
   deps: UpstreamEnrollmentDeps = {}
-): UpstreamEnrollmentResult => {
+): Promise<UpstreamEnrollmentResult> => {
   const resolvedDeps = depsWithDefaults(deps);
   const backendId = validateBackendId(id);
   const now = resolvedDeps.now();
-  const { backend } = backendById(paths, backendId, resolvedDeps);
+  let { backend } = backendById(paths, backendId, resolvedDeps);
   const store = readStore(paths, resolvedDeps);
   const record = latestEnrollment(store, backendId);
   if (!record) {
@@ -489,7 +724,106 @@ export const getUpstreamEnrollmentStatus = (
       message: `No upstream enrollment has been started for ${backendId}.`
     };
   }
-  const materialized = materializeState(record, now, backend);
+  let materialized = materializeState(record, now, backend);
+  if (
+    backend &&
+    (materialized.state === "pending" ||
+      materialized.state === "approved" ||
+      materialized.state === "exchanged") &&
+    materialized.credentialReference
+  ) {
+    if (
+      await remoteCredentialIsActive(
+        paths,
+        backend,
+        materialized.credentialReference,
+        resolvedDeps
+      )
+    ) {
+      updateUpstreamBackendCredential(
+        paths,
+        backendId,
+        {
+          status: "configured",
+          reference: materialized.credentialReference
+        },
+        {
+          existsSync: resolvedDeps.existsSync,
+          readFileSync: resolvedDeps.readFileSync,
+          writeFileSync: resolvedDeps.writeFileSync,
+          renameSync: resolvedDeps.renameSync,
+          now: resolvedDeps.now
+        }
+      );
+      backend = backendById(paths, backendId, resolvedDeps).backend;
+      materialized = {
+        ...materialized,
+        state: "exchanged",
+        updatedAt: now.toISOString(),
+        credential: {
+          status: "configured",
+          reference: materialized.credentialReference
+        }
+      };
+    } else if (materialized.state === "exchanged") {
+      deleteUpstreamCredentialSecret(
+        paths.koedHome,
+        materialized.credentialReference
+      );
+      updateUpstreamBackendCredential(
+        paths,
+        backendId,
+        { status: "not_configured" },
+        {
+          existsSync: resolvedDeps.existsSync,
+          readFileSync: resolvedDeps.readFileSync,
+          writeFileSync: resolvedDeps.writeFileSync,
+          renameSync: resolvedDeps.renameSync,
+          now: resolvedDeps.now
+        }
+      );
+      backend = backendById(paths, backendId, resolvedDeps).backend;
+      materialized = {
+        ...materialized,
+        state: "failed",
+        updatedAt: now.toISOString(),
+        failureReason: "credential_rejected",
+        failureMessage:
+          "Upstream backend rejected the stored device credential; restart enrollment.",
+        credential: { status: "not_configured" }
+      };
+    } else if (materialized.challengeId) {
+      const upstreamStatus = await readUpstreamChallengeStatus(
+        backend,
+        materialized.challengeId,
+        resolvedDeps
+      );
+      if (upstreamStatus === "denied" || upstreamStatus === "expired") {
+        deleteUpstreamCredentialSecret(
+          paths.koedHome,
+          materialized.credentialReference
+        );
+        materialized = {
+          ...materialized,
+          state: upstreamStatus,
+          updatedAt: now.toISOString(),
+          credential: { status: "not_configured" }
+        };
+      } else if (upstreamStatus === "approved") {
+        materialized = {
+          ...materialized,
+          state: "approved",
+          updatedAt: now.toISOString()
+        };
+      }
+    }
+  }
+  if (materialized.state === "expired") {
+    deleteUpstreamCredentialSecret(
+      paths.koedHome,
+      materialized.credentialReference
+    );
+  }
   if (materialized.state !== record.state) {
     store.enrollments = store.enrollments.map((entry) =>
       entry.backendId === record.backendId &&
@@ -548,8 +882,13 @@ export const cancelUpstreamEnrollment = (
   const canceled: UpstreamEnrollmentRecord = {
     ...materialized,
     state: "canceled",
-    updatedAt: now
+    updatedAt: now,
+    credential: { status: "not_configured" }
   };
+  deleteUpstreamCredentialSecret(
+    paths.koedHome,
+    materialized.credentialReference
+  );
   store.enrollments = store.enrollments.map((entry) =>
     entry.backendId === record.backendId && entry.requestId === record.requestId
       ? canceled
@@ -613,6 +952,7 @@ export const disconnectUpstreamBackendEnrollment = (
       now: resolvedDeps.now
     }
   );
+  deleteUpstreamCredentialSecret(paths.koedHome, backend.credential.reference);
   const refreshedBackend = backendById(paths, backendId, resolvedDeps).backend;
   const store = readStore(paths, resolvedDeps);
   const existing = latestEnrollment(store, backendId);

@@ -2589,6 +2589,38 @@ describeDb("memory repository visibility", () => {
       lastUsedAt: null,
       revokedAt: null
     });
+    const replacementChallengeHash = `challenge-${randomUUID()}-${randomUUID()}`;
+    await repo.createDeviceEnrollmentChallenge({
+      challengeHash: replacementChallengeHash,
+      upstreamBackendId: "team-vps",
+      deviceInstanceId: "desktop-1",
+      deviceLabel: "Desktop",
+      requestedOperationFamilies: ["team.recall"],
+      expiresAt: new Date(Date.now() + 60_000)
+    });
+    const replacementVerifierHash = `verifier-${randomUUID()}-${randomUUID()}`;
+    const replacementCredential = await repo.redeemDeviceEnrollmentChallenge(
+      { userId: user.id },
+      {
+        challengeHash: replacementChallengeHash,
+        credentialKeyId: `device-key-${randomUUID()}`,
+        verifierKind: "secret_hash",
+        verifierHash: replacementVerifierHash
+      }
+    );
+    expect(replacementCredential).toMatchObject({
+      ownerUserId: user.id,
+      upstreamBackendId: "team-vps",
+      deviceInstanceId: "desktop-1",
+      operationFamilies: ["team.recall"],
+      revokedAt: null
+    });
+    expect(
+      await repo.getDeviceCredentialUser({
+        credentialKeyId: credential!.credentialKeyId,
+        verifierHash
+      })
+    ).toBeNull();
     expect(
       await repo.redeemDeviceEnrollmentChallenge(
         { userId: user.id },
@@ -2606,12 +2638,12 @@ describeDb("memory repository visibility", () => {
       { upstreamBackendId: "team-vps" }
     );
     expect(listed.map((item) => item.id).sort()).toEqual(
-      [boundedCredential!.id, credential!.id].sort()
+      [boundedCredential!.id, replacementCredential!.id].sort()
     );
 
     const authenticated = await repo.getDeviceCredentialUser({
-      credentialKeyId: credential!.credentialKeyId,
-      verifierHash
+      credentialKeyId: replacementCredential!.credentialKeyId,
+      verifierHash: replacementVerifierHash
     });
     expect(authenticated?.user).toMatchObject({ id: user.id });
     expect(authenticated?.credential.lastUsedAt).not.toBeNull();
@@ -2620,21 +2652,21 @@ describeDb("memory repository visibility", () => {
     expect(
       await repo.revokeDeviceCredential(
         { userId: user.id },
-        credential!.id,
+        replacementCredential!.id,
         "rotated"
       )
     ).toBe(true);
     expect(
       await repo.revokeDeviceCredential(
         { userId: user.id },
-        credential!.id,
+        replacementCredential!.id,
         "rotated"
       )
     ).toBe(false);
     expect(
       await repo.getDeviceCredentialUser({
-        credentialKeyId: credential!.credentialKeyId,
-        verifierHash
+        credentialKeyId: replacementCredential!.credentialKeyId,
+        verifierHash: replacementVerifierHash
       })
     ).toBeNull();
 
