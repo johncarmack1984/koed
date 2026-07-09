@@ -28,6 +28,9 @@ export interface KoedAppRuntime {
 const koedHomeRuntimeRoot = (paths: KoedServerPaths): string =>
   resolve(paths.koedHome, "runtime", "koed-runtime");
 
+const koedHomeServerPackageRuntimeRoot = (paths: KoedServerPaths): string =>
+  resolve(paths.koedHome, "runtime", "koed-server", "current", "koed-runtime");
+
 const packagedRuntime = (
   root: string,
   artifactSource: RuntimeArtifactSource,
@@ -117,11 +120,28 @@ const sourceRuntime = (
   };
 };
 
+const firstExistingRuntime = (
+  runtimes: KoedAppRuntime[],
+  exists: (path: string) => boolean
+): KoedAppRuntime | undefined =>
+  runtimes.find((runtime) => exists(runtime.root));
+
 export const resolveKoedAppRuntime = (
   paths: KoedServerPaths,
   environment: NodeJS.ProcessEnv = process.env,
   exists: (path: string) => boolean = existsSync
 ): KoedAppRuntime => {
+  const explicitPackageRoot = trimRuntimeValue(
+    environment.KOED_SERVER_PACKAGE_ROOT
+  );
+  if (explicitPackageRoot) {
+    return packagedRuntime(
+      resolve(explicitPackageRoot, "koed-runtime"),
+      "explicit-override",
+      exists
+    );
+  }
+
   const explicitPackagedRoot = trimRuntimeValue(
     environment.KOED_JS_RUNTIME_ROOT
   );
@@ -133,13 +153,22 @@ export const resolveKoedAppRuntime = (
     );
   }
 
-  const koedHomeRuntime = packagedRuntime(
+  const koedHomeServerPackageRuntime = packagedRuntime(
+    koedHomeServerPackageRuntimeRoot(paths),
+    "koed-home-runtime",
+    exists
+  );
+  if (koedHomeServerPackageRuntime.missing.length === 0) {
+    return koedHomeServerPackageRuntime;
+  }
+
+  const legacyKoedHomeRuntime = packagedRuntime(
     koedHomeRuntimeRoot(paths),
     "koed-home-runtime",
     exists
   );
-  if (koedHomeRuntime.missing.length === 0) {
-    return koedHomeRuntime;
+  if (legacyKoedHomeRuntime.missing.length === 0) {
+    return legacyKoedHomeRuntime;
   }
 
   const packagedResourcesRoot = resolvePackagedKoedRuntimeRoot(environment);
@@ -158,19 +187,33 @@ export const resolveKoedAppRuntime = (
   if (legacyPackagedRuntime.missing.length === 0) {
     return legacyPackagedRuntime;
   }
+  const candidates = [
+    koedHomeServerPackageRuntime,
+    legacyKoedHomeRuntime,
+    ...(packagedResourcesRuntime ? [packagedResourcesRuntime] : []),
+    legacyPackagedRuntime
+  ];
 
   if (
     isPackagedRuntimeMode(environment) &&
     !canUseSourceCheckoutFallback(environment)
   ) {
-    return packagedResourcesRuntime ?? legacyPackagedRuntime ?? koedHomeRuntime;
+    return (
+      firstExistingRuntime(candidates, exists) ??
+      packagedResourcesRuntime ??
+      legacyPackagedRuntime
+    );
   }
 
   if (canUseSourceCheckoutFallback(environment)) {
     return sourceRuntime(paths, exists);
   }
 
-  return packagedResourcesRuntime ?? legacyPackagedRuntime ?? koedHomeRuntime;
+  return (
+    firstExistingRuntime(candidates, exists) ??
+    packagedResourcesRuntime ??
+    legacyPackagedRuntime
+  );
 };
 
 export const assertKoedAppRuntimeAvailable = (
