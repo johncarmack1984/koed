@@ -19,6 +19,12 @@ import {
   collectPackagedRuntimeStatus,
   installPackagedRuntime
 } from "./runtime-packaged.js";
+import {
+  activateServerPackage,
+  cleanupServerPackages,
+  collectServerPackageStatus,
+  installServerPackage
+} from "./package-runtime.js";
 import { resolveKoedServerPaths } from "./paths.js";
 import {
   listUpstreamBackends,
@@ -57,6 +63,10 @@ Commands:
   models install --json  Download bundled local model with SHA-256 verification
   runtime status --json  Print native bundled-local runtime install state
   runtime install --json Install native bundled-local runtime assets explicitly
+  package status --json  Print standalone koed-server package install state
+  package install --json Verify and install standalone koed-server package
+  package activate --json Activate an installed koed-server package version
+  package cleanup --json Remove inactive versions and stale cached archives
   upstream list --json   List registered upstream backend status
   upstream register --json Register or update an upstream backend
   upstream refresh --json Refresh cached upstream capabilities
@@ -100,6 +110,10 @@ export interface KoedServerCliDependencies {
   installRuntime?: typeof installHomebrewRuntime;
   collectPackagedRuntimeStatus?: typeof collectPackagedRuntimeStatus;
   installPackagedRuntime?: typeof installPackagedRuntime;
+  collectPackageStatus?: typeof collectServerPackageStatus;
+  installPackage?: typeof installServerPackage;
+  activatePackage?: typeof activateServerPackage;
+  cleanupPackages?: typeof cleanupServerPackages;
   listUpstreams?: typeof listUpstreamBackends;
   registerUpstream?: typeof registerUpstreamBackend;
   refreshUpstream?: typeof refreshUpstreamBackendCapabilities;
@@ -310,6 +324,10 @@ export const runKoedServerCli = async (
     collectPackagedRuntimeStatus:
       collectPackagedRuntime = collectPackagedRuntimeStatus,
     installPackagedRuntime: installPackaged = installPackagedRuntime,
+    collectPackageStatus = collectServerPackageStatus,
+    installPackage = installServerPackage,
+    activatePackage = activateServerPackage,
+    cleanupPackages = cleanupServerPackages,
     listUpstreams = listUpstreamBackends,
     registerUpstream = registerUpstreamBackend,
     refreshUpstream = refreshUpstreamBackendCapabilities,
@@ -497,6 +515,62 @@ export const runKoedServerCli = async (
         provider === "packaged"
           ? installPackaged(paths, runtimeEnvironment)
           : installRuntime(paths, runtimeEnvironment);
+      if (wantsJson) {
+        printJson(stdout, result);
+      } else {
+        stdout.write(`${result.message}\n`);
+      }
+      return result.ok ? 0 : 1;
+    }
+
+    if (command === "package" && subcommand === "status") {
+      const paths = resolvePaths();
+      const result = collectPackageStatus(paths);
+      if (wantsJson) {
+        printJson(stdout, result);
+      } else {
+        stdout.write(`${result.message}\n`);
+      }
+      return result.ok ? 0 : 1;
+    }
+
+    if (command === "package" && subcommand === "install") {
+      const paths = resolvePaths();
+      const result = await installPackage(paths, {
+        source: requireFlagValue(args, "--source"),
+        sha256: flagValue(args, "--sha256"),
+        sha256File: flagValue(args, "--sha256-file"),
+        activate: args.includes("--activate")
+      });
+      if (wantsJson) {
+        printJson(stdout, result);
+      } else {
+        stdout.write(`${result.message}\n`);
+      }
+      return result.ok ? 0 : 1;
+    }
+
+    if (command === "package" && subcommand === "activate") {
+      const paths = resolvePaths();
+      const result = activatePackage(
+        paths,
+        requireFlagValue(args, "--version")
+      );
+      if (wantsJson) {
+        printJson(stdout, result);
+      } else {
+        stdout.write(`${result.message}\n`);
+      }
+      return result.ok ? 0 : 1;
+    }
+
+    if (command === "package" && subcommand === "cleanup") {
+      const paths = resolvePaths();
+      const keep = flagValue(args, "--keep");
+      const result = cleanupPackages(
+        paths,
+        keep === undefined ? 1 : Number.parseInt(keep, 10)
+      );
       if (wantsJson) {
         printJson(stdout, result);
       } else {

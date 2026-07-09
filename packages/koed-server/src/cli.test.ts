@@ -434,6 +434,60 @@ describe("JSON command output", () => {
     });
   });
 
+  it("prints package install --json", async () => {
+    const stdout = writer();
+    const seen: unknown[] = [];
+
+    const exitCode = await runKoedServerCli(
+      [
+        "package",
+        "install",
+        "--source",
+        "/tmp/koed-server.tar.gz",
+        "--sha256",
+        "a".repeat(64),
+        "--activate",
+        "--json"
+      ],
+      {
+        stdout: stdout.stream,
+        resolvePaths: () => ({ koedHome: "/tmp/koed" }) as never,
+        installPackage: async (_paths, options) => {
+          seen.push(options);
+          return {
+            ok: true,
+            state: "activated",
+            koedHome: "/tmp/koed",
+            packageRoot: "/tmp/koed/runtime/koed-server",
+            versionsDir: "/tmp/koed/runtime/koed-server/versions",
+            cacheDir: "/tmp/koed/cache/koed-server-packages",
+            currentPath: "/tmp/koed/runtime/koed-server/current",
+            currentVersion: "0.2.0",
+            installed: [],
+            message: "installed",
+            archivePath:
+              "/tmp/koed/cache/koed-server-packages/koed-server.tar.gz",
+            archiveSha256: "a".repeat(64),
+            installedPath: "/tmp/koed/runtime/koed-server/versions/0.2.0"
+          };
+        }
+      }
+    );
+
+    expect(exitCode).toBe(0);
+    expect(seen[0]).toEqual({
+      source: "/tmp/koed-server.tar.gz",
+      sha256: "a".repeat(64),
+      sha256File: undefined,
+      activate: true
+    });
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: true,
+      state: "activated",
+      currentVersion: "0.2.0"
+    });
+  });
+
   it("rejects runtime install without explicit bundled-local dependency mode", async () => {
     const stdout = writer();
 

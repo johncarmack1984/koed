@@ -38,6 +38,14 @@ export {
   sha256PackagedRuntimeFiles
 } from "./runtime-packaged.js";
 export {
+  activateServerPackage,
+  cleanupServerPackages,
+  collectServerPackageStatus,
+  installServerPackage,
+  sha256File as sha256ServerPackageFile,
+  validateServerPackageRoot
+} from "./package-runtime.js";
+export {
   collectUpstreamRegistryStatus,
   listUpstreamBackends,
   refreshUpstreamBackendCapabilities,
@@ -82,6 +90,17 @@ export type {
   PackagedRuntimeInstallResult,
   PackagedRuntimeStatus
 } from "./runtime-packaged.js";
+export type {
+  InstalledServerPackage,
+  KoedServerPackageManifest,
+  PackageRootValidation,
+  ServerPackageActivateResult,
+  ServerPackageCleanupResult,
+  ServerPackageInstallOptions,
+  ServerPackageInstallResult,
+  ServerPackageState,
+  ServerPackageStatus
+} from "./package-runtime.js";
 export type {
   UpstreamBackendRecord,
   UpstreamBackendRegistry,
