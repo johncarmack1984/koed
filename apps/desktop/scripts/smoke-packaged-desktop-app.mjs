@@ -362,7 +362,32 @@ const assertMissingAssets = (payload, label) => {
   }
 };
 
+const smokePackageStatus = (layout, koedHome) => {
+  const packageStatus = runPackagedCommand(layout, koedHome, [
+    "package",
+    "status",
+    "--json"
+  ]);
+  const packageStatusJson = parseJsonOutput(
+    "package status --json",
+    packageStatus.stdout
+  );
+  assertNoSourceCheckoutResolution("package status --json", packageStatusJson);
+  if (
+    packageStatus.status !== 0 &&
+    packageStatusJson?.state !== "missing" &&
+    packageStatusJson?.state !== "partial" &&
+    packageStatusJson?.state !== "incompatible"
+  ) {
+    throw new Error(
+      `package status --json failed with unexpected state: ${JSON.stringify(packageStatusJson, null, 2)}`
+    );
+  }
+  return packageStatusJson;
+};
+
 const smokeMissingAssets = (layout, koedHome) => {
+  const packageStatus = smokePackageStatus(layout, koedHome);
   const runtimeStatus = runPackagedCommand(layout, koedHome, [
     "runtime",
     "status",
@@ -380,6 +405,7 @@ const smokeMissingAssets = (layout, koedHome) => {
   assertNoSourceCheckoutResolution("doctor --json", doctorJson);
   assertMissingAssets(doctorJson, "doctor --json");
   return {
+    packageStatus,
     runtimeStatus: runtimeStatusJson,
     doctor: doctorJson,
     doctorExitCode: doctor.status
@@ -417,6 +443,7 @@ const waitForHealthyStatus = async ({
 };
 
 const smokeHealthyDaemon = async (layout, koedHome, options) => {
+  const packageStatus = smokePackageStatus(layout, koedHome);
   const runtimeStatus = runPackagedCommand(layout, koedHome, [
     "runtime",
     "status",
@@ -616,6 +643,7 @@ const smokeHealthyDaemon = async (layout, koedHome, options) => {
   }
 
   return {
+    packageStatus,
     runtimeStatus: runtimeStatusJson,
     install: installJson,
     installedRuntimeStatus: installedRuntimeStatusJson,

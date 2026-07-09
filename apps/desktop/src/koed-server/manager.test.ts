@@ -264,6 +264,122 @@ describe("Koed server desktop manager", () => {
     ]);
   });
 
+  it("runs standalone package install through koed-server with configured source metadata", async () => {
+    const calls: string[][] = [];
+    const manager = createKoedServerManager({
+      repoRoot: "/repo",
+      cliPath: "/repo/cli.js",
+      environment: {
+        KOED_SERVER_PACKAGE_SOURCE: "/artifacts/koed-server.tar.gz",
+        KOED_SERVER_PACKAGE_SHA256: "a".repeat(64)
+      },
+      createCliInvocation: (args) => ({
+        command: "/node",
+        args: ["/repo/cli.js", ...args],
+        env: { KOED_REPO_ROOT: "/repo" }
+      }),
+      existsSync: () => true,
+      execFile: (_command, args, _options, callback) => {
+        calls.push(args);
+        callback(null, JSON.stringify({ ok: true, state: "activated" }), "");
+      },
+      spawn: () => childProcess() as never,
+      openExternal: async () => undefined
+    });
+
+    await expect(manager.handlers.package_install!()).resolves.toMatchObject({
+      ok: true,
+      state: "activated"
+    });
+    expect(calls[0]).toEqual([
+      "/repo/cli.js",
+      "package",
+      "install",
+      "--source",
+      "/artifacts/koed-server.tar.gz",
+      "--sha256",
+      "a".repeat(64),
+      "--activate",
+      "--json"
+    ]);
+  });
+
+  it("requires Operator consent before hosted package download", async () => {
+    const manager = createKoedServerManager({
+      repoRoot: "/repo",
+      cliPath: "/repo/cli.js",
+      environment: {
+        KOED_SERVER_PACKAGE_SOURCE: "https://downloads.test/koed-server.tar.gz",
+        KOED_SERVER_PACKAGE_SHA256: "a".repeat(64)
+      },
+      createCliInvocation: (args) => ({
+        command: "/node",
+        args: ["/repo/cli.js", ...args],
+        env: { KOED_REPO_ROOT: "/repo" }
+      }),
+      existsSync: () => true,
+      execFile: () => undefined,
+      spawn: () => childProcess() as never,
+      openExternal: async () => undefined
+    });
+
+    await expect(manager.handlers.package_install!()).resolves.toMatchObject({
+      ok: false,
+      sourceKind: "configured",
+      error:
+        "Operator consent is required before Koed Desktop may download a standalone koed-server package."
+    });
+  });
+
+  it("adds bundled fallback server package status when no standalone source is available", async () => {
+    const manager = createKoedServerManager({
+      repoRoot: "/repo",
+      cliPath: "/repo/cli.js",
+      environment: {},
+      createCliInvocation: (args) => ({
+        command: "/node",
+        args: ["/repo/cli.js", ...args],
+        env: { KOED_REPO_ROOT: "/repo" }
+      }),
+      existsSync: () => true,
+      execFile: (_command, args, _options, callback) => {
+        if (args.includes("package")) {
+          callback(
+            null,
+            JSON.stringify({
+              ok: false,
+              state: "missing",
+              message: "No koed-server package is installed."
+            }),
+            ""
+          );
+          return;
+        }
+        callback(
+          null,
+          JSON.stringify({
+            ok: false,
+            state: "starting",
+            generatedAt: "2026-07-09T00:00:00.000Z",
+            api: { state: "starting" }
+          }),
+          ""
+        );
+      },
+      spawn: () => childProcess() as never,
+      openExternal: async () => undefined
+    });
+
+    await expect(manager.handlers.status!()).resolves.toMatchObject({
+      serverPackage: {
+        state: "not_configured",
+        source: "bundled-fallback",
+        action:
+          "Continue with the bundled fallback runtime, or configure KOED_SERVER_PACKAGE_SOURCE with SHA-256 metadata."
+      }
+    });
+  });
+
   it("runs explicit stop through koed-server", async () => {
     const spawned = childProcess();
     const calls: string[][] = [];

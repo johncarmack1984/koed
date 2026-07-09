@@ -15,6 +15,7 @@ import type {
 
 const startupStepLabels = {
   status: "Local status",
+  package: "Server package",
   runtime: "Runtime assets",
   models: "Embedding model",
   database: "Database init/migrations",
@@ -25,6 +26,7 @@ const startupStepLabels = {
 
 const startupPhaseLabels = {
   status: "Checking local status",
+  package: "Checking server package",
   runtime: "Verifying runtime assets",
   models: "Verifying embedding model",
   database: "Initializing database",
@@ -40,6 +42,7 @@ type StartupActionId =
   | "retry-startup"
   | "refresh-status"
   | "start"
+  | "package_install"
   | "setup_codex"
   | "repair_codex"
   | "runtime_install"
@@ -66,6 +69,7 @@ type StartupSupport = {
 
 const startupSteps: Array<{ id: StartupStepId; label: string }> = [
   { id: "status", label: startupStepLabels.status },
+  { id: "package", label: startupStepLabels.package },
   { id: "runtime", label: startupStepLabels.runtime },
   { id: "models", label: startupStepLabels.models },
   { id: "database", label: startupStepLabels.database },
@@ -97,6 +101,7 @@ type StartupLogLine = {
 };
 const startupStepLogs: Record<StartupStepId, StartupLogLine[]> = {
   status: [],
+  package: [],
   runtime: [],
   models: [],
   database: [],
@@ -106,6 +111,7 @@ const startupStepLogs: Record<StartupStepId, StartupLogLine[]> = {
 };
 const readinessCheckLogs: Record<StartupStepId, StartupLogLine[]> = {
   status: [],
+  package: [],
   runtime: [],
   models: [],
   database: [],
@@ -137,6 +143,7 @@ let startRequested = false;
 
 const stepStates: Record<StartupStepId, StartupStepState> = {
   status: "pending",
+  package: "pending",
   runtime: "pending",
   models: "pending",
   database: "pending",
@@ -437,6 +444,8 @@ const componentLabel = (key: StatusComponentKey): string => {
   switch (key) {
     case "api":
       return "API";
+    case "serverPackage":
+      return "Server package";
     case "explorer":
       return "Explorer";
     case "database":
@@ -567,6 +576,24 @@ const runtimeInstallConsentArgs = (
   return { operatorConsented: true };
 };
 
+const packageInstallConsentArgs = (
+  packageStatus: unknown
+): Record<string, unknown> | undefined => {
+  const sourceKind = commandResultField(packageStatus, "sourceKind");
+  if (sourceKind !== "configured") {
+    return undefined;
+  }
+  const confirmed = window.confirm(
+    "Koed Desktop will ask koed-server to download and verify a standalone koed-server package using the configured package source. Continue?"
+  );
+  if (!confirmed) {
+    throw new Error(
+      "Server package install cancelled by Operator before package download."
+    );
+  }
+  return { operatorConsented: true };
+};
+
 const explorerEmbedUrl = (rawUrl: string): string => {
   try {
     const url = new URL(rawUrl);
@@ -692,6 +719,30 @@ const startupLiveConfig: Record<StartupStepId, StartupLiveConfig> = {
           primary: true
         }
       ])
+  },
+  package: {
+    liveTitle: "Live: server package",
+    liveBody:
+      "Checking the standalone koed-server package status under KOED_HOME.",
+    componentKeys: ["serverPackage"],
+    probeMessage: (_attempt, blocker) =>
+      `server package: ${blocker ?? "waiting for koed-server package status"}`,
+    actions: () =>
+      stepHasExhaustedProbes("package")
+        ? supportActions([
+            {
+              id: "package_install",
+              label: "Install package",
+              title: "Run koed-server package install",
+              primary: true
+            },
+            {
+              id: "doctor",
+              label: "Diagnostics",
+              title: "Run koed-server doctor"
+            }
+          ])
+        : []
   },
   runtime: {
     liveTitle: "Live: runtime assets",
@@ -873,6 +924,17 @@ const readinessChecks: readonly ReadinessCheckDefinition[] = [
     }
   },
   {
+    id: "package",
+    title: "Server package",
+    description: "Standalone koed-server package status/install contract.",
+    componentKeys: startupLiveConfig.package.componentKeys,
+    action: {
+      label: "Install package",
+      command: "package_install",
+      timeoutMs: 600_000
+    }
+  },
+  {
     id: "runtime",
     title: "Runtime assets",
     description: "koed-server runtime status/install contract.",
@@ -951,6 +1013,12 @@ const startupStepReady = (step: StartupStepId): boolean => {
   if (step === "status") {
     return Boolean(status);
   }
+  if (step === "package") {
+    return (
+      status?.serverPackage?.state === "healthy" ||
+      status?.serverPackage?.source === "bundled-fallback"
+    );
+  }
   if (step === "runtime") {
     return status?.dependencyMode !== "bundled-local" || runtimeAssetsReady;
   }
@@ -979,6 +1047,12 @@ const startupStepBlocker = (step: StartupStepId): string => {
   }
   if (step === "runtime") {
     return "Runtime assets have not been installed through koed-server.";
+  }
+  if (step === "package") {
+    return (
+      status?.serverPackage?.message ??
+      "Standalone koed-server package status is not ready."
+    );
   }
   if (step === "models") {
     return "Embedding model has not been installed through koed-server.";
@@ -1203,6 +1277,14 @@ const readinessCheckState = (
   if (check.id === "runtime") {
     return runtimeAssetsReady ? "healthy" : "starting";
   }
+  if (check.id === "package") {
+    if (status?.serverPackage?.state === "healthy") {
+      return "healthy";
+    }
+    return status?.serverPackage?.source === "bundled-fallback"
+      ? "not_configured"
+      : (status?.serverPackage?.state ?? "starting");
+  }
   if (check.id === "models") {
     return modelAssetsReady ? "healthy" : "starting";
   }
@@ -1236,6 +1318,16 @@ const readinessCheckSummary = (check: ReadinessCheckDefinition): string => {
   );
   if (check.id === "runtime") {
     return `${checkedAtLabel(check.id)} · ${runtimeAssetsReady ? "Runtime assets ready" : "Waiting for runtime assets"}.`;
+  }
+  if (check.id === "package") {
+    const serverPackage = status.serverPackage;
+    if (serverPackage?.state === "healthy") {
+      return `${checkedAtLabel(check.id)} · Standalone package ${serverPackage.currentVersion ?? "active"}.`;
+    }
+    if (serverPackage?.source === "bundled-fallback") {
+      return `${checkedAtLabel(check.id)} · Using bundled fallback runtime.`;
+    }
+    return `${checkedAtLabel(check.id)} · ${serverPackage?.message ?? "Waiting for server package status"}.`;
   }
   if (check.id === "models") {
     return `${checkedAtLabel(check.id)} · ${modelAssetsReady ? "Embedding model ready" : "Waiting for embedding model"}.`;
@@ -1916,6 +2008,49 @@ const ensureDaemonStartRequested = async (
   startRequested = true;
 };
 
+const installServerPackage = async (): Promise<unknown> => {
+  let installResult = await runWithStartupProbes("package", () =>
+    invokeWithTimeout("package_install", undefined, 600_000)
+  );
+  let installError = commandResultError(installResult);
+  if (
+    installError?.includes("Operator consent is required") ||
+    installError?.includes("download")
+  ) {
+    const consentArgs = packageInstallConsentArgs(installResult);
+    installResult = await runWithStartupProbes("package", () =>
+      invokeWithTimeout("package_install", consentArgs, 600_000)
+    );
+    installError = commandResultError(installResult);
+  }
+  if (installError) {
+    throw new Error(`koed-server package install failed: ${installError}`);
+  }
+  return installResult;
+};
+
+const invokePackageInstallWithConsent = async (
+  timeoutMs = 600_000
+): Promise<unknown> => {
+  let result = await invokeWithTimeout("package_install", undefined, timeoutMs);
+  let error = commandResultError(result);
+  if (
+    error?.includes("Operator consent is required") ||
+    error?.includes("download")
+  ) {
+    result = await invokeWithTimeout(
+      "package_install",
+      packageInstallConsentArgs(result),
+      timeoutMs
+    );
+    error = commandResultError(result);
+  }
+  if (error) {
+    throw new Error(error);
+  }
+  return result;
+};
+
 const runStartupSequence = async () => {
   if (startupRunning) {
     return;
@@ -1937,6 +2072,45 @@ const runStartupSequence = async () => {
 
     if (!status) {
       throw new Error("Unable to load Koed status.");
+    }
+
+    startupDetail =
+      "Checking standalone koed-server package status before local startup.";
+    setStartupStep("package", "running");
+    appendStartupLog(
+      "command: koed-server package status --json",
+      undefined,
+      "package"
+    );
+    const packageStatus = await invokeWithTimeout(
+      "package_status",
+      undefined,
+      60_000
+    );
+    const packageStatusError = commandResultExplicitError(packageStatus);
+    if (packageStatusError) {
+      throw new Error(
+        `koed-server package status failed: ${packageStatusError}`
+      );
+    }
+    const packageState = commandResultState(packageStatus);
+    appendStartupLog(`package status: ${packageState}`, undefined, "package");
+    if (!startupStepReady("package") && packageState === "missing") {
+      appendStartupLog(
+        "command: koed-server package install --activate --json",
+        undefined,
+        "package"
+      );
+      await installServerPackage();
+      await refreshStatus();
+      appendStartupLog("package install completed", undefined, "package");
+    }
+    if (status?.serverPackage?.source === "bundled-fallback") {
+      setStartupStep("package", "skipped");
+    } else if (startupStepReady("package")) {
+      setStartupStep("package", "done");
+    } else {
+      assertStartupStepReady("package");
     }
 
     if (status.dependencyMode === "bundled-local") {
@@ -2156,20 +2330,21 @@ const runReadinessAction = async (
   appendReadinessLog(check.id, `command: ${action.command}`);
   syncUI();
   try {
-    const args =
-      action.command === "runtime_install"
-        ? runtimeInstallConsentArgs(
-            commandResultProvider(
-              await invokeWithTimeout("runtime_status", undefined, 60_000)
-            ),
-            "Install Koed native runtime assets?"
-          )
-        : undefined;
-    const result = await invokeWithTimeout(
-      action.command,
-      args,
-      action.timeoutMs
-    );
+    const result =
+      action.command === "package_install"
+        ? await invokePackageInstallWithConsent(action.timeoutMs)
+        : await invokeWithTimeout(
+            action.command,
+            action.command === "runtime_install"
+              ? runtimeInstallConsentArgs(
+                  commandResultProvider(
+                    await invokeWithTimeout("runtime_status", undefined, 60_000)
+                  ),
+                  "Install Koed native runtime assets?"
+                )
+              : undefined,
+            action.timeoutMs
+          );
     const error = commandResultError(result);
     if (error) {
       appendReadinessLog(check.id, `failed: ${error}`);
@@ -2224,6 +2399,10 @@ const runStatusCardAction = async (
     } else if (action.command === "status") {
       await refreshStatus();
       appendStatusCardLog(cardId, "status refreshed");
+    } else if (action.command === "package_install") {
+      await invokePackageInstallWithConsent(action.timeoutMs ?? 600_000);
+      appendStatusCardLog(cardId, "server package install completed");
+      await refreshStatus();
     } else if (action.command === "runtime_install") {
       const runtimeStatus = await invokeWithTimeout(
         "runtime_status",
@@ -2426,6 +2605,11 @@ const registerHandlers = () => {
               600_000
             );
           });
+          return;
+        case "package_install":
+          void runAction("Install package", () =>
+            invokePackageInstallWithConsent()
+          );
           return;
         case "models_install":
           void runAction("Install model", () =>
