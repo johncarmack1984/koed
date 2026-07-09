@@ -3,6 +3,7 @@ import {
   existsSync as nodeExistsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   writeFileSync
 } from "node:fs";
 import { homedir } from "node:os";
@@ -55,6 +56,36 @@ type DiagnosticStatus = KoedServerStatus & {
   error: string;
   details: Record<string, unknown>;
 };
+
+type ServerPackageStatusPayload = {
+  ok?: unknown;
+  state?: unknown;
+  message?: unknown;
+  action?: unknown;
+  currentVersion?: unknown;
+  currentTarget?: unknown;
+  errors?: unknown;
+};
+
+type ServerPackageInstallPlan =
+  | {
+      available: true;
+      source: string;
+      sourceKind: "configured" | "bundled";
+      sha256?: string;
+      sha256File?: string;
+      provenanceFile?: string;
+      signatureFile?: string;
+      trustedPublicKeyFile?: string;
+      trustPolicy?: string;
+      requiresNetworkConsent: boolean;
+    }
+  | {
+      available: false;
+      sourceKind: "unavailable";
+      message: string;
+      action: string;
+    };
 
 const diagnosticComponent = (
   state: ComponentState,
@@ -229,6 +260,196 @@ const readDesktopPorts = (
   }
 };
 
+const firstFileWithSuffix = (root: string, suffix: string): string | null => {
+  if (!nodeExistsSync(root)) {
+    return null;
+  }
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const path = resolve(root, entry.name);
+    if (entry.isFile() && entry.name.endsWith(suffix)) {
+      return path;
+    }
+    if (entry.isDirectory()) {
+      const nested = firstFileWithSuffix(path, suffix);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+  return null;
+};
+
+const bundledProvenanceForArchive = (archive: string): string | null => {
+  const archiveName = archive.split("/").at(-1) ?? "";
+  const releaseName = archiveName
+    .replace(/^koed-server-/, "koed-server-app-runtime-")
+    .replace(/\.tar\.gz$/, ".provenance.json");
+  for (const candidate of [
+    `${archive}.provenance.json`,
+    archive.replace(/\.tar\.gz$/, ".provenance.json"),
+    resolve(archive, "..", releaseName)
+  ]) {
+    if (nodeExistsSync(candidate)) return candidate;
+  }
+  return null;
+};
+
+const bundledServerPackageRoot = (
+  environment: NodeJS.ProcessEnv
+): string | null => {
+  const resourcesPath = environment.KOED_PACKAGED_RESOURCES_PATH?.trim();
+  return resourcesPath ? resolve(resourcesPath, "koed-server-package") : null;
+};
+
+const resolveServerPackageInstallPlan = (
+  environment: NodeJS.ProcessEnv
+): ServerPackageInstallPlan => {
+  const explicitSource = environment.KOED_SERVER_PACKAGE_SOURCE?.trim();
+  const explicitSha256 = environment.KOED_SERVER_PACKAGE_SHA256?.trim();
+  const explicitSha256File =
+    environment.KOED_SERVER_PACKAGE_SHA256_FILE?.trim();
+  const explicitProvenanceFile =
+    environment.KOED_SERVER_PACKAGE_PROVENANCE_FILE?.trim();
+  const explicitSignatureFile =
+    environment.KOED_SERVER_PACKAGE_SIGNATURE_FILE?.trim();
+  const explicitTrustedPublicKeyFile =
+    environment.KOED_SERVER_PACKAGE_TRUSTED_PUBLIC_KEY_FILE?.trim();
+  const explicitTrustPolicy =
+    environment.KOED_SERVER_PACKAGE_TRUST_POLICY?.trim();
+  if (explicitSource) {
+    if (!explicitSha256 && !explicitSha256File) {
+      return {
+        available: false,
+        sourceKind: "unavailable",
+        message:
+          "koed-server package source is configured, but SHA-256 metadata is missing.",
+        action:
+          "Set KOED_SERVER_PACKAGE_SHA256 or KOED_SERVER_PACKAGE_SHA256_FILE."
+      };
+    }
+    return {
+      available: true,
+      source: explicitSource,
+      sourceKind: "configured",
+      ...(explicitSha256 ? { sha256: explicitSha256 } : {}),
+      ...(explicitSha256File ? { sha256File: explicitSha256File } : {}),
+      ...(explicitProvenanceFile
+        ? { provenanceFile: explicitProvenanceFile }
+        : {}),
+      ...(explicitSignatureFile
+        ? { signatureFile: explicitSignatureFile }
+        : {}),
+      ...(explicitTrustedPublicKeyFile
+        ? { trustedPublicKeyFile: explicitTrustedPublicKeyFile }
+        : {}),
+      ...(explicitTrustPolicy ? { trustPolicy: explicitTrustPolicy } : {}),
+      requiresNetworkConsent: /^https?:\/\//i.test(explicitSource)
+    };
+  }
+
+  const bundledRoot = bundledServerPackageRoot(environment);
+  const bundledArchive = bundledRoot
+    ? firstFileWithSuffix(bundledRoot, ".tar.gz")
+    : null;
+  if (bundledArchive) {
+    const bundledSha256File = `${bundledArchive}.sha256`;
+    const bundledProvenanceFile =
+      bundledProvenanceForArchive(bundledArchive) ?? undefined;
+    if (!nodeExistsSync(bundledSha256File)) {
+      return {
+        available: false,
+        sourceKind: "unavailable",
+        message:
+          "Bundled koed-server package artifact is present, but its SHA-256 file is missing.",
+        action:
+          "Rebuild Koed Desktop packaging so the standalone package archive and .sha256 file are both included."
+      };
+    }
+    return {
+      available: true,
+      source: bundledArchive,
+      sourceKind: "bundled",
+      sha256File: bundledSha256File,
+      ...(bundledProvenanceFile
+        ? { provenanceFile: bundledProvenanceFile }
+        : {}),
+      requiresNetworkConsent: false
+    };
+  }
+
+  return {
+    available: false,
+    sourceKind: "unavailable",
+    message:
+      "No standalone koed-server package source is configured or bundled with this Desktop build.",
+    action:
+      "Continue with the bundled fallback runtime, or configure KOED_SERVER_PACKAGE_SOURCE with SHA-256 metadata."
+  };
+};
+
+const packageComponent = (
+  packageStatus: ServerPackageStatusPayload | null,
+  installPlan: ServerPackageInstallPlan
+): NonNullable<KoedServerStatus["serverPackage"]> => {
+  const state = String(packageStatus?.state ?? "missing");
+  const message =
+    typeof packageStatus?.message === "string"
+      ? packageStatus.message
+      : installPlan.available
+        ? "Standalone koed-server package can be installed."
+        : installPlan.message;
+  if (
+    packageStatus?.ok === true &&
+    (state === "installed" || state === "activated" || state === "cleaned")
+  ) {
+    const currentVersion =
+      typeof packageStatus.currentVersion === "string"
+        ? packageStatus.currentVersion
+        : undefined;
+    return {
+      state: "healthy",
+      message,
+      ...(currentVersion ? { currentVersion } : {}),
+      source: "standalone",
+      details: {
+        currentTarget: packageStatus.currentTarget,
+        sourceKind: installPlan.sourceKind
+      }
+    };
+  }
+  if (state === "missing" && !installPlan.available) {
+    return {
+      state: "not_configured",
+      message: installPlan.message,
+      action: installPlan.action,
+      source: "bundled-fallback",
+      details: { sourceKind: installPlan.sourceKind }
+    };
+  }
+  if (state === "missing") {
+    return {
+      state: "not_configured",
+      message,
+      action: "Install standalone koed-server package",
+      source: "unavailable",
+      details: { sourceKind: installPlan.sourceKind }
+    };
+  }
+  return {
+    state: "needs_attention",
+    message,
+    action:
+      typeof packageStatus?.action === "string"
+        ? packageStatus.action
+        : "Run koed-server package status --json for details.",
+    source: "unavailable",
+    details: {
+      sourceKind: installPlan.sourceKind,
+      errors: packageStatus?.errors
+    }
+  };
+};
+
 const bundledLocalDatabaseUrl = (environment: NodeJS.ProcessEnv): string => {
   const ports = readDesktopPorts(environment);
   const user = environment.POSTGRES_USER ?? "koed";
@@ -392,6 +613,67 @@ export const createKoedServerManager = ({
 
   const runModelInstallJson = () =>
     runJson(["models", "install", "--kind", "embedding"], 600_000);
+
+  const runPackageStatusJson = () => runJson(["package", "status"], 60_000);
+
+  const runPackageInstallJson = async (args?: Record<string, unknown>) => {
+    const plan = resolveServerPackageInstallPlan(environment);
+    if (!plan.available) {
+      return {
+        ok: false,
+        state: "needs_attention",
+        error: plan.message,
+        action: plan.action,
+        sourceKind: plan.sourceKind
+      };
+    }
+    if (plan.requiresNetworkConsent && args?.operatorConsented !== true) {
+      return {
+        ok: false,
+        state: "needs_attention",
+        sourceKind: plan.sourceKind,
+        error:
+          "Operator consent is required before Koed Desktop may download a standalone koed-server package.",
+        action:
+          "Confirm the package download prompt, then retry package install."
+      };
+    }
+    return runJson(
+      [
+        "package",
+        "install",
+        "--source",
+        plan.source,
+        ...(plan.sha256 ? ["--sha256", plan.sha256] : []),
+        ...(plan.sha256File ? ["--sha256-file", plan.sha256File] : []),
+        ...(plan.provenanceFile
+          ? ["--provenance-file", plan.provenanceFile]
+          : []),
+        ...(plan.signatureFile ? ["--signature-file", plan.signatureFile] : []),
+        ...(plan.trustedPublicKeyFile
+          ? ["--trusted-public-key-file", plan.trustedPublicKeyFile]
+          : []),
+        ...(plan.trustPolicy ? ["--trust-policy", plan.trustPolicy] : []),
+        "--activate"
+      ],
+      600_000
+    );
+  };
+
+  const withPackageComponent = async (value: unknown): Promise<unknown> => {
+    if (typeof value !== "object" || value === null || !("api" in value)) {
+      return value;
+    }
+    const packageStatus =
+      (await runPackageStatusJson()) as ServerPackageStatusPayload | null;
+    return {
+      ...value,
+      serverPackage: packageComponent(
+        packageStatus,
+        resolveServerPackageInstallPlan(environment)
+      )
+    };
+  };
 
   const pollUntilReady = async () => {
     let latest: unknown = null;
@@ -557,7 +839,10 @@ export const createKoedServerManager = ({
   return {
     handlers: {
       status: async () =>
-        withDesktopStartLog(await runJson(["status"]), startOutputLines),
+        withDesktopStartLog(
+          await withPackageComponent(await runJson(["status"])),
+          startOutputLines
+        ),
       doctor: () => runJson(["doctor"], 45_000),
       stop,
       setup_codex: () => runJson(["setup", "codex"], 120_000),
@@ -566,6 +851,8 @@ export const createKoedServerManager = ({
       runtime_install: (args) => runRuntimeInstallJson(args),
       models_status: () => runModelJson(),
       models_install: () => runModelInstallJson(),
+      package_status: () => runPackageStatusJson(),
+      package_install: (args) => runPackageInstallJson(args),
       explorer_credential: () => provisionExplorerCredential(),
       start,
       start_daemon: requestDaemonStart,

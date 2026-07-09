@@ -8,6 +8,7 @@ export const stateLabels = {
 } as const satisfies Record<ComponentState, string>;
 
 export const statusComponentKeys = [
+  "serverPackage",
   "api",
   "explorer",
   "database",
@@ -33,6 +34,11 @@ export const componentDefinitions = {
   api: {
     label: "API",
     description: "Koed HTTP API used by local integrations and Explorer."
+  },
+  serverPackage: {
+    label: "Server package",
+    description:
+      "Standalone koed-server app-runtime package installed under KOED_HOME."
   },
   explorer: {
     label: "Explorer",
@@ -99,6 +105,7 @@ export interface StatusGroupDefinition {
 export type StatusCardActionCommand =
   | "status"
   | "start"
+  | "package_install"
   | "setup_codex"
   | "repair_codex"
   | "runtime_install"
@@ -141,6 +148,25 @@ export const statusCards = [
     },
     secondaryActions: [
       { label: "Run doctor", command: "doctor", timeoutMs: 90_000 },
+      { label: "Open logs", command: "open_logs", timeoutMs: 10_000 },
+      { label: "Copy diagnostics", command: "copy_diagnostics" }
+    ]
+  },
+  {
+    id: "serverPackage",
+    title: "Server Package",
+    role: "Installs and activates the standalone koed-server app-runtime package.",
+    impact:
+      "Desktop falls back to its embedded koed-server runtime until a standalone package is installed.",
+    componentKeys: ["serverPackage"],
+    primaryAction: {
+      label: "Install package",
+      command: "package_install",
+      timeoutMs: 600_000,
+      primary: true
+    },
+    secondaryActions: [
+      { label: "Refresh", command: "status", timeoutMs: 10_000 },
       { label: "Open logs", command: "open_logs", timeoutMs: 10_000 },
       { label: "Copy diagnostics", command: "copy_diagnostics" }
     ]

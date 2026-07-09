@@ -30,6 +30,10 @@ export interface KoedServerStatus {
   lcmSummaryService: ComponentStatus;
   explorer: ComponentStatus & { url: string };
   lastVerification: ComponentStatus & { checkedAt: string | null };
+  serverPackage?: ComponentStatus & {
+    currentVersion?: string;
+    source?: "standalone" | "bundled-fallback" | "unavailable";
+  };
   desktopStartLog?: string[];
 }
 

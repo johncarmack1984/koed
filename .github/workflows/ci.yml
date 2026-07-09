@@ -113,6 +113,50 @@ jobs:
       - name: Build
         run: pnpm build
 
+  standalone-koed-server-package:
+    name: Standalone koed-server package
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 11.1.2
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 24.13.1
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Build standalone koed-server package
+        env:
+          KOED_SERVER_PACKAGE_VERSION: ${{ github.sha }}
+          SOURCE_DATE_EPOCH: 0
+        run: pnpm koed-server:package -- --platform linux --arch x64 --json
+
+      - name: Upload standalone koed-server package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: koed-server-package-linux-x64
+          path: |
+            dist/koed-server-package/linux-x64/*.tar.gz
+            dist/koed-server-package/linux-x64/*.sha256
+            dist/koed-server-package/linux-x64/koed-server-*/koed-server-package-manifest.json
+            dist/koed-server-package/linux-x64/koed-server-*/README.txt
+          if-no-files-found: error
+
   native-runtime-macos-arm64:
     name: Native runtime macOS arm64
     runs-on: macos-14
