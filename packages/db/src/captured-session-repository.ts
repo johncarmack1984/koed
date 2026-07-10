@@ -374,6 +374,10 @@ export const createCapturedSessionRepository = (
           automatic_project_name = excluded.automatic_project_name,
           automatic_project_path = excluded.automatic_project_path,
           automatic_project_detected_at = excluded.automatic_project_detected_at
+        where sessions.owner_user_id = excluded.owner_user_id
+          and sessions.visibility = excluded.visibility
+          and sessions.invalidated_at is null
+          and sessions.personal_deleted_at is null
         returning ${capturedSessionColumns}
       `,
       [
@@ -425,7 +429,16 @@ export const createCapturedSessionRepository = (
       ]
     );
 
-    return mapCapturedSession(result.rows[0]!);
+    const row = result.rows[0];
+    if (!row) {
+      throw Object.assign(
+        new Error(
+          "Duplicate Captured Session conflicts with data outside caller visibility"
+        ),
+        { statusCode: 409 }
+      );
+    }
+    return mapCapturedSession(row);
   },
 
   async updateCapturedSessionTitle(actor, sessionId, input) {

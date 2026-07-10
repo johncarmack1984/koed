@@ -2203,6 +2203,14 @@ const createFakeRepository = () => {
       const existing = existingId
         ? capturedSessions.get(existingId)
         : undefined;
+      if (existing && existing.ownerUserId !== actor.userId) {
+        throw Object.assign(
+          new Error(
+            "Duplicate Captured Session conflicts with data outside caller visibility"
+          ),
+          { statusCode: 409 }
+        );
+      }
       const record: CapturedSessionRecord = {
         id: existing?.id ?? id,
         ownerUserId: actor.userId,
@@ -9549,8 +9557,17 @@ describe("account and access flows", () => {
       headers: { cookie: ownerCookie },
       payload: { name: "Project assignment capture" }
     });
+    const otherToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie: cookieHeader(other) },
+      payload: { name: "Other Project assignment capture" }
+    });
     const captureHeaders = {
       authorization: `Bearer ${jsonBody<TokenResponse>(ownerToken).token}`
+    };
+    const otherCaptureHeaders = {
+      authorization: `Bearer ${jsonBody<TokenResponse>(otherToken).token}`
     };
     const idempotencyKey = "project-assignment-session";
     const created = await app.inject({
@@ -9567,6 +9584,23 @@ describe("account and access flows", () => {
       }
     });
     const session = jsonBody<SessionResponse>(created).session;
+    const rejectedIdempotencyReplay = await app.inject({
+      method: "POST",
+      url: "/v1/sessions",
+      headers: otherCaptureHeaders,
+      payload: {
+        externalSessionId: "attacker-thread",
+        cwd: "/work/attacker",
+        idempotencyKey,
+        detectedProjects: [
+          {
+            id: "attacker-project",
+            name: "Attacker Project",
+            path: "/work/attacker"
+          }
+        ]
+      }
+    });
     await app.inject({
       method: "POST",
       url: `/v1/sessions/${session.id}/events`,
@@ -9651,6 +9685,10 @@ describe("account and access flows", () => {
     });
     await app.close();
 
+    expect(rejectedIdempotencyReplay.statusCode).toBe(409);
+    expect(jsonBody<{ error: string }>(rejectedIdempotencyReplay).error).toBe(
+      "Duplicate Captured Session conflicts with data outside caller visibility"
+    );
     expect(session).toMatchObject({
       project: { id: "project-a" },
       projectAssignmentSource: "detected",

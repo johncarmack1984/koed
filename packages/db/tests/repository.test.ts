@@ -16009,6 +16009,27 @@ describeDb("memory repository visibility", () => {
     );
     const capturedProvenance = session.capturedProjectProvenance;
 
+    await expect(
+      repo.createCapturedSession(
+        { userId: bob.id },
+        {
+          externalSessionId: `attacker-${randomUUID()}`,
+          idempotencyKey,
+          detectedProjects: [
+            {
+              id: "project-attacker",
+              name: "Attacker Project",
+              path: "/work/attacker"
+            }
+          ]
+        }
+      )
+    ).rejects.toMatchObject({
+      message:
+        "Duplicate Captured Session conflicts with data outside caller visibility",
+      statusCode: 409
+    });
+
     const moved = await repo.moveCapturedSessionToProject(
       { userId: alice.id },
       session.id,
