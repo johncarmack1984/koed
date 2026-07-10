@@ -829,13 +829,16 @@ button:disabled {
 iframe {
   border: 0;
   display: block;
-  grid-area: 1 / 1;
   height: 100%;
   min-height: 0;
   transition:
     filter 180ms ease,
     opacity 180ms ease;
   width: 100%;
+}
+
+.explorer-body > iframe {
+  grid-area: 1 / 1;
 }
 
 iframe.explorer-blurred {
@@ -1413,6 +1416,10 @@ iframe.explorer-blurred {
   grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
+}
+
+.conversation-frame {
+  grid-row: 2;
 }
 
 .conversation-toolbar {

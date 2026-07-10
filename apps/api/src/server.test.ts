@@ -4521,6 +4521,35 @@ describe("api health", () => {
     );
   });
 
+  it("allows Electron graph preflight without allowing untrusted origins", async () => {
+    process.env.CORS_ORIGINS = "koed://app";
+    const app = await buildServer();
+    const trusted = await app.inject({
+      method: "OPTIONS",
+      url: "/v1/memory/graph/stream",
+      headers: {
+        origin: "koed://app",
+        "access-control-request-method": "GET",
+        "access-control-request-headers": "authorization,accept"
+      }
+    });
+    const untrusted = await app.inject({
+      method: "OPTIONS",
+      url: "/v1/memory/graph/stream",
+      headers: {
+        origin: "koed://app.evil",
+        "access-control-request-method": "GET",
+        "access-control-request-headers": "authorization,accept"
+      }
+    });
+    await app.close();
+
+    expect(trusted.statusCode).toBe(204);
+    expect(trusted.headers["access-control-allow-origin"]).toBe("koed://app");
+    expect(trusted.headers["access-control-allow-methods"]).toContain("GET");
+    expect(untrusted.headers["access-control-allow-origin"]).toBeUndefined();
+  });
+
   it("keeps public status probes coarse and requires auth for details", async () => {
     process.env.KOED_HOST_CHECKOUT_PATH = "/sensitive/local/path";
     process.env.WORK_QUEUE_BACKEND = "local";

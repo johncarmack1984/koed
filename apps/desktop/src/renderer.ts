@@ -1194,6 +1194,12 @@ const statusCardResultCue = (cardId: StatusCardId): string => {
     return "Waiting for first status";
   }
   const state = statusCardState(cardId);
+  if (
+    cardId === "serverPackage" &&
+    status.serverPackage?.source === "bundled-fallback"
+  ) {
+    return "Bundled fallback active";
+  }
   if (state === "healthy") {
     return "Reachable";
   }
@@ -1364,11 +1370,11 @@ const readinessCheckSummary = (check: ReadinessCheckDefinition): string => {
   }
   if (check.id === "package") {
     const serverPackage = status.serverPackage;
-    if (serverPackage?.state === "healthy") {
-      return `${checkedAtLabel(check.id)} · Standalone package ${serverPackage.currentVersion ?? "active"}.`;
-    }
     if (serverPackage?.source === "bundled-fallback") {
       return `${checkedAtLabel(check.id)} · Using bundled fallback runtime.`;
+    }
+    if (serverPackage?.state === "healthy") {
+      return `${checkedAtLabel(check.id)} · Standalone package ${serverPackage.currentVersion ?? "active"}.`;
     }
     return `${checkedAtLabel(check.id)} · ${serverPackage?.message ?? "Waiting for server package status"}.`;
   }
@@ -1567,7 +1573,7 @@ const renderConversationPane = (): string => {
       <nav class="breadcrumbs conversation-breadcrumbs" aria-label="Breadcrumb"><button type="button" data-back-to-projects>Projects</button><span>›</span><button type="button" data-back-to-project>${escapeHtml(selectedProject()?.name ?? session.projectName)}</button><span>›</span><strong>${escapeHtml(session.name || "Untitled session")}</strong></nav>
       <section class="conversation-pane">
         <div class="conversation-toolbar"><div><p class="eyebrow">Raw conversation</p><strong>${escapeHtml(session.name || "Untitled session")}</strong><small>${countLabel(session.eventCount, "memory event")} · ${escapeHtml(relativeTime(session.latestAt))}</small></div><button type="button" class="secondary" data-open-explorer-session>Open full Explorer ↗</button></div>
-        <iframe title="Koed Explorer raw conversation" src="${escapeHtml(explorerSessionUrl())}"></iframe>
+        <iframe class="conversation-frame" title="Koed Explorer raw conversation" src="${escapeHtml(explorerSessionUrl())}"></iframe>
       </section>
     </div>
   `;
@@ -1622,7 +1628,13 @@ const dashboardRenderKey = (): string => {
     return `session:${selectedProjectId ?? ""}:${selectedSessionId ?? ""}:${explorerSessionUrl()}`;
   }
   if (activeDesktopView === "settings") {
-    return `settings:${status?.generatedAt ?? ""}:${busyAction ?? ""}`;
+    const cardState = statusCards
+      .map(
+        (card) =>
+          `${card.id}:${statusCardState(card.id)}:${statusCardResultCue(card.id)}`
+      )
+      .join("|");
+    return `settings:${status?.state ?? "starting"}:${busyAction ?? ""}:${cardState}`;
   }
   return `${activeDesktopView}:${selectedProjectId ?? ""}:${showInactiveProjects}:${projectDataRevision}`;
 };
@@ -1896,8 +1908,15 @@ const syncProjectDashboard = () => {
   const dashboard = app.querySelector<HTMLElement>("[data-project-dashboard]");
   const nextRenderKey = dashboardRenderKey();
   if (dashboard && dashboard.dataset.renderKey !== nextRenderKey) {
+    const diagnosticsOpen =
+      dashboard.querySelector<HTMLDetailsElement>(".diagnostic-details")
+        ?.open ?? false;
     dashboard.innerHTML = renderProjectDashboard();
     dashboard.dataset.renderKey = nextRenderKey;
+    const diagnostics = dashboard.querySelector<HTMLDetailsElement>(
+      ".diagnostic-details"
+    );
+    if (diagnostics) diagnostics.open = diagnosticsOpen;
   }
   app.querySelectorAll<HTMLButtonElement>("[data-pane]").forEach((button) => {
     const projectsActive =
