@@ -404,6 +404,13 @@ state model records logical memory identity, source and target replicas, sync
 relationships, resumable upload sessions, chunks, and inbox/outbox entries for
 the later hosted intake and worker implementation.
 
+For MCP Team recall, the incoming `Koed-Device` value is a Local-Edge Client
+Credential created during enrollment and scoped to the selected backend plus
+`team_workspace_read`. It is not the upstream device credential. The local edge
+validates the local credential before opening secure storage for the separate
+upstream credential. Personal API Tokens remain on Personal Memory routes and
+cannot be promoted into Team authority from the requested operation body.
+
 ## Explorer-First Auth And Device Enrollment
 
 Koed Desktop and Explorer are the primary setup and inspection surface for

@@ -93,13 +93,17 @@ With that flag, `memory_answer` resolves the current Project root against
 `KOED_HOME/config/project-team-workspaces.json` and includes the mapped
 `team_workspace_id` on Team recall requests. If the mapping also has a backend
 id, MCP sends the request through the local `koed-server` local-edge upstream
-proxy. The local API Token authenticates only to the local backend; the local
-backend uses the enrolled scoped upstream device credential for the Team
-Workspace request and does not forward the API Token upstream.
+proxy. Enrollment creates two distinct scoped credentials in secure local
+storage. A Local-Edge Client Credential authorizes MCP to ask the local proxy
+for `team_workspace_read`; a separate upstream device credential authorizes the
+local edge against the Team Backend. MCP never receives the upstream credential,
+and a Personal API Token never enters or authorizes the Team path.
 
 Team Workspace recall still fails closed when no mapped backend id is available,
 the upstream backend is not enrolled, the upstream capability cache is stale, or
 the upstream route policy does not explicitly enable Team Workspace read.
+Disconnecting removes both local credential classes and disables route policy;
+Personal Memory API Tokens continue to work only for local Personal Memory.
 
 ## Cleanup
 

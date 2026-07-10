@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { readLocalEdgeClientCredentialAuthorization } from "@koed/shared";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -159,19 +161,23 @@ const normalizeToolWorkspaceId = (workspaceId?: string): string =>
 class LocalEdgeTeamMemoryClient implements MemoryAnswerRetrievalClient {
   constructor(
     private readonly client: MemoryApiClient,
-    private readonly upstreamBackendId: string
+    private readonly upstreamBackendId: string,
+    private readonly authorization: string
   ) {}
 
   async search(
     input: Record<string, unknown>
   ): Promise<Record<string, unknown>> {
-    return await this.client.upstreamOperation({
-      upstreamBackendId: this.upstreamBackendId,
-      operationFamily: "team_workspace_read",
-      method: "POST",
-      path: "/v1/memory/search",
-      body: input
-    });
+    return await this.client.upstreamOperation(
+      {
+        upstreamBackendId: this.upstreamBackendId,
+        operationFamily: "team_workspace_read",
+        method: "POST",
+        path: "/v1/memory/search",
+        body: input
+      },
+      this.authorization
+    );
   }
 
   async expand(
@@ -199,14 +205,17 @@ class LocalEdgeTeamMemoryClient implements MemoryAnswerRetrievalClient {
     if (input.sourceAfter) params.set("source_after", input.sourceAfter);
     if (input.sourceBefore) params.set("source_before", input.sourceBefore);
     const query = params.toString();
-    return await this.client.upstreamOperation({
-      upstreamBackendId: this.upstreamBackendId,
-      operationFamily: "team_workspace_read",
-      method: "GET",
-      path: `/v1/memory/nodes/${encodeURIComponent(nodeId)}/expand${
-        query ? `?${query}` : ""
-      }`
-    });
+    return await this.client.upstreamOperation(
+      {
+        upstreamBackendId: this.upstreamBackendId,
+        operationFamily: "team_workspace_read",
+        method: "GET",
+        path: `/v1/memory/nodes/${encodeURIComponent(nodeId)}/expand${
+          query ? `?${query}` : ""
+        }`
+      },
+      this.authorization
+    );
   }
 }
 
@@ -488,9 +497,42 @@ server.registerTool(
         }
       });
     }
+    const localEdgeClientCredential = upstream_backend_id
+      ? readLocalEdgeClientCredentialAuthorization(
+          path.resolve(
+            process.env.KOED_HOME?.trim() || path.join(os.homedir(), ".koed")
+          ),
+          upstream_backend_id
+        )
+      : null;
+    if (
+      team_workspace_id &&
+      upstream_backend_id &&
+      !localEdgeClientCredential
+    ) {
+      return jsonResponse({
+        markdown:
+          "Team Workspace recall is configured, but this MCP installation has no scoped local-edge client credential. Reconnect the Team Backend from Koed Desktop.",
+        evidenceBundle: {
+          query: answerInput.query,
+          instructions:
+            "Team Workspace recall was requested without a scoped local-edge client credential.",
+          evidence: [],
+          retrieval: {
+            mode: "team_workspace_local_credential_unavailable",
+            teamWorkspaceId: team_workspace_id,
+            upstreamBackendId: upstream_backend_id
+          }
+        }
+      });
+    }
     const retrievalClient =
       team_workspace_id && upstream_backend_id
-        ? new LocalEdgeTeamMemoryClient(client, upstream_backend_id)
+        ? new LocalEdgeTeamMemoryClient(
+            client,
+            upstream_backend_id,
+            localEdgeClientCredential!.authorization
+          )
         : client;
     const evidence = {
       markdown: "",

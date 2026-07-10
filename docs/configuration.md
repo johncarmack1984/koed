@@ -143,9 +143,12 @@ challenge on the upstream backend and prints the activation URL. After the user
 approves the challenge in a browser session, `upstream enroll status` validates
 the scoped device credential with the upstream backend and marks the local
 backend credential configured. API Tokens remain personal AI-client
-compatibility credentials; Team Workspace recall through MCP uses the local
-edge, which exchanges the local API Token for the enrolled upstream device
-credential without forwarding the API Token upstream.
+compatibility credentials. Team Workspace recall through MCP uses a distinct
+Local-Edge Client Credential scoped to the selected backend and
+`team_workspace_read`. The local edge validates that credential, then uses the
+separate enrolled upstream device credential without exposing it to MCP. A
+Personal API Token alone is rejected from Team, Share Grant, sync, and admin
+operation families.
 
 ## KOED_HOME Layout
 

@@ -2680,6 +2680,82 @@ describeDb("memory repository visibility", () => {
     expect(auditJson).not.toContain(challengeHash);
   });
 
+  it("serializes concurrent device credential replacement for one device", async () => {
+    const user = await repo.createUser({
+      email: `concurrent-device-${randomUUID()}@example.com`,
+      displayName: "Concurrent Device User"
+    });
+    const deviceInstanceId = `desktop-${randomUUID()}`;
+    const challenges = await Promise.all(
+      [0, 1].map((index) =>
+        repo.createDeviceEnrollmentChallenge({
+          challengeHash: `challenge-${index}-${randomUUID()}-${randomUUID()}`,
+          upstreamBackendId: "team-vps",
+          deviceInstanceId,
+          requestedOperationFamilies: ["team_workspace_read"],
+          expiresAt: new Date(Date.now() + 60_000)
+        })
+      )
+    );
+
+    const credentials = await Promise.all(
+      challenges.map((challenge, index) =>
+        repo.approveDeviceEnrollmentChallenge(
+          { userId: user.id },
+          challenge.id,
+          {
+            credentialKeyId: `concurrent-device-key-${index}-${randomUUID()}`,
+            verifierKind: "secret_hash",
+            verifierHash: `concurrent-verifier-${index}-${randomUUID()}`
+          }
+        )
+      )
+    );
+
+    expect(credentials.every(Boolean)).toBe(true);
+    const active = await repo.listDeviceCredentials(
+      { userId: user.id },
+      { upstreamBackendId: "team-vps" }
+    );
+    expect(active).toHaveLength(1);
+    const counts = await pool.query<{ active: string; total: string }>(
+      `select
+         count(*) filter (where revoked_at is null)::text as active,
+         count(*)::text as total
+       from device_credentials
+       where owner_user_id = $1
+         and upstream_backend_id = 'team-vps'
+         and device_instance_id = $2`,
+      [user.id, deviceInstanceId]
+    );
+    expect(counts.rows[0]).toEqual({ active: "1", total: "2" });
+  });
+
+  it("rejects ambiguous device credential key ids", async () => {
+    const user = await repo.createUser({
+      email: `invalid-device-key-${randomUUID()}@example.com`
+    });
+    const challengeHash = `challenge-${randomUUID()}-${randomUUID()}`;
+    await repo.createDeviceEnrollmentChallenge({
+      challengeHash,
+      upstreamBackendId: "team-vps",
+      requestedOperationFamilies: ["team_workspace_read"],
+      expiresAt: new Date(Date.now() + 60_000)
+    });
+
+    await expect(
+      repo.redeemDeviceEnrollmentChallenge(
+        { userId: user.id },
+        {
+          challengeHash,
+          credentialKeyId: "invalid:key:id:1234",
+          verifierKind: "secret_hash",
+          verifierHash: `verifier-${randomUUID()}-${randomUUID()}`
+        }
+      )
+    ).rejects.toThrow("Device credential key id is invalid");
+  });
+
   it("enforces Team roles and Workspace access at request time", async () => {
     const owner = await repo.createUser({
       email: `team-owner-${randomUUID()}@example.com`,

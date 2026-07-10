@@ -98,12 +98,14 @@ describe("graph stream updates", () => {
       error?: (error: unknown) => void;
       release: ReturnType<typeof vi.fn>;
       query: ReturnType<typeof vi.fn>;
+      removeAllListeners: ReturnType<typeof vi.fn>;
     }> = [];
     const pool = {
       connect: vi.fn(async () => {
         const listener = {
           release: vi.fn(),
           query: vi.fn(async () => undefined),
+          removeAllListeners: vi.fn(),
           on: vi.fn(
             (
               event: "notification" | "error",
@@ -153,6 +155,8 @@ describe("graph stream updates", () => {
     expect(listeners[1]?.query).toHaveBeenCalledWith(
       "LISTEN koed_graph_updates"
     );
+    listeners[0]?.error?.(new Error("late old listener error"));
+    expect(listeners[1]?.release).not.toHaveBeenCalled();
 
     service.close();
     vi.useRealTimers();

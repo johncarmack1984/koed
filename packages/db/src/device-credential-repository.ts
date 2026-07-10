@@ -121,6 +121,16 @@ const resolveCredentialOperationFamilies = (
   return requested;
 };
 
+const validateCredentialKeyId = (value: string): string => {
+  const credentialKeyId = value.trim();
+  if (!/^[a-z0-9_.-]{16,160}$/i.test(credentialKeyId)) {
+    throw Object.assign(new Error("Device credential key id is invalid"), {
+      statusCode: 400
+    });
+  }
+  return credentialKeyId;
+};
+
 export const createDeviceCredentialRepository = (db: KoedDb) => ({
   async createDeviceEnrollmentChallenge(input: {
     challengeHash: string;
@@ -197,8 +207,12 @@ export const createDeviceCredentialRepository = (db: KoedDb) => ({
         challenge.requestedOperationFamilies,
         input.operationFamilies
       );
+      const credentialKeyId = validateCredentialKeyId(input.credentialKeyId);
       const deviceInstanceId =
         challenge.deviceInstanceId ?? `device-${challenge.id}`;
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`${actor.userId}:${challenge.upstreamBackendId}:${deviceInstanceId}`}, 0))`
+      );
       const supersededRows = await tx
         .update(deviceCredentials)
         .set({
@@ -225,7 +239,7 @@ export const createDeviceCredentialRepository = (db: KoedDb) => ({
         .values({
           ownerUserId: actor.userId,
           enrollmentChallengeId: challenge.id,
-          credentialKeyId: input.credentialKeyId,
+          credentialKeyId,
           upstreamBackendId: challenge.upstreamBackendId,
           deviceInstanceId,
           deviceLabel: challenge.deviceLabel,
@@ -320,8 +334,12 @@ export const createDeviceCredentialRepository = (db: KoedDb) => ({
         challenge.requestedOperationFamilies,
         input.operationFamilies
       );
+      const credentialKeyId = validateCredentialKeyId(input.credentialKeyId);
       const deviceInstanceId =
         challenge.deviceInstanceId ?? `device-${challenge.id}`;
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`${actor.userId}:${challenge.upstreamBackendId}:${deviceInstanceId}`}, 0))`
+      );
       const supersededRows = await tx
         .update(deviceCredentials)
         .set({
@@ -348,7 +366,7 @@ export const createDeviceCredentialRepository = (db: KoedDb) => ({
         .values({
           ownerUserId: actor.userId,
           enrollmentChallengeId: challenge.id,
-          credentialKeyId: input.credentialKeyId,
+          credentialKeyId,
           upstreamBackendId: challenge.upstreamBackendId,
           deviceInstanceId,
           deviceLabel: challenge.deviceLabel,

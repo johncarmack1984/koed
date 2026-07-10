@@ -2,6 +2,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  readLocalEdgeClientCredentialAuthorization,
+  readUpstreamCredentialAuthorization
+} from "@koed/shared";
 import { resolveKoedServerPaths } from "./paths.js";
 import {
   refreshUpstreamBackendCapabilities,
@@ -35,7 +39,7 @@ const response = (ok: boolean, status: number, body: unknown): Response =>
 const enrollmentFetch =
   (
     status: "pending" | "approved" | "denied" | "expired" = "pending",
-    credentialActive = false
+    credentialActive: boolean | "unknown" = false
   ) =>
   async (
     input: Parameters<typeof fetch>[0],
@@ -70,6 +74,9 @@ const enrollmentFetch =
       init?.method === "GET" &&
       parsed.pathname === "/v1/local-edge/device-credentials/status"
     ) {
+      if (credentialActive === "unknown") {
+        return response(false, 503, { error: "temporarily unavailable" });
+      }
       if (credentialActive) {
         return response(true, 200, { ok: true });
       }
@@ -220,6 +227,42 @@ describe("upstream enrollment orchestration", () => {
         credential: { status: "configured", reference }
       }
     });
+  });
+
+  it("keeps exchanged credentials during transient status failures", async () => {
+    const paths = await registerValidatedBackend();
+    updateUpstreamBackendRoutePolicy(paths, "team-vps", {
+      teamWorkspaceRead: "enabled"
+    });
+    const started = await startUpstreamEnrollment(paths, "team-vps", {
+      now: () => new Date("2026-01-01T00:00:00.000Z"),
+      randomId: () => "enroll-transient-status",
+      fetch: enrollmentFetch()
+    });
+    const reference = started.enrollment!.credential.reference!;
+    updateRegistry(paths, (registry) => {
+      registry.backends[0]!.credential = { status: "configured", reference };
+    });
+
+    const status = await getUpstreamEnrollmentStatus(paths, "team-vps", {
+      now: () => new Date("2026-01-01T00:01:00.000Z"),
+      fetch: enrollmentFetch("pending", "unknown")
+    });
+
+    expect(status).toMatchObject({
+      ok: false,
+      state: "exchanged",
+      enrollment: {
+        failureReason: "credential_status_unavailable",
+        credential: { status: "configured", reference }
+      }
+    });
+    expect(
+      readUpstreamCredentialAuthorization(paths.koedHome, reference)
+    ).not.toBeNull();
+    expect(
+      readLocalEdgeClientCredentialAuthorization(paths.koedHome, "team-vps")
+    ).not.toBeNull();
   });
 
   it("materializes configured credentials before restarting expired enrollment", async () => {
@@ -429,5 +472,31 @@ describe("upstream enrollment orchestration", () => {
         credential: { status: "revoked" }
       }
     });
+    expect(
+      readLocalEdgeClientCredentialAuthorization(paths.koedHome, "team-vps")
+    ).toBeNull();
+
+    updateUpstreamBackendRoutePolicy(paths, "team-vps", {
+      teamWorkspaceRead: "enabled"
+    });
+    const restarted = await startUpstreamEnrollment(paths, "team-vps", {
+      now: () => new Date("2026-01-01T00:04:00.000Z"),
+      randomId: () => "enroll-after-disconnect",
+      fetch: enrollmentFetch()
+    });
+    expect(restarted).toMatchObject({
+      ok: true,
+      state: "pending",
+      enrollment: {
+        requestId: "enroll-after-disconnect",
+        state: "pending"
+      }
+    });
+    expect(restarted.enrollment?.activationUrl).toContain(
+      "/device-enrollment/"
+    );
+    expect(
+      readLocalEdgeClientCredentialAuthorization(paths.koedHome, "team-vps")
+    ).not.toBeNull();
   });
 });

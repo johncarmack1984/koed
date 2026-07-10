@@ -1,4 +1,5 @@
 import type { DeviceCredentialRecord } from "@koed/db";
+import { verifyLocalEdgeClientCredentialAuthorization } from "@koed/shared";
 import type { FastifyInstance } from "fastify";
 import type { ApiRouteContext } from "../server/context.js";
 import {
@@ -582,16 +583,63 @@ export const registerLocalEdgeRoutes = (
     async (request, reply) => {
       assertLocalEdgeRuntimeProfile(context.config.deploymentProfile);
       const repo = requireRepository();
+      const input = localEdgeUpstreamOperationSchema.parse(request.body);
       const authHeader = request.headers.authorization?.trim() ?? "";
       const authScheme = authHeader.split(/\s+/, 1)[0]?.toLowerCase();
-      const authContext =
-        authScheme === "bearer"
+      let authContext:
+        | Awaited<ReturnType<typeof authenticateDeviceCredential>>
+        | {
+            user: Awaited<ReturnType<typeof authenticateApiToken>>;
+            credential: null;
+          }
+        | {
+            user: null;
+            credential: {
+              upstreamBackendId: string;
+              operationFamilies: string[];
+            };
+          };
+      if (authScheme === "bearer") {
+        const user = await authenticateApiToken(request);
+        if (
+          input.operation_family !== "personal_memory_read" &&
+          input.operation_family !== "capture_writes"
+        ) {
+          throw Object.assign(
+            new Error(
+              "Scoped local-edge client credential required for Team upstream operations"
+            ),
+            { statusCode: 403 }
+          );
+        }
+        authContext = { user, credential: null };
+      } else if (authScheme === "koed-device") {
+        const localClientCredential =
+          verifyLocalEdgeClientCredentialAuthorization(
+            context.config.koedHome,
+            authHeader,
+            {
+              backendId: input.upstream_backend_id,
+              operationFamily: input.operation_family
+            }
+          );
+        authContext = localClientCredential
           ? {
-              user: await authenticateApiToken(request),
-              credential: null
+              user: null,
+              credential: {
+                upstreamBackendId: localClientCredential.backendId,
+                operationFamilies: localClientCredential.operationFamilies
+              }
             }
           : await authenticateDeviceCredential(request);
-      const input = localEdgeUpstreamOperationSchema.parse(request.body);
+      } else {
+        throw Object.assign(
+          new Error(
+            "Scoped local-edge client or device credential required for upstream operations"
+          ),
+          { statusCode: 401 }
+        );
+      }
       const registry = upstreamRegistry();
       const upstreamBackend = upstreamBackendById(
         registry,
@@ -601,7 +649,7 @@ export const registerLocalEdgeRoutes = (
         input.operation_family === "capture_writes"
           ? await resolveCapturePolicyForRequest(
               repo,
-              { userId: authContext.user.id },
+              { userId: authContext.user!.id },
               {
                 workspaceId: input.capture_context?.workspace_id,
                 sessionId: input.capture_context?.session_id,
@@ -614,14 +662,7 @@ export const registerLocalEdgeRoutes = (
         requestedMode: input.requested_mode,
         upstreamBackend,
         upstreamBackendId: input.upstream_backend_id,
-        deviceCredential:
-          authContext.credential ??
-          (upstreamBackend && resolveUpstreamAuthorization(upstreamBackend)
-            ? {
-                upstreamBackendId: input.upstream_backend_id,
-                operationFamilies: [input.operation_family]
-              }
-            : null),
+        deviceCredential: authContext.credential,
         upstreamCredentialAvailable: upstreamBackend
           ? Boolean(resolveUpstreamAuthorization(upstreamBackend))
           : false,

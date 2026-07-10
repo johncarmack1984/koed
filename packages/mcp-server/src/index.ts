@@ -486,29 +486,41 @@ export class MemoryApiClient {
     return this.request("GET", "/v1/memory/graph/overview");
   }
 
-  async upstreamOperation(input: {
-    upstreamBackendId: string;
-    operationFamily: "team_workspace_read";
-    method: "GET" | "POST";
-    path: string;
-    body?: unknown;
-  }): Promise<Record<string, unknown>> {
-    return this.request("POST", "/v1/local-edge/upstream-operations", {
-      upstream_backend_id: input.upstreamBackendId,
-      operation_family: input.operationFamily,
-      requested_mode: "live_upstream_proxy",
-      method: input.method,
-      path: input.path,
-      body: input.body
-    });
+  async upstreamOperation(
+    input: {
+      upstreamBackendId: string;
+      operationFamily: "team_workspace_read";
+      method: "GET" | "POST";
+      path: string;
+      body?: unknown;
+    },
+    authorization: string
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      "POST",
+      "/v1/local-edge/upstream-operations",
+      {
+        upstream_backend_id: input.upstreamBackendId,
+        operation_family: input.operationFamily,
+        requested_mode: "live_upstream_proxy",
+        method: input.method,
+        path: input.path,
+        body: input.body
+      },
+      { authorization }
+    );
   }
 
   protected async request<T>(
     method: "GET" | "POST" | "PATCH" | "PUT",
     path: string,
-    body?: unknown
+    body?: unknown,
+    options: { authorization?: string } = {}
   ): Promise<T> {
-    if (!this.config.apiToken) {
+    const authorization =
+      options.authorization ??
+      (this.config.apiToken ? `Bearer ${this.config.apiToken}` : null);
+    if (!authorization) {
       throw new MemoryApiError(
         "Memory API token is not configured. Set MEMORY_API_TOKEN and MEMORY_API_URL before starting the MCP server or Capture Hook.",
         { status: 401 }
@@ -525,7 +537,7 @@ export class MemoryApiClient {
         method,
         signal,
         headers: {
-          authorization: `Bearer ${this.config.apiToken}`,
+          authorization,
           ...(body === undefined ? {} : { "content-type": "application/json" })
         },
         body: body === undefined ? undefined : JSON.stringify(body)

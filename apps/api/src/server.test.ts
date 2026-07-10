@@ -43,6 +43,7 @@ import { createDbPool } from "@koed/db";
 import {
   createLocalTestKeyEnvelopeEncryptionProvider,
   decryptEncryptedJsonPackage,
+  storeLocalEdgeClientCredential,
   type EnvelopeEncryptionProvider,
   type EncryptedJsonPackage
 } from "@koed/shared";
@@ -6371,24 +6372,99 @@ describe("account and access flows", () => {
       reason: "route_policy_disabled"
     });
     expect(proxied.statusCode).toBe(200);
-    expect(proxiedWithApiToken.statusCode).toBe(200);
+    expect(proxiedWithApiToken.statusCode).toBe(403);
     expect(jsonBody<{ markdown: string }>(proxied).markdown).toBeDefined();
-    expect(upstreamCalls).toHaveLength(2);
+    expect(upstreamCalls).toHaveLength(1);
     expect(upstreamCalls[0]).toMatchObject({
       url: "https://team.example.test/v1/memory/answer"
-    });
-    expect(upstreamCalls[1]).toMatchObject({
-      url: "https://team.example.test/v1/memory/search"
     });
     expect(
       (upstreamCalls[0]?.init.headers as Record<string, string>).authorization
     ).toBe("Koed-Device upstream-key:upstream-secret");
-    expect(
-      (upstreamCalls[1]?.init.headers as Record<string, string>).authorization
-    ).toBe("Koed-Device upstream-key:upstream-secret");
     expect(blockedLocalEdgeProxy.statusCode).toBe(400);
     expect(blockedMislabeledAdminProxy.statusCode).toBe(400);
-    expect(upstreamCalls).toHaveLength(2);
+    expect(upstreamCalls).toHaveLength(1);
+  });
+
+  it("routes Team operations with a scoped local-edge client credential", async () => {
+    const koedHome = mkdtempSync(resolve(tmpdir(), "koed-local-client-"));
+    process.env.KOED_HOME = koedHome;
+    const upstreamPath = writeUpstreamRegistryFixture({
+      baseUrl: "https://team.example.test",
+      routePolicy: { teamWorkspaceRead: "enabled" }
+    });
+    const localClient = storeLocalEdgeClientCredential(koedHome, {
+      backendId: "team-vps",
+      secret: "scoped-local-client-secret",
+      operationFamilies: ["team_workspace_read"]
+    });
+    const authorization = `Koed-Device ${localClient.credentialKeyId}:scoped-local-client-secret`;
+    const upstreamCalls: string[] = [];
+    const app = await buildServer({
+      repository: createFakeRepository(),
+      upstreamBackendsPath: upstreamPath,
+      resolveUpstreamAuthorization: () =>
+        "Koed-Device upstream-key:upstream-secret",
+      fetch: async (input) => {
+        upstreamCalls.push(String(input));
+        return new Response(JSON.stringify({ hits: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+    });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "local-client-session@example.test",
+        password: "password123"
+      }
+    });
+
+    const allowed = await app.inject({
+      method: "POST",
+      url: "/v1/local-edge/upstream-operations",
+      headers: { authorization },
+      payload: {
+        operation_family: "team_workspace_read",
+        upstream_backend_id: "team-vps",
+        method: "POST",
+        path: "/v1/memory/search",
+        body: { query: "team" }
+      }
+    });
+    const wrongFamily = await app.inject({
+      method: "POST",
+      url: "/v1/local-edge/upstream-operations",
+      headers: { authorization },
+      payload: {
+        operation_family: "admin",
+        upstream_backend_id: "team-vps",
+        method: "GET",
+        path: "/v1/teams"
+      }
+    });
+    const browserSessionOnly = await app.inject({
+      method: "POST",
+      url: "/v1/local-edge/upstream-operations",
+      headers: { cookie: cookieHeader(registered) },
+      payload: {
+        operation_family: "team_workspace_read",
+        upstream_backend_id: "team-vps",
+        method: "POST",
+        path: "/v1/memory/search",
+        body: { query: "team" }
+      }
+    });
+    await app.close();
+
+    expect(allowed.statusCode).toBe(200);
+    expect(wrongFamily.statusCode).toBe(401);
+    expect(browserSessionOnly.statusCode).toBe(401);
+    expect(upstreamCalls).toEqual([
+      "https://team.example.test/v1/memory/search"
+    ]);
   });
 
   it("does not expose local-edge runtime proxy operations from non-local deployment profiles", async () => {

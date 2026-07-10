@@ -408,6 +408,7 @@ describe("Koed server desktop manager", () => {
             null,
             JSON.stringify({
               ok: true,
+              state: "pending",
               enrollment: {
                 activationUrl:
                   "https://team.example.test/device-enrollment/challenge-1"
@@ -474,6 +475,53 @@ describe("Koed server desktop manager", () => {
     expect(opened).toEqual([
       "https://team.example.test/device-enrollment/challenge-1"
     ]);
+  });
+
+  it("does not report a revoked enrollment as a new browser challenge", async () => {
+    const opened: string[] = [];
+    const manager = createKoedServerManager({
+      repoRoot: "/repo",
+      cliPath: "/repo/cli.js",
+      environment: {},
+      createCliInvocation: (args) => ({
+        command: "/node",
+        args: ["/repo/cli.js", ...args],
+        env: { KOED_REPO_ROOT: "/repo" }
+      }),
+      existsSync: () => true,
+      execFile: (_command, args, _options, callback) => {
+        if (args.includes("register")) {
+          callback(
+            null,
+            JSON.stringify({ ok: true, backend: { id: "team-vps" } }),
+            ""
+          );
+          return;
+        }
+        if (args.includes("start")) {
+          callback(
+            null,
+            JSON.stringify({ ok: true, state: "revoked", enrollment: {} }),
+            ""
+          );
+          return;
+        }
+        callback(null, JSON.stringify({ ok: true }), "");
+      },
+      spawn: () => childProcess() as never,
+      openExternal: async (url) => {
+        opened.push(url);
+      }
+    });
+
+    await expect(
+      manager.handlers.upstream_connect!({ url: "https://team.example.test" })
+    ).resolves.toMatchObject({
+      ok: false,
+      error:
+        "Team Backend enrollment did not return a new pending browser approval challenge."
+    });
+    expect(opened).toEqual([]);
   });
 
   it("disconnects the first registered Team Backend when no explicit id is supplied", async () => {

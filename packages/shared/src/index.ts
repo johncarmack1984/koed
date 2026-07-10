@@ -31,11 +31,16 @@ export {
   encryptedPackageObjectClasses
 } from "./encrypted-package.js";
 export {
+  deleteLocalEdgeClientCredential,
   deleteUpstreamCredentialSecret,
+  localEdgeClientCredentialReferenceFor,
   parseUpstreamCredentialReference,
+  readLocalEdgeClientCredentialAuthorization,
   readUpstreamCredentialAuthorization,
+  storeLocalEdgeClientCredential,
   storeUpstreamCredentialSecret,
-  upstreamCredentialReferenceFor
+  upstreamCredentialReferenceFor,
+  verifyLocalEdgeClientCredentialAuthorization
 } from "./upstream-credential-store.js";
 export type {
   EncryptedPayloadEnvelope,
@@ -61,6 +66,8 @@ export type {
   EncryptedPackageObjectClass
 } from "./encrypted-package.js";
 export type {
+  LocalEdgeClientCredentialAuthorization,
+  LocalEdgeClientCredentialInput,
   UpstreamCredentialSecretInput,
   UpstreamCredentialSecretStoreDeps
 } from "./upstream-credential-store.js";

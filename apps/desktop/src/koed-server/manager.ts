@@ -480,14 +480,12 @@ const activationUrlFromResult = (value: unknown): string | null => {
 const resultOk = (value: unknown): boolean =>
   Boolean(value && typeof value === "object" && (value as { ok?: unknown }).ok);
 
-const resultMessage = (value: unknown): string =>
-  value && typeof value === "object"
-    ? String(
-        (value as { message?: unknown; error?: unknown }).message ??
-          (value as { error?: unknown }).error ??
-          ""
-      )
-    : "";
+const resultState = (value: unknown): string | null =>
+  value &&
+  typeof value === "object" &&
+  typeof (value as { state?: unknown }).state === "string"
+    ? (value as { state: string }).state
+    : null;
 
 const bundledLocalDatabaseUrl = (environment: NodeJS.ProcessEnv): string => {
   const ports = readDesktopPorts(environment);
@@ -925,9 +923,15 @@ export const createKoedServerManager = ({
       return enrollResult;
     }
     const activationUrl = activationUrlFromResult(enrollResult);
-    if (activationUrl) {
-      await openExternal(activationUrl);
+    if (resultState(enrollResult) !== "pending" || !activationUrl) {
+      return {
+        ok: false,
+        backendId,
+        error:
+          "Team Backend enrollment did not return a new pending browser approval challenge."
+      };
     }
+    await openExternal(activationUrl);
     return {
       ok: true,
       backendId,
@@ -936,9 +940,8 @@ export const createKoedServerManager = ({
       refresh: refreshResult,
       policy: policyResult,
       enrollment: enrollResult,
-      message: activationUrl
-        ? "Team Backend enrollment started. Complete approval in the browser."
-        : resultMessage(enrollResult)
+      message:
+        "Team Backend enrollment started. Complete approval in the browser."
     };
   };
 
