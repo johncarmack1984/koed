@@ -1,6 +1,6 @@
 {
-  "id": "32494a97-5aab-457c-88cd-01ac8bd736fb",
-  "prevId": "11c4a0ae-3bb1-4143-92cb-8cca64668abc",
+  "id": "815f0b92-241f-41af-8709-f0d85605327a",
+  "prevId": "32494a97-5aab-457c-88cd-01ac8bd736fb",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1026,6 +1026,114 @@
         "conversation_items_transport_chunk_count_check": {
           "name": "conversation_items_transport_chunk_count_check",
           "value": "\"conversation_items\".\"transport_chunk_count\" >= 1 and \"conversation_items\".\"transport_chunk_index\" < \"conversation_items\".\"transport_chunk_count\""
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.conversation_projection_processing_outbox": {
+      "name": "conversation_projection_processing_outbox",
+      "schema": "",
+      "columns": {
+        "event_id": {
+          "name": "event_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "visibility": {
+          "name": "visibility",
+          "type": "visibility_scope",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "work_class": {
+          "name": "work_class",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "dispatched_at": {
+          "name": "dispatched_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "conversation_projection_processing_outbox_pending_idx": {
+          "name": "conversation_projection_processing_outbox_pending_idx",
+          "columns": [
+            {
+              "expression": "work_class",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "event_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"conversation_projection_processing_outbox\".\"dispatched_at\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "conversation_projection_processing_outbox_event_id_memory_events_id_fk": {
+          "name": "conversation_projection_processing_outbox_event_id_memory_events_id_fk",
+          "tableFrom": "conversation_projection_processing_outbox",
+          "tableTo": "memory_events",
+          "columnsFrom": ["event_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "conversation_projection_processing_outbox_owner_user_id_users_id_fk": {
+          "name": "conversation_projection_processing_outbox_owner_user_id_users_id_fk",
+          "tableFrom": "conversation_projection_processing_outbox",
+          "tableTo": "users",
+          "columnsFrom": ["owner_user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "conversation_projection_processing_outbox_owner_check": {
+          "name": "conversation_projection_processing_outbox_owner_check",
+          "value": "\"conversation_projection_processing_outbox\".\"visibility\" = 'personal' and \"conversation_projection_processing_outbox\".\"owner_user_id\" is not null"
+        },
+        "conversation_projection_processing_outbox_work_class_check": {
+          "name": "conversation_projection_processing_outbox_work_class_check",
+          "value": "\"conversation_projection_processing_outbox\".\"work_class\" in ('live_capture_projection', 'normal_embedding_lcm', 'historical_import_backfill')"
         }
       },
       "isRLSEnabled": false
@@ -2939,7 +3047,7 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
-          "default": 0
+          "default": 10
         },
         "status": {
           "name": "status",

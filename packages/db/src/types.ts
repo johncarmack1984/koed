@@ -880,6 +880,17 @@ export interface ConversationProjectionResult {
   }>;
 }
 
+export interface ConversationProjectionProcessingRecord {
+  eventId: string;
+  userId: string;
+  visibility: Visibility;
+  workClass: KoedWorkClass;
+}
+
+export interface HistoricalProjectionLease {
+  release(): Promise<void>;
+}
+
 export interface ConversationProjectionBacklog {
   liveProjectionRows: number;
   historicalImportRows: number;
@@ -1199,6 +1210,13 @@ export interface MemorySourceRepository
     workClass?: "live_capture_projection" | "historical_import_backfill";
   }): Promise<ActorContext[]>;
   getConversationProjectionBacklog(): Promise<ConversationProjectionBacklog>;
+  tryAcquireHistoricalProjectionLease(): Promise<HistoricalProjectionLease | null>;
+  listPendingConversationProjectionProcessing(
+    limit?: number
+  ): Promise<ConversationProjectionProcessingRecord[]>;
+  markConversationProjectionProcessingDispatched(
+    eventIds: string[]
+  ): Promise<number>;
   listSemanticMemoryRebuildActors(input?: {
     limit?: number;
   }): Promise<ActorContext[]>;

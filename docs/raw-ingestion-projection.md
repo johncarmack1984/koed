@@ -152,15 +152,32 @@ backends preserve FIFO order. Historical rows use the canonical raw
 rows persist `live_capture_projection`. Projection selection never infers this
 from source event time, insertion order, source path, or metadata.
 
-The worker always drains a bounded live Projection pass before considering one
+The API's direct Projection endpoint is live-only, even when callers provide
+explicit row ids. Historical rows remain pending for Worker admission. The
+worker always drains a bounded live Projection pass before considering one
 historical batch. It admits that batch only when live raw-Projection rows and
 pending interactive Memory Questions are at or below configured thresholds, the
 configured API `/ready` endpoint is healthy, queue probing succeeds, and the
-Embedding Service is healthy. Historical batches cap selected raw rows, raw
-payload bytes, runtime at Projection boundaries, and concurrency (currently one
-worker slot). A stopped worker leaves unprojected historical rows pending; its
-next pass reevaluates pressure and resumes safely. Historical Projection then
-propagates its work class to embedding and LCM queue jobs.
+Embedding Service is healthy.
+
+Historical batches meter every physical raw row and all raw JSON, text, and
+transport-chunk bytes before admission. Completed-turn segments remain atomic.
+The first atomic segment may exceed a row or byte target so an oversized segment
+cannot block progress forever; no later segment may cross either target. Runtime
+is also a soft atomic-segment boundary: Koed completes the first admitted
+segment, then yields before starting another segment after the deadline.
+Concurrency is one database-leased Worker slot across processes; a crashed
+Worker releases its session-scoped lease when Postgres closes the connection.
+
+Projection writes durable processing-outbox rows before marking raw rows
+projected. Embedding and compaction jobs use deterministic ids and acknowledge
+that outbox only after both jobs are admitted. Worker startup and each catch-up
+pass replay unacknowledged rows, so a queue failure or process restart cannot
+strand a projected Memory Event. Graceful Worker shutdown stops new catch-up
+passes and waits for the active pass before closing queues or Postgres. A stopped
+worker leaves unprojected historical rows pending; its next pass reevaluates
+pressure and resumes safely. Historical Projection propagates its work class to
+embedding and LCM queue jobs.
 
 Historical admission and progress telemetry contains only class names, row and
 byte counts, durations, and pause reasons. It must not contain transcript

@@ -2552,6 +2552,15 @@ const createFakeRepository = () => {
     async listConversationProjectionActors() {
       return [];
     },
+    async tryAcquireHistoricalProjectionLease() {
+      return { release: async () => undefined };
+    },
+    async listPendingConversationProjectionProcessing() {
+      return [];
+    },
+    async markConversationProjectionProcessingDispatched(eventIds) {
+      return eventIds.length;
+    },
     async listSemanticMemoryRebuildActors() {
       return [];
     },
@@ -7616,8 +7625,7 @@ describe("account and access flows", () => {
       enabled: true,
       healthy: true,
       model: "qwen3-0.6b",
-      dimensions: 1024,
-      error: null
+      dimensions: 1024
     });
     const app = await buildServer({ repository });
     const ready = await app.inject({ method: "GET", url: "/ready" });
@@ -8426,6 +8434,124 @@ describe("account and access flows", () => {
       jsonBody<AnswerResponse>(cookieAnswer).evidence[0]?.summaryText
     ).toContain("concise changelog");
   });
+
+  it("keeps historical rows out of direct live Projection requests", async () => {
+    const repository = createFakeRepository();
+    const projectPendingConversationItems = vi.spyOn(
+      repository,
+      "projectPendingConversationItems"
+    );
+    const app = await buildServer({ repository });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "live-projection-only@example.com",
+        password: "password123"
+      }
+    });
+    const cookie = cookieHeader(registered);
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie },
+      payload: { name: "Projection Client" }
+    });
+    const token = jsonBody<TokenResponse>(createdToken).token;
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/memory/conversation-items/project",
+      headers: { authorization: `Bearer ${token}` },
+      payload: { limit: 10 }
+    });
+    await app.close();
+
+    expect(response.statusCode).toBe(200);
+    expect(projectPendingConversationItems).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        limit: 10,
+        visibility: "personal",
+        workClass: "live_capture_projection"
+      })
+    );
+  });
+
+  it.skipIf(!process.env.DATABASE_URL)(
+    "leaves explicit historical ids pending through direct Projection",
+    async () => {
+      process.env.KOED_ALLOW_PUBLIC_REGISTRATION = "true";
+      process.env.WORK_QUEUE_BACKEND = "local";
+      const app = await buildServer();
+      const queryPool = createDbPool();
+      try {
+        const registered = await app.inject({
+          method: "POST",
+          url: "/auth/register",
+          payload: {
+            email: `historical-direct-${randomUUID()}@example.com`,
+            password: "password123"
+          }
+        });
+        const cookie = cookieHeader(registered);
+        const createdToken = await app.inject({
+          method: "POST",
+          url: "/api-tokens",
+          headers: { cookie },
+          payload: { name: "Historical Direct Test" }
+        });
+        const token = jsonBody<TokenResponse>(createdToken).token;
+        const headers = { authorization: `Bearer ${token}` };
+        const captured = await app.inject({
+          method: "POST",
+          url: "/v1/memory/conversation-items",
+          headers,
+          payload: {
+            items: [
+              {
+                sourceKind: "codex",
+                sourceAdapterVersion: "codex-history-v1",
+                sourceTransport: "historical_import",
+                sourceRecordType: "app_server_notification",
+                sourceEventType: "item/completed",
+                rawJson: {
+                  method: "item/completed",
+                  params: { item: { type: "userMessage", text: "History" } }
+                },
+                sourceHash: `history-${randomUUID()}`,
+                idempotencyKey: `history-${randomUUID()}`,
+                metadata: { transcriptType: "user_message" }
+              }
+            ]
+          }
+        });
+        const itemId = jsonBody<{ items: Array<{ id: string }> }>(captured)
+          .items[0]!.id;
+
+        const projected = await app.inject({
+          method: "POST",
+          url: "/v1/memory/conversation-items/project",
+          headers,
+          payload: { conversationItemIds: [itemId], limit: 10 }
+        });
+        const stored = await queryPool.query<{ projection_status: string }>(
+          "select projection_status from conversation_items where id = $1",
+          [itemId]
+        );
+
+        expect(projected.statusCode).toBe(200);
+        expect(
+          jsonBody<{ projection: { rawItemsScanned: number } }>(projected)
+            .projection.rawItemsScanned
+        ).toBe(0);
+        expect(stored.rows[0]?.projection_status).toBe("pending");
+      } finally {
+        await app.close();
+        await queryPool.end();
+      }
+    }
+  );
 
   it("sanitizes storage-unsafe strings before forwarding raw conversation item ingestion", async () => {
     const repository = createFakeRepository();

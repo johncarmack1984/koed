@@ -50,7 +50,10 @@ const createRepository = () => ({
   processDueSemanticMemoryRebuilds: vi.fn(),
   projectPendingConversationItems: vi.fn((actor, input) =>
     Promise.resolve(projectionResult(input.workClass))
-  )
+  ),
+  tryAcquireHistoricalProjectionLease: vi.fn().mockResolvedValue({
+    release: vi.fn().mockResolvedValue(undefined)
+  })
 });
 
 const createService = (
@@ -62,24 +65,36 @@ const createService = (
   }
 ) => {
   const enqueueProjectedMemoryEventProcessing = vi.fn().mockResolvedValue({});
+  const recoverProjectedMemoryEventProcessing = vi.fn().mockResolvedValue(0);
   const logger = { info: vi.fn(), warn: vi.fn() };
   const service = createRawProjectionService({
     actorLimit: 10,
     batchLimit: 1000,
     enqueueProjectedMemoryEventProcessing,
     getHistoricalAdmissionHealth: vi.fn().mockResolvedValue(health),
+    recoverProjectedMemoryEventProcessing,
     historicalImport: batchConfig,
     intervalMs: 60_000,
     logger: logger as never,
     repository: repository as unknown as MemorySourceRepository
   });
-  return { service, repository, enqueueProjectedMemoryEventProcessing, logger };
+  return {
+    service,
+    repository,
+    enqueueProjectedMemoryEventProcessing,
+    recoverProjectedMemoryEventProcessing,
+    logger
+  };
 };
 
 describe("raw Projection historical priority", () => {
   it("runs newly available live Projection before queued historical work", async () => {
-    const { service, repository, enqueueProjectedMemoryEventProcessing } =
-      createService();
+    const {
+      service,
+      repository,
+      enqueueProjectedMemoryEventProcessing,
+      recoverProjectedMemoryEventProcessing
+    } = createService();
 
     await service.run();
 
@@ -92,6 +107,11 @@ describe("raw Projection historical priority", () => {
       2,
       { userId: "historical-user" },
       expect.objectContaining({ workClass: "historical_import_backfill" })
+    );
+    expect(
+      enqueueProjectedMemoryEventProcessing.mock.invocationCallOrder[0]
+    ).toBeLessThan(
+      recoverProjectedMemoryEventProcessing.mock.invocationCallOrder[0]!
     );
     expect(enqueueProjectedMemoryEventProcessing.mock.calls).toEqual([
       [
@@ -164,6 +184,58 @@ describe("raw Projection historical priority", () => {
       }),
       "historical import admission evaluated"
     );
+  });
+
+  it("honors the cross-process historical Projection lease", async () => {
+    const repository = createRepository();
+    repository.tryAcquireHistoricalProjectionLease.mockResolvedValueOnce(null);
+    const { service, logger } = createService(repository);
+
+    await service.run();
+
+    expect(
+      repository.projectPendingConversationItems.mock.calls.filter(
+        ([, input]) => input.workClass === "historical_import_backfill"
+      )
+    ).toHaveLength(0);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        historicalImport: expect.objectContaining({
+          admitted: false,
+          reason: "concurrency_cap"
+        })
+      }),
+      "historical import admission evaluated"
+    );
+  });
+
+  it("waits for active Projection before shutdown closes dependencies", async () => {
+    const repository = createRepository();
+    const projectionGate: {
+      resolve(value: ReturnType<typeof projectionResult>): void;
+    } = { resolve: () => undefined };
+    repository.projectPendingConversationItems.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          projectionGate.resolve = resolve;
+        })
+    );
+    const { service } = createService(repository);
+
+    const running = service.run();
+    await vi.waitFor(() =>
+      expect(repository.projectPendingConversationItems).toHaveBeenCalled()
+    );
+    let stopped = false;
+    const stopping = service.stop().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    projectionGate.resolve(projectionResult("live_capture_projection"));
+    await Promise.all([running, stopping]);
+    expect(stopped).toBe(true);
   });
 
   it("resumes after pressure clears on a new worker instance", async () => {

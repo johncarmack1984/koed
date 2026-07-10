@@ -69,7 +69,8 @@ import {
   sanitizeForPostgresStorage,
   decryptEnvelopeToUtf8,
   type EncryptedPayloadEnvelope,
-  type EnvelopeEncryptionProvider
+  type EnvelopeEncryptionProvider,
+  type KoedWorkClass
 } from "@koed/shared";
 
 import type {
@@ -153,6 +154,7 @@ type ConversationProjectionRawRow = {
   session_workspace_id: string | null;
   session_cwd: string | null;
   session_metadata: Record<string, unknown> | null;
+  selection_unit_id?: string;
 };
 
 type LogicalConversationProjectionItem = {
@@ -935,12 +937,15 @@ type ConversationProjectionCandidate = {
   semanticUnitType: ConversationSemanticUnitType | null;
   semanticItem: ConversationSemanticProjectionItem | null;
   disposition: ConversationProjectionDisposition;
+  selectionUnitId: string;
 };
 
 type ConversationProjectionDisposition =
   | "raw_only"
   | "ready_for_semantic_projection"
   | "waiting_for_agent_seal";
+
+const historicalProjectionAdvisoryLockId = "5279723041804876641";
 
 type AgentSemanticQueueResult =
   | "waiting_for_agent_seal"
@@ -3709,7 +3714,11 @@ export const createMemorySourceRepository = (
             coalesce(ci.event_time, ci.observed_at) as boundary_order_at,
             (
               ci.source_record_type = 'hook_payload'
-              and lower(coalesce(ci.source_event_type, ci.metadata ->> 'hookEventName', '')) in ('stop', 'subagentstop')
+              and (
+                lower(coalesce(ci.source_event_type, '')) in ('stop', 'subagentstop')
+                or lower(coalesce(ci.raw_json ->> 'hook_event_name', '')) in ('stop', 'subagentstop')
+                or lower(coalesce(ci.metadata ->> 'hookEventName', '')) in ('stop', 'subagentstop')
+              )
             ) as is_turn_complete_signal
           from conversation_items ci
           left join sessions s on s.id = ci.session_id
@@ -3718,20 +3727,54 @@ export const createMemorySourceRepository = (
             and ci.personal_deleted_at is null
             and ($4::visibility_scope is null or ci.visibility = $4)
             and ($5::text is null or ci.projection_work_class = $5)
-            and (
-              ci.transport_chunk_count = 1
-              or ci.transport_chunk_index = 0
-            )
             and ci.owner_user_id = $1
-        ),
-        selected_boundaries as (
+        ), ordered_items as (
+          select
+            *,
+            coalesce(sum(is_turn_complete_signal::integer) over (
+              partition by boundary_session, boundary_thread,
+                boundary_workspace, projection_work_class
+              order by boundary_order_at asc, source_sequence asc nulls last, id asc
+              rows between unbounded preceding and 1 preceding
+            ), 0) as completed_scope_segment
+          from pending_items
+        ), scoped_items as (
+          select
+            *,
+            bool_or(
+              is_turn_complete_signal
+              and ($3::uuid[] is null or id = any($3::uuid[]))
+            ) over (
+              partition by boundary_session, boundary_thread,
+                boundary_workspace, projection_work_class,
+                completed_scope_segment
+            ) as segment_has_selected_turn_complete_signal
+          from ordered_items
+        ), unit_items as (
+          select
+            *,
+            case when segment_has_selected_turn_complete_signal
+              then 'completed_scope'
+              else 'turn'
+            end as selection_unit_kind,
+            case when segment_has_selected_turn_complete_signal
+              then completed_scope_segment
+              else null
+            end as selection_unit_segment,
+            case when segment_has_selected_turn_complete_signal
+              then null
+              else boundary_turn
+            end as selection_unit_turn
+          from scoped_items
+        ), selected_units as (
           select
             boundary_session,
-            boundary_turn,
+            selection_unit_kind,
+            selection_unit_segment,
+            selection_unit_turn,
             boundary_thread,
             boundary_workspace,
             projection_work_class,
-            bool_or(is_turn_complete_signal) as has_turn_complete_signal,
             min(boundary_order_at) as oldest_at,
             min(id::text) as oldest_id,
             count(*) as row_count,
@@ -3740,21 +3783,23 @@ export const createMemorySourceRepository = (
               + octet_length(coalesce(raw_text, ''))
               + octet_length(coalesce(transport_chunk_text, ''))
             ) as byte_count
-          from pending_items
-          where $3::uuid[] is null or id = any($3::uuid[])
+          from unit_items
           group by
             boundary_session,
-            boundary_turn,
+            selection_unit_kind,
+            selection_unit_segment,
+            selection_unit_turn,
             boundary_thread,
             boundary_workspace,
             projection_work_class
-        ), ranked_boundaries as (
+          having $3::uuid[] is null or bool_or(id = any($3::uuid[]))
+        ), ranked_units as (
           select
             *,
-            row_number() over projection_order as boundary_number,
+            row_number() over projection_order as unit_number,
             sum(row_count) over projection_order as selected_row_count,
             sum(byte_count) over projection_order as selected_byte_count
-          from selected_boundaries
+          from selected_units
           window projection_order as (
             order by
               case projection_work_class
@@ -3764,20 +3809,17 @@ export const createMemorySourceRepository = (
               oldest_at asc,
               oldest_id asc
           )
-        ), selected_ranked_boundaries as (
+        ), admitted_units as (
           select *
-          from ranked_boundaries
-          where (
-              (
-                $5::text = 'historical_import_backfill'
-                and selected_row_count <= $2
-              )
-              or (
-                $5::text is distinct from 'historical_import_backfill'
-                and boundary_number <= $2
-              )
+          from ranked_units
+          where unit_number = 1 or (
+            (
+              ($5::text = 'historical_import_backfill' and selected_row_count <= $2)
+              or
+              ($5::text is distinct from 'historical_import_backfill' and unit_number <= $2)
             )
             and ($6::bigint is null or selected_byte_count <= $6)
+          )
         )
         select
           pi.id, pi.owner_user_id, pi.visibility, pi.session_id,
@@ -3790,30 +3832,21 @@ export const createMemorySourceRepository = (
           pi.transport_chunk_text, pi.transport_chunk_encoding,
           pi.source_hash, pi.idempotency_key, pi.projection_work_class,
           pi.metadata, pi.observed_at, pi.session_workspace_id,
-          pi.session_cwd, pi.session_metadata
-	      from pending_items pi
-	      join selected_ranked_boundaries sb
-	          on (
-	            sb.boundary_session = pi.boundary_session
-	            and sb.boundary_turn = pi.boundary_turn
-	            and sb.boundary_thread = pi.boundary_thread
-	            and sb.boundary_workspace = pi.boundary_workspace
-            and sb.projection_work_class = pi.projection_work_class
-	          )
-	          or (
-	            sb.has_turn_complete_signal
-	            and sb.boundary_session = pi.boundary_session
-	            and sb.boundary_thread = pi.boundary_thread
-	            and sb.boundary_workspace = pi.boundary_workspace
-            and sb.projection_work_class = pi.projection_work_class
-	          )
+          pi.session_cwd, pi.session_metadata,
+          au.oldest_id as selection_unit_id
+        from unit_items pi
+        join admitted_units au
+          on au.boundary_session = pi.boundary_session
+          and au.selection_unit_kind = pi.selection_unit_kind
+          and au.selection_unit_segment is not distinct from pi.selection_unit_segment
+          and au.selection_unit_turn is not distinct from pi.selection_unit_turn
+          and au.boundary_thread = pi.boundary_thread
+          and au.boundary_workspace = pi.boundary_workspace
+          and au.projection_work_class = pi.projection_work_class
+        where pi.transport_chunk_count = 1
+          or pi.transport_chunk_index = 0
         order by
-          case sb.projection_work_class
-            when 'live_capture_projection' then 0
-            else 1
-          end,
-          sb.oldest_at asc,
-          sb.oldest_id asc,
+          au.unit_number asc,
           pi.source_sequence asc nulls last,
           pi.boundary_order_at asc,
           pi.id asc
@@ -3982,7 +4015,8 @@ export const createMemorySourceRepository = (
             boundary: conversationProjectionBoundary(row),
             semanticUnitType,
             semanticItem,
-            disposition
+            disposition,
+            selectionUnitId: sourceRow.selection_unit_id ?? sourceRow.id
           });
         } catch (error) {
           await markProjectionError(sourceIds, error);
@@ -4118,6 +4152,21 @@ export const createMemorySourceRepository = (
                 chunk.sourceIds.length
               );
             }
+            await pool.query(
+              `
+              insert into conversation_projection_processing_outbox (
+                event_id, owner_user_id, visibility, work_class
+              )
+              values ($1, $2, $3, $4)
+              on conflict (event_id) do nothing
+            `,
+              [
+                event.id,
+                actor.userId,
+                first.row.visibility,
+                first.row.projection_work_class
+              ]
+            );
             result.memoryEventsCreated += 1;
             result.memoryEventIds.push(event.id);
             result.memoryEventScopes.push({
@@ -4252,11 +4301,18 @@ export const createMemorySourceRepository = (
       };
 
       const waitingForAgentSealSourceIds = new Set<string>();
+      let activeSelectionUnitId: string | null = null;
 
       for (const candidate of candidates) {
-        if (deadlineAt && Date.now() >= deadlineAt) {
+        if (
+          activeSelectionUnitId !== null &&
+          candidate.selectionUnitId !== activeSelectionUnitId &&
+          deadlineAt &&
+          Date.now() >= deadlineAt
+        ) {
           break;
         }
+        activeSelectionUnitId = candidate.selectionUnitId;
         const {
           logicalItem,
           row,
@@ -4913,12 +4969,13 @@ export const createMemorySourceRepository = (
           from conversation_items ci
           where ci.projection_status in ('pending', 'error')
             and ci.memory_excluded_at is null
+            and ci.personal_deleted_at is null
             and ci.visibility = 'personal'
             and ci.owner_user_id is not null
             and ($1::text is null or ci.projection_work_class = $1)
           group by ci.owner_user_id
         ) projection_actors
-        order by oldest_at asc
+        order by oldest_at asc, user_id asc
         limit $2
       `,
         [workClass, limit]
@@ -4966,6 +5023,85 @@ export const createMemorySourceRepository = (
         historicalImportBytes: Number(row?.historical_import_bytes ?? 0),
         interactiveQuestionRows: Number(row?.interactive_question_rows ?? 0)
       } satisfies ConversationProjectionBacklog;
+    },
+
+    async tryAcquireHistoricalProjectionLease() {
+      const client = await pool.connect();
+      try {
+        const acquired = await client.query<{ acquired: boolean }>(
+          "select pg_try_advisory_lock($1::bigint) as acquired",
+          [historicalProjectionAdvisoryLockId]
+        );
+        if (!acquired.rows[0]?.acquired) {
+          client.release();
+          return null;
+        }
+        let released = false;
+        return {
+          async release() {
+            if (released) return;
+            released = true;
+            try {
+              await client.query("select pg_advisory_unlock($1::bigint)", [
+                historicalProjectionAdvisoryLockId
+              ]);
+            } finally {
+              client.release();
+            }
+          }
+        };
+      } catch (error) {
+        client.release(true);
+        throw error;
+      }
+    },
+
+    async listPendingConversationProjectionProcessing(limit = 1000) {
+      const boundedLimit = Math.min(Math.max(limit, 1), 5000);
+      const result = await pool.query<{
+        event_id: string;
+        owner_user_id: string;
+        visibility: Visibility;
+        work_class: KoedWorkClass;
+      }>(
+        `
+        select event_id, owner_user_id, visibility, work_class
+        from conversation_projection_processing_outbox
+        where dispatched_at is null
+        order by
+          case work_class
+            when 'live_capture_projection' then 0
+            when 'normal_embedding_lcm' then 1
+            else 2
+          end,
+          created_at asc,
+          event_id asc
+        limit $1
+      `,
+        [boundedLimit]
+      );
+      return result.rows.map((row) => ({
+        eventId: row.event_id,
+        userId: row.owner_user_id,
+        visibility: row.visibility,
+        workClass: row.work_class
+      }));
+    },
+
+    async markConversationProjectionProcessingDispatched(eventIds) {
+      if (eventIds.length === 0) {
+        return 0;
+      }
+      const result = await pool.query(
+        `
+        update conversation_projection_processing_outbox
+        set dispatched_at = now()
+        where event_id = any($1::uuid[])
+          and dispatched_at is null
+      `,
+        [eventIds]
+      );
+      return result.rowCount ?? 0;
     },
 
     async listSemanticMemoryRebuildActors(input = {}) {
@@ -5053,6 +5189,17 @@ export const createMemorySourceRepository = (
             }
           );
           const eventIds = created.map((event) => event.eventId);
+          await pool.query(
+            `
+            insert into conversation_projection_processing_outbox (
+              event_id, owner_user_id, visibility, work_class
+            )
+            select event_id, $2, 'personal', 'normal_embedding_lcm'
+            from unnest($1::uuid[]) as event_id
+            on conflict (event_id) do nothing
+          `,
+            [eventIds, actor.userId]
+          );
           await pool.query(
             `
             update semantic_memory_rebuild_jobs

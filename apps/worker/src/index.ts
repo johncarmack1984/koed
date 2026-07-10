@@ -93,7 +93,7 @@ const handleJob = createWorkerJobWorkflow({
   repository: requireRepository
 });
 
-const queueRuntime = createWorkerQueueRuntime({
+const queueRuntime = await createWorkerQueueRuntime({
   backend: workerEnv.queueBackend,
   redisUrl: workerEnv.redisUrl,
   pool,
@@ -115,26 +115,33 @@ logger.info(
   "worker listening on queues"
 );
 
-const rawProjectionService = repository
-  ? createRawProjectionService({
-      actorLimit: workerEnv.rawProjectionActorLimit,
-      batchLimit: workerEnv.rawProjectionBatchLimit,
-      enqueueProjectedMemoryEventProcessing: createProjectionJobScheduler({
-        embeddingQueue: memoryEmbedQueue,
-        compactionQueue
-      }),
-      getHistoricalAdmissionHealth: createHistoricalAdmissionHealth({
-        apiReadyUrl: workerEnv.historicalImportApiReadyUrl,
-        apiReadyTimeoutMs: workerEnv.historicalImportApiReadyTimeoutMs,
-        embeddingQueue: memoryEmbedQueue,
-        repository
-      }),
-      historicalImport: workerEnv.historicalImport,
-      intervalMs: workerEnv.rawProjectionIntervalMs,
-      logger,
-      repository
+const projectionJobScheduler = repository
+  ? createProjectionJobScheduler({
+      embeddingQueue: memoryEmbedQueue,
+      compactionQueue,
+      repository,
+      logger
     })
   : null;
+const rawProjectionService =
+  repository && projectionJobScheduler
+    ? createRawProjectionService({
+        actorLimit: workerEnv.rawProjectionActorLimit,
+        batchLimit: workerEnv.rawProjectionBatchLimit,
+        enqueueProjectedMemoryEventProcessing: projectionJobScheduler.enqueue,
+        recoverProjectedMemoryEventProcessing: projectionJobScheduler.recover,
+        getHistoricalAdmissionHealth: createHistoricalAdmissionHealth({
+          apiReadyUrl: workerEnv.historicalImportApiReadyUrl,
+          apiReadyTimeoutMs: workerEnv.historicalImportApiReadyTimeoutMs,
+          embeddingQueue: memoryEmbedQueue,
+          repository
+        }),
+        historicalImport: workerEnv.historicalImport,
+        intervalMs: workerEnv.rawProjectionIntervalMs,
+        logger,
+        repository
+      })
+    : null;
 rawProjectionService?.start();
 
 const shutdown = async () => {
@@ -147,7 +154,7 @@ const shutdown = async () => {
     },
     "worker shutting down"
   );
-  rawProjectionService?.stop();
+  await rawProjectionService?.stop();
   await queueRuntime.close();
   await Promise.all([memoryEmbedQueue.close(), compactionQueue.close()]);
   await pool?.end();

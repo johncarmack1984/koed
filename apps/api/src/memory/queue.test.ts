@@ -61,6 +61,31 @@ describe("createMemoryJobQueue", () => {
     });
   });
 
+  it("defaults unspecified local and BullMQ jobs to normal priority", async () => {
+    const repository = createRepository();
+    const local = createMemoryJobQueue<{ sourceId: string }>("memory-embed", {
+      backend: "local",
+      localQueueRepository: repository
+    });
+    const bullmq = createMemoryJobQueue<{ sourceId: string }>("memory-embed", {
+      backend: "bullmq",
+      redisUrl: "redis://operator:6379"
+    });
+    bullQueue.add.mockResolvedValueOnce({ id: "normal" });
+
+    await local?.add("embed-source", { sourceId: "local-normal" });
+    await bullmq?.add("embed-source", { sourceId: "bull-normal" });
+
+    expect(repository.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({ priority: 10 })
+    );
+    expect(bullQueue.add).toHaveBeenCalledWith(
+      "embed-source",
+      { sourceId: "bull-normal" },
+      { priority: 10 }
+    );
+  });
+
   it("passes matching live-over-history priorities to BullMQ", async () => {
     bullQueue.add
       .mockResolvedValueOnce({ id: "historical" })

@@ -15,6 +15,15 @@ const workerEnv: WorkerEnvConfig = {
   rawProjectionIntervalMs: 5000,
   rawProjectionBatchLimit: 1000,
   rawProjectionActorLimit: 10,
+  historicalImport: {
+    maxRows: 100,
+    maxBytes: 1_000_000,
+    maxRuntimeMs: 15_000,
+    maxConcurrency: 1,
+    maxLiveProjectionRows: 0,
+    maxInteractiveQuestionRows: 0
+  },
+  historicalImportApiReadyTimeoutMs: 1_000,
   logLevel: "silent",
   logDestination: { destination: "stderr" },
   nodeEnv: "test",

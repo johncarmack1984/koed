@@ -64,10 +64,15 @@ describe("memory job scheduler", () => {
 
   it("queues projected Memory Event processing without source text", async () => {
     const { scheduler, embeddingQueue, compactionQueue } = createScheduler();
+    const repository = {
+      markConversationProjectionProcessingDispatched: vi
+        .fn()
+        .mockResolvedValue(1)
+    };
 
     await expect(
       scheduler.scheduleProjectedMemoryEventProcessing(
-        {} as never,
+        repository as never,
         { userId: "user-2" },
         [
           {
@@ -84,7 +89,7 @@ describe("memory job scheduler", () => {
       )
     ).resolves.toMatchObject({
       embeddings: [{ queued: true }, { queued: true }],
-      compactions: [{ queued: true }]
+      compactions: [{ queued: true }, { queued: true }]
     });
 
     const queuedPayloads = JSON.stringify([
@@ -97,5 +102,39 @@ describe("memory job scheduler", () => {
     expect(queuedPayloads).not.toContain("payload");
     expect(queuedPayloads).not.toContain("query");
     expect(queuedPayloads).not.toContain("answer");
+    expect(embeddingQueue.add.mock.calls.map((call) => call[2]?.jobId)).toEqual(
+      ["projection-embed-event-2", "projection-embed-event-3"]
+    );
+    expect(
+      compactionQueue.add.mock.calls.map((call) => call[2]?.jobId)
+    ).toEqual(["projection-compact-event-2", "projection-compact-event-3"]);
+    expect(
+      repository.markConversationProjectionProcessingDispatched
+    ).toHaveBeenCalledWith(["event-2", "event-3"]);
+  });
+
+  it("leaves projected processing pending when queue admission fails", async () => {
+    const { scheduler, compactionQueue } = createScheduler();
+    const repository = {
+      markConversationProjectionProcessingDispatched: vi.fn()
+    };
+    compactionQueue.add.mockRejectedValueOnce(new Error("queue degraded"));
+
+    const result = await scheduler.scheduleProjectedMemoryEventProcessing(
+      repository as never,
+      { userId: "user-3" },
+      [
+        {
+          eventId: "event-4",
+          visibility: "personal",
+          workClass: "historical_import_backfill"
+        }
+      ]
+    );
+
+    expect(result.compactions[0]).toMatchObject({ queued: false });
+    expect(
+      repository.markConversationProjectionProcessingDispatched
+    ).not.toHaveBeenCalled();
   });
 });

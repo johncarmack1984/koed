@@ -775,12 +775,10 @@ export const createConversationItemRepository = (
             else conversation_items.projection_status
           end,
           projection_work_class = case
-            when excluded.metadata ? 'canonicalConversationItemKey' and (
-              case when excluded.source_record_type = 'hook_payload' then 0 else 1 end
-            ) >= (
-              case when conversation_items.source_record_type = 'hook_payload' then 0 else 1 end
-            ) then excluded.projection_work_class
-            else conversation_items.projection_work_class
+            when conversation_items.projection_work_class = 'live_capture_projection'
+              or excluded.projection_work_class = 'live_capture_projection'
+              then 'live_capture_projection'
+            else 'historical_import_backfill'
           end,
           projection_version = case
             when excluded.metadata ? 'canonicalConversationItemKey' and (

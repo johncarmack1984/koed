@@ -99,7 +99,11 @@ export const registerRawConversationRoutes = (
       const input = projectConversationItemsSchema.parse(request.body);
       const projection = await repo.projectPendingConversationItems(
         { userId: user.id },
-        { ...input, visibility: "personal" }
+        {
+          ...input,
+          visibility: "personal",
+          workClass: "live_capture_projection"
+        }
       );
       const processing = await scheduleProjectedMemoryEventProcessing(
         repo,

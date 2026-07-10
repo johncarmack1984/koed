@@ -1,5 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
-import { createLocalWorkQueueRepository } from "../src/index.js";
+import { randomUUID } from "node:crypto";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  createDbPool,
+  createLocalWorkQueueRepository,
+  runDbMigrations
+} from "../src/index.js";
 
 const createPool = () => ({
   query: vi.fn()
@@ -37,6 +42,29 @@ describe("local work queue repository", () => {
         "500 milliseconds"
       ]
     );
+  });
+
+  it("defaults unspecified jobs to normal work priority", async () => {
+    const pool = createPool();
+    pool.query.mockResolvedValueOnce({ rows: [{ id: "43" }] });
+    const repo = createLocalWorkQueueRepository(pool as never);
+
+    await repo.enqueue({
+      queueName: "memory-embed",
+      jobName: "embed-source",
+      data: { sourceId: "event-2" }
+    });
+
+    expect(pool.query).toHaveBeenCalledWith(expect.any(String), [
+      "memory-embed",
+      "embed-source",
+      null,
+      JSON.stringify({ sourceId: "event-2" }),
+      10,
+      1,
+      null,
+      "0 milliseconds"
+    ]);
   });
 
   it("claims newer live work ahead of queued historical work", async () => {
@@ -135,5 +163,56 @@ describe("local work queue repository", () => {
       expect.stringContaining("available_at > now()"),
       [["pending", "delayed"]]
     );
+  });
+});
+
+const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
+
+describeDb("local work queue priority integration", () => {
+  beforeAll(async () => {
+    const pool = createDbPool();
+    try {
+      await runDbMigrations(pool);
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it("claims newly arrived live work before sustained queued historical work", async () => {
+    const pool = createDbPool();
+    const repository = createLocalWorkQueueRepository(pool);
+    const queueName = `priority-${randomUUID()}`;
+    try {
+      for (let index = 0; index < 10; index += 1) {
+        await repository.enqueue({
+          queueName,
+          jobName: `historical-${index}`,
+          data: {},
+          priority: 20
+        });
+      }
+      const activeHistorical = await repository.claim({
+        queueName,
+        leaseMs: 60_000
+      });
+      await repository.enqueue({
+        queueName,
+        jobName: "live",
+        data: {},
+        priority: 5
+      });
+
+      const next = await repository.claim({ queueName, leaseMs: 60_000 });
+      const later = await repository.claim({ queueName, leaseMs: 60_000 });
+
+      expect(activeHistorical?.jobName).toBe("historical-0");
+      expect(next?.jobName).toBe("live");
+      expect(later?.jobName).toBe("historical-1");
+    } finally {
+      await pool.query("delete from local_work_queue where queue_name = $1", [
+        queueName
+      ]);
+      await pool.end();
+    }
   });
 });

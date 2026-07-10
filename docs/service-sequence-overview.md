@@ -542,18 +542,28 @@ remains a later integration on top of this durable seat lifecycle state.
    and repository read paths hydrate authorized graph, embedding, retrieval,
    LCM source content, and Memory Question payloads from encrypted companions
    after access checks.
-9. The API schedules processing for newly projected Memory Events through the
-   configured work queue backend. Queue payloads hold only identifiers plus one
-   work class: interactive Recall/Memory Questions, live Capture Projection,
-   normal embedding/LCM, or historical import/backfill.
-10. The Worker first selects live raw Projection rows. Historical rows have the
-    durable `historical_import_backfill` Projection class and are selected only
-    as one bounded batch when API readiness, queue, and Embedding Service
-    probes are healthy and configured live/interactive pressure thresholds are
-    clear. It yields after each batch and reevaluates after restart.
+9. Projection persists an identifier-only processing outbox before raw rows are
+   marked projected. API and Worker queue producers use deterministic job ids
+   and acknowledge each outbox row only after embedding and compaction jobs are
+   admitted. Worker catch-up replays unacknowledged rows after queue failures or
+   restart. Queue payloads hold only identifiers plus one work class:
+   interactive Recall/Memory Questions, live Capture Projection, normal
+   embedding/LCM, or historical import/backfill.
+10. Direct API Projection selects only live rows. The Worker also selects live
+    rows first. Historical rows have the durable
+    `historical_import_backfill` Projection class and are selected only as one
+    bounded batch when API readiness, queue, and Embedding Service probes are
+    healthy and configured live/interactive pressure thresholds are clear.
+    Physical row/payload-byte limits and runtime checks apply at completed-turn
+    segment boundaries. A Postgres advisory lease permits one historical batch
+    across Worker processes. It yields after each batch and reevaluates after
+    restart.
 11. The Worker consumes queued jobs from Redis/BullMQ or `local_work_queue`.
     Both backends use lower-number-first priority and FIFO within a class, so
-    live capture runs ahead of queued historical embedding/LCM work.
+    live capture runs ahead of queued historical embedding/LCM work. Schema
+    upgrades assign existing local jobs normal priority. Before BullMQ workers
+    start, Koed assigns the same normal priority to legacy waiting, paused, and
+    delayed jobs that have no stored priority.
 12. The Worker embeds Memory Events by calling the Embedding Service, then
     upserts source embeddings and schedules compaction, creating or updating
     LCM Placeholder Memory Nodes from Memory Events and child nodes before
