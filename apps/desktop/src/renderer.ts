@@ -3,10 +3,24 @@ import "./styles.css";
 import {
   stateLabels,
   statusCards,
+  statusGroups,
   type StatusCardAction,
   type StatusCardId,
   type StatusComponentKey
 } from "./status-model.js";
+import {
+  mergeProjectSources,
+  projectIsActive,
+  projectLatestAt,
+  relativeTime,
+  sessionSelectionId,
+  sortProjects,
+  type DesktopProject,
+  type DesktopProjectGroup,
+  type DesktopProjectMetadata,
+  type DesktopThreadGroup,
+  type DesktopView
+} from "./project-memory-ui.js";
 import type {
   ComponentState,
   ComponentStatus,
@@ -96,33 +110,16 @@ let sidebarCollapsed = true;
 let refreshInFlight: Promise<void> | null = null;
 let explorerApiToken: string | null = null;
 let teamBackendUrlInput = "";
-let activeDesktopPane: "projects" | "settings" = "projects";
+let activeDesktopView: DesktopView = "projects";
 let showInactiveProjects = false;
 let selectedProjectId: string | null = null;
 let selectedSessionId: string | null = null;
 let projectGraph: DesktopProjectGroup[] = [];
+let projectCatalog: DesktopProjectMetadata[] = [];
 let projectGraphError = "";
-
-type DesktopThreadGroup = {
-  id: string;
-  name: string;
-  sessionId?: string | null;
-  projectId: string;
-  projectName: string;
-  projectPath?: string | null;
-  eventCount: number;
-  invalidatedCount: number;
-  latestAt: string;
-  sample: string;
-};
-
-type DesktopProjectGroup = {
-  id: string;
-  name: string;
-  path: string | null;
-  eventCount: number;
-  threads: DesktopThreadGroup[];
-};
+let projectDataRevision = 0;
+let projectGraphFingerprint = "";
+let projectCatalogFingerprint = "";
 type StartupLogLine = {
   key?: string;
   text: string;
@@ -1446,189 +1443,109 @@ const renderStatusCardActions = (cardId: StatusCardId): string => {
     .join("");
 };
 
-const renderStartupSteps = (): string => `
-  <div class="startup-steps">
-    ${startupSteps
-      .map((step) => {
-        const stepState = stepStates[step.id];
-        const support = getStartupSupportForStep(step.id);
-        return `
-          <details class="startup-step ${stepState}" data-startup-step="${step.id}">
-            <summary>
-              <div class="startup-step-summary">
-                <span class="startup-step-disclosure" aria-hidden="true"></span>
-                <div class="startup-step-copy">
-                  <strong>${escapeHtml(step.label)}</strong>
-                  <small data-startup-step-summary="${step.id}">${escapeHtml(support.body)}</small>
-                </div>
-                <span data-startup-step-state="${step.id}">${startupStatusLabel(stepState)}</span>
-              </div>
-            </summary>
-            <div class="startup-step-body">
-              <pre class="startup-step-log" data-startup-step-log="${step.id}">${escapeHtml(startupLogText(step.id))}</pre>
-              <div class="status-group-actions" data-startup-step-actions="${step.id}"></div>
-            </div>
-          </details>
-        `;
-      })
-      .join("")}
-  </div>
-`;
+const desktopProjects = (): DesktopProject[] =>
+  mergeProjectSources(projectGraph, projectCatalog);
 
-const renderStatusCards = (variant: "startup" | "sidebar"): string => `
-  <div class="dependency-cards ${variant}" data-status-card-list="${variant}">
-    ${statusCards
-      .map((card) => {
-        const state = statusCardState(card.id);
-        const liveOutputClass =
-          variant === "sidebar" ? "status-card-live-output" : "readiness-log";
-        return `
-          <details class="status-group dependency-card ${state}" data-status-card="${card.id}">
-            <summary>
-              <div class="status-group-summary">
-                <div class="status-group-title-row">
-                  <span class="status-group-disclosure" aria-hidden="true"></span>
-                  <strong>${escapeHtml(card.title)}</strong>
-                  <span data-status-card-state="${card.id}">${stateLabels[state]}</span>
-                </div>
-                <p class="status-card-meta" data-status-card-meta="${card.id}">${escapeHtml(
-                  statusCardMeta(card.id)
-                )}</p>
-              </div>
-            </summary>
-            <div class="status-group-body">
-              <p class="status-card-role">${escapeHtml(card.role)}</p>
-              <p class="status-card-checkline" data-status-card-summary="${card.id}">${escapeHtml(
-                statusCardSummary(card.id)
-              )}</p>
-              <p class="status-card-impact">${escapeHtml(card.impact)}</p>
-              <div class="status-card-live-heading">Live output</div>
-              <div class="${liveOutputClass}" data-status-card-log="${card.id}"></div>
-              <div class="status-card-live-heading">Actions</div>
-              <div class="status-group-actions status-card-actions" data-status-card-actions="${card.id}">
-                ${renderStatusCardActions(card.id)}
-              </div>
-            </div>
-          </details>
-        `;
-      })
-      .join("")}
-  </div>
-`;
+const sortedProjects = (): DesktopProject[] => sortProjects(desktopProjects());
 
-const projectLatestAt = (project: DesktopProjectGroup): string | null =>
-  project.threads
-    .map((thread) => thread.latestAt)
-    .filter(Boolean)
-    .sort()
-    .at(-1) ?? null;
-
-const projectIsActive = (project: DesktopProjectGroup): boolean => {
-  const latestAt = projectLatestAt(project);
-  if (!latestAt) return false;
-  return Date.now() - Date.parse(latestAt) < 14 * 24 * 60 * 60 * 1000;
-};
-
-const sortedProjects = (): DesktopProjectGroup[] =>
-  [...projectGraph].sort(
-    (left, right) =>
-      Date.parse(projectLatestAt(right) ?? "0") -
-      Date.parse(projectLatestAt(left) ?? "0")
-  );
-
-const selectedProject = (): DesktopProjectGroup | null =>
+const selectedProject = (): DesktopProject | null =>
   sortedProjects().find((project) => project.id === selectedProjectId) ?? null;
 
 const selectedSession = (): DesktopThreadGroup | null =>
   selectedProject()?.threads.find(
-    (thread) => (thread.sessionId ?? thread.id) === selectedSessionId
+    (thread) => sessionSelectionId(thread) === selectedSessionId
   ) ?? null;
 
-const relativeTime = (value: string | null): string => {
-  if (!value) return "No activity";
-  const minutes = Math.max(
-    1,
-    Math.round((Date.now() - Date.parse(value)) / 60_000)
-  );
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
-};
+const countLabel = (count: number, singular: string): string =>
+  `${count} ${count === 1 ? singular : `${singular}s`}`;
 
-const renderProjectCard = (project: DesktopProjectGroup): string => {
+const projectSecondaryLabel = (project: DesktopProject): string =>
+  project.remoteDisplay ?? project.path ?? "Local Project";
+
+const renderProjectCard = (project: DesktopProject): string => {
   const active = projectIsActive(project);
-  const selected = selectedProjectId === project.id;
   return `
-    <button type="button" class="project-card ${selected ? "selected" : ""}" data-project-id="${escapeHtml(project.id)}">
-      <span class="project-icon" aria-hidden="true">⌘</span>
+    <button type="button" class="project-card" data-project-id="${escapeHtml(project.id)}">
+      <span class="project-icon" aria-hidden="true">${escapeHtml(project.name.slice(0, 1).toUpperCase() || "P")}</span>
       <span class="project-card-copy">
         <strong>${escapeHtml(project.name || "Untitled Project")}</strong>
-        <small>${escapeHtml(project.path ?? "Local Project")}</small>
-        <span>${project.threads.length} sessions · ${project.eventCount} memories · ${active ? "active" : "inactive"}</span>
+        <small>${escapeHtml(projectSecondaryLabel(project))}</small>
+        <span>${countLabel(project.threads.length, "session")} · ${countLabel(project.eventCount, "memory event")}${project.branch ? ` · ${escapeHtml(project.branch)}` : ""}</span>
       </span>
-      <span class="project-latest">${escapeHtml(relativeTime(projectLatestAt(project)))}</span>
+      <span class="project-card-tail"><span class="activity-state ${active ? "active" : "inactive"}">${active ? "Active" : "Inactive"}</span><small>${escapeHtml(relativeTime(projectLatestAt(project)))}</small><span aria-hidden="true">›</span></span>
     </button>
   `;
 };
 
+const renderProjectSection = (
+  title: string,
+  projects: DesktopProject[],
+  tone: "active" | "inactive"
+): string => `
+  <section class="project-section ${tone}">
+    <div class="section-heading"><span></span><strong>${escapeHtml(title)}</strong><em>${projects.length}</em></div>
+    <div class="project-list">${projects.map(renderProjectCard).join("")}</div>
+  </section>
+`;
+
 const renderProjectList = (): string => {
   const projects = sortedProjects();
-  const activeProjects = projects.filter(projectIsActive);
+  const activeProjects = projects.filter((project) => projectIsActive(project));
   const inactiveProjects = projects.filter(
     (project) => !projectIsActive(project)
   );
-  const visible = showInactiveProjects ? projects : activeProjects;
   return `
-    <section class="projects-pane">
-      <div class="section-heading"><span></span><strong>RECENT PROJECTS</strong><em>${activeProjects.length}</em></div>
-      <div class="project-list">
-        ${visible.length ? visible.map(renderProjectCard).join("") : `<div class="empty-card">${escapeHtml(projectGraphError || "No captured Project activity yet.")}</div>`}
-      </div>
-      ${inactiveProjects.length ? `<button type="button" class="show-inactive" data-toggle-inactive>${showInactiveProjects ? "Hide inactive" : `Show inactive → ${inactiveProjects.length}`}</button>` : ""}
-    </section>
+    <div class="projects-screen screen-stack">
+      <header class="screen-header">
+        <div><p class="eyebrow">Personal Memory</p><h1>Projects</h1><p>Recent local Projects, with every captured session gathered in one place.</p></div>
+        <span class="scope-badge"><span></span> On this device</span>
+      </header>
+      ${activeProjects.length ? renderProjectSection("ACTIVE PROJECTS", activeProjects, "active") : `<div class="empty-card hero-empty"><strong>No active Projects yet</strong><p>${escapeHtml(projectGraphError || "Use your AI Client in a Project and captured sessions will appear here.")}</p></div>`}
+      ${inactiveProjects.length ? `<button type="button" class="show-inactive" data-toggle-inactive aria-expanded="${showInactiveProjects}">${showInactiveProjects ? "Hide inactive Projects" : `Show inactive Projects · ${inactiveProjects.length}`} <span aria-hidden="true">${showInactiveProjects ? "↑" : "↓"}</span></button>` : ""}
+      ${showInactiveProjects && inactiveProjects.length ? renderProjectSection("INACTIVE PROJECTS", inactiveProjects, "inactive") : ""}
+    </div>
   `;
 };
 
 const renderSessionList = (): string => {
   const project = selectedProject();
   if (!project) {
-    return `<section class="sessions-pane"><div class="empty-card">Select a Project to browse captured sessions.</div></section>`;
+    return renderProjectList();
   }
   const threads = [...project.threads].sort(
     (left, right) => Date.parse(right.latestAt) - Date.parse(left.latestAt)
   );
   return `
-    <section class="sessions-pane">
-      <div class="section-heading"><span></span><strong>SESSIONS</strong><em>${threads.length}</em></div>
-      <h2>${escapeHtml(project.name)}</h2>
-      <p>${escapeHtml(project.path ?? "Local and Team memory context")}</p>
-      <div class="session-list">
+    <div class="project-detail-screen screen-stack">
+      <nav class="breadcrumbs" aria-label="Breadcrumb"><button type="button" data-back-to-projects>Projects</button><span>›</span><strong>${escapeHtml(project.name)}</strong></nav>
+      <header class="project-detail-header"><span class="project-monogram" aria-hidden="true">${escapeHtml(project.name.slice(0, 1).toUpperCase() || "P")}</span><div><p class="eyebrow">Local Project</p><h1>${escapeHtml(project.name)}</h1><p>${escapeHtml(project.path ?? "Local path unavailable")}</p></div></header>
+      <div class="project-summary-grid"><div><strong>${project.threads.length}</strong><span>Sessions</span></div><div><strong>${project.eventCount}</strong><span>Memory events</span></div><div><strong>${escapeHtml(relativeTime(projectLatestAt(project)))}</strong><span>Last activity</span></div></div>
+      <div class="project-identity-row">${project.branch ? `<span>Branch · ${escapeHtml(project.branch)}</span>` : ""}${project.isWorktree ? "<span>Git worktree</span>" : ""}${project.catalogued ? "<span>Project identity discovered</span>" : ""}</div>
+      <section class="sessions-pane">
+        <div class="section-heading"><span></span><strong>CAPTURED SESSIONS</strong><em>${threads.length}</em></div>
+        <div class="session-list">
         ${
           threads.length
             ? threads
                 .map((thread) => {
-                  const id = thread.sessionId ?? thread.id;
-                  return `<button type="button" class="session-row ${selectedSessionId === id ? "selected" : ""}" data-session-id="${escapeHtml(id)}">
-            <strong>${escapeHtml(thread.name || "Untitled session")}</strong>
-            <small>${escapeHtml(thread.sample || "Captured conversation")}</small>
-            <span>${thread.eventCount} memories · ${escapeHtml(relativeTime(thread.latestAt))}</span>
-          </button>`;
+                  const id = sessionSelectionId(thread);
+                  return `<button type="button" class="session-row" data-session-id="${escapeHtml(id)}"><span class="session-icon" aria-hidden="true">↳</span><span class="session-row-copy"><strong>${escapeHtml(thread.name || "Untitled session")}</strong><small>${escapeHtml(thread.sample || "Captured conversation")}</small><span>${countLabel(thread.eventCount, "memory event")} · ${escapeHtml(relativeTime(thread.latestAt))}</span></span><span class="session-row-tail" aria-hidden="true">›</span></button>`;
                 })
                 .join("")
-            : `<div class="empty-card">No sessions found for this Project.</div>`
+            : `<div class="empty-card"><strong>No captured sessions yet</strong><p>The Project identity is ready. Sessions will appear after the Supported Capture Hook records activity here.</p></div>`
         }
-      </div>
-    </section>
+        </div>
+      </section>
+    </div>
   `;
 };
 
 const explorerSessionUrl = (): string => {
   const url = new URL(status?.explorer.url || "http://localhost:5173");
   url.searchParams.set("koedDesktop", "1");
+  url.searchParams.set("embed", "session");
   if (status?.api.url) url.searchParams.set("koedApiBaseUrl", status.api.url);
-  if (explorerApiToken)
-    url.searchParams.set("koedExplorerToken", explorerApiToken);
+  if (explorerApiToken) url.searchParams.set("koedApiToken", explorerApiToken);
   if (selectedSessionId) url.searchParams.set("sessionId", selectedSessionId);
   const session = selectedSession();
   if (session) {
@@ -1643,38 +1560,72 @@ const explorerSessionUrl = (): string => {
 const renderConversationPane = (): string => {
   const session = selectedSession();
   if (!session) {
-    return `<section class="conversation-pane"><div class="empty-card hero-empty">Choose a session to open the Explorer conversation detail.</div></section>`;
+    return selectedProject() ? renderSessionList() : renderProjectList();
   }
   return `
-    <section class="conversation-pane">
-      <div class="conversation-toolbar">
-        <div><strong>${escapeHtml(session.name || "Untitled session")}</strong><small>${session.eventCount} memories · ${escapeHtml(relativeTime(session.latestAt))}</small></div>
-        <button type="button" class="secondary" data-open-explorer-session>Open Explorer</button>
-      </div>
-      <iframe title="Koed Explorer session" src="${escapeHtml(explorerSessionUrl())}"></iframe>
-    </section>
+    <div class="conversation-screen">
+      <nav class="breadcrumbs conversation-breadcrumbs" aria-label="Breadcrumb"><button type="button" data-back-to-projects>Projects</button><span>›</span><button type="button" data-back-to-project>${escapeHtml(selectedProject()?.name ?? session.projectName)}</button><span>›</span><strong>${escapeHtml(session.name || "Untitled session")}</strong></nav>
+      <section class="conversation-pane">
+        <div class="conversation-toolbar"><div><p class="eyebrow">Raw conversation</p><strong>${escapeHtml(session.name || "Untitled session")}</strong><small>${countLabel(session.eventCount, "memory event")} · ${escapeHtml(relativeTime(session.latestAt))}</small></div><button type="button" class="secondary" data-open-explorer-session>Open full Explorer ↗</button></div>
+        <iframe title="Koed Explorer raw conversation" src="${escapeHtml(explorerSessionUrl())}"></iframe>
+      </section>
+    </div>
   `;
 };
 
+const statusGroupState = (
+  group: (typeof statusGroups)[number]
+): ComponentState =>
+  aggregateGroupState(
+    group.componentKeys.map((key) => statusComponent(key)?.state ?? "starting")
+  );
+
+const statusGroupSummary = (group: (typeof statusGroups)[number]): string => {
+  if (!status) return "Waiting for first status";
+  const unhealthy = group.componentKeys
+    .map((key) => statusComponent(key))
+    .find((component) => component && component.state !== "healthy");
+  return unhealthy
+    ? componentMessage(unhealthy)
+    : `${group.componentKeys.length}/${group.componentKeys.length} checks healthy`;
+};
+
 const renderSettingsPane = (): string => `
-  <section class="settings-pane">
-    <div class="section-heading"><span></span><strong>SETTINGS</strong><em>${status ? stateLabels[status.state] : "—"}</em></div>
-    <div class="settings-grid">
-      ${statusCards.map((card) => `<div class="settings-tile ${statusCardState(card.id)}"><strong>${escapeHtml(card.title)}</strong><small>${escapeHtml(statusCardResultCue(card.id))}</small></div>`).join("")}
+  <div class="settings-screen screen-stack">
+    <header class="screen-header"><div><p class="eyebrow">This device</p><h1>Settings</h1><p>A compact view of local Personal Memory readiness.</p></div><span class="overall-health ${status?.state ?? "starting"}">${status ? stateLabels[status.state] : "Checking"}</span></header>
+    <div class="settings-list">
+      ${statusGroups
+        .map((group) => {
+          const state = statusGroupState(group);
+          return `<article class="settings-row ${state}"><span class="settings-state-dot" aria-hidden="true"></span><span><strong>${escapeHtml(group.title)}</strong><small>${escapeHtml(group.description)}</small></span><span class="settings-result"><strong>${escapeHtml(stateLabels[state])}</strong><small>${escapeHtml(statusGroupSummary(group))}</small></span></article>`;
+        })
+        .join("")}
     </div>
     <div class="settings-actions">
       <button type="button" data-startup-action="refresh-status">Refresh</button>
       <button type="button" class="secondary" data-startup-action="doctor">Run doctor</button>
       <button type="button" class="secondary" data-startup-action="setup_codex">Setup AI Client</button>
     </div>
-  </section>
+    <details class="diagnostic-details"><summary>Advanced diagnostics <span>${statusCards.length} components</span></summary><div class="diagnostic-list">${statusCards.map((card) => `<div class="diagnostic-row"><span>${escapeHtml(card.title)}</span><strong class="${statusCardState(card.id)}">${escapeHtml(statusCardResultCue(card.id))}</strong></div>`).join("")}</div></details>
+  </div>
 `;
 
-const renderProjectDashboard = (): string => `
-  <main class="project-dashboard">
-    ${activeDesktopPane === "projects" ? `${renderProjectList()}${renderSessionList()}${renderConversationPane()}` : renderSettingsPane()}
-  </main>
-`;
+const renderProjectDashboard = (): string => {
+  if (activeDesktopView === "settings") return renderSettingsPane();
+  if (activeDesktopView === "session") return renderConversationPane();
+  if (activeDesktopView === "project") return renderSessionList();
+  return renderProjectList();
+};
+
+const dashboardRenderKey = (): string => {
+  if (activeDesktopView === "session") {
+    return `session:${selectedProjectId ?? ""}:${selectedSessionId ?? ""}:${explorerSessionUrl()}`;
+  }
+  if (activeDesktopView === "settings") {
+    return `settings:${status?.generatedAt ?? ""}:${busyAction ?? ""}`;
+  }
+  return `${activeDesktopView}:${selectedProjectId ?? ""}:${showInactiveProjects}:${projectDataRevision}`;
+};
 
 const renderShell = () => {
   if (rendered) {
@@ -1683,20 +1634,15 @@ const renderShell = () => {
 
   app.innerHTML = `
     <section class="desktop-shell koed-memory-shell">
-      <header class="memory-titlebar">
-        <div class="traffic-lights" aria-hidden="true"><span></span><span></span><span></span></div>
-        <button type="button" class="memory-brand" data-pane="projects">
-          <img class="brand-logo" src="${koedMarkUrl}" alt="" />
-          <span>koed</span>
-        </button>
-        <span class="status-pill starting" data-status-pill>${stateLabels.starting}</span>
-        <span class="status-dot starting" data-status-dot title="Overall health: ${stateLabels.starting}" aria-label="Overall health: ${stateLabels.starting}"></span>
-      </header>
-      <nav class="memory-tabs" aria-label="Koed sections">
-        <button type="button" class="${activeDesktopPane === "projects" ? "active" : ""}" data-pane="projects">Projects</button>
-        <button type="button" class="${activeDesktopPane === "settings" ? "active" : ""}" data-pane="settings">Settings</button>
-      </nav>
-      <div data-project-dashboard>${renderProjectDashboard()}</div>
+      <aside class="desktop-navigation">
+        <button type="button" class="memory-brand" data-pane="projects" aria-label="Open Projects"><img class="brand-logo" src="${koedMarkUrl}" alt="" /><span>koed</span></button>
+        <nav class="memory-tabs" aria-label="Koed sections"><button type="button" class="active" data-pane="projects"><span aria-hidden="true">◇</span>Projects</button><button type="button" data-pane="settings"><span aria-hidden="true">⚙</span>Settings</button></nav>
+        <div class="navigation-footer"><span class="status-dot starting" data-status-dot title="Overall health: ${stateLabels.starting}" aria-label="Overall health: ${stateLabels.starting}"></span><span><strong>Personal Memory</strong><small>Stored locally</small></span></div>
+      </aside>
+      <main class="desktop-workspace">
+        <header class="workspace-bar"><span>Personal</span><span class="status-pill starting" data-status-pill>${stateLabels.starting}</span></header>
+        <div class="project-dashboard" data-project-dashboard data-render-key="${escapeHtml(dashboardRenderKey())}">${renderProjectDashboard()}</div>
+      </main>
     </section>
   `;
 
@@ -1948,13 +1894,18 @@ const syncStatusCards = () => {
 
 const syncProjectDashboard = () => {
   const dashboard = app.querySelector<HTMLElement>("[data-project-dashboard]");
-  if (dashboard) {
+  const nextRenderKey = dashboardRenderKey();
+  if (dashboard && dashboard.dataset.renderKey !== nextRenderKey) {
     dashboard.innerHTML = renderProjectDashboard();
+    dashboard.dataset.renderKey = nextRenderKey;
   }
   app.querySelectorAll<HTMLButtonElement>("[data-pane]").forEach((button) => {
+    const projectsActive =
+      button.dataset.pane === "projects" && activeDesktopView !== "settings";
     button.classList.toggle(
       "active",
-      button.dataset.pane === activeDesktopPane
+      projectsActive ||
+        (button.dataset.pane === "settings" && activeDesktopView === "settings")
     );
   });
 };
@@ -2004,7 +1955,11 @@ const refreshExplorerCredential = async (): Promise<void> => {
 
 const refreshProjectGraph = async (): Promise<void> => {
   if (!status?.api.url || !explorerApiToken) {
-    projectGraph = [];
+    if (projectGraph.length) {
+      projectGraph = [];
+      projectGraphFingerprint = "";
+      projectDataRevision += 1;
+    }
     return;
   }
   try {
@@ -2027,13 +1982,39 @@ const refreshProjectGraph = async (): Promise<void> => {
           : `Project graph failed with HTTP ${response.status}`
       );
     }
-    projectGraph = Array.isArray(payload.projects) ? payload.projects : [];
-    projectGraphError = "";
-    if (!selectedProjectId && projectGraph.length) {
-      selectedProjectId = sortedProjects()[0]?.id ?? null;
+    const nextProjects = Array.isArray(payload.projects)
+      ? payload.projects
+      : [];
+    const nextFingerprint = JSON.stringify(nextProjects);
+    if (nextFingerprint !== projectGraphFingerprint) {
+      projectGraph = nextProjects;
+      projectGraphFingerprint = nextFingerprint;
+      projectDataRevision += 1;
+    }
+    if (projectGraphError) {
+      projectGraphError = "";
+      projectDataRevision += 1;
     }
   } catch (error) {
-    projectGraphError = error instanceof Error ? error.message : String(error);
+    const message = error instanceof Error ? error.message : String(error);
+    if (message !== projectGraphError) {
+      projectGraphError = message;
+      projectDataRevision += 1;
+    }
+  }
+};
+
+const refreshProjectCatalog = async (): Promise<void> => {
+  const result = await invokeWithTimeout<{
+    ok?: boolean;
+    projects?: DesktopProjectMetadata[];
+  }>("project_list", undefined, 10_000);
+  const nextProjects = Array.isArray(result.projects) ? result.projects : [];
+  const nextFingerprint = JSON.stringify(nextProjects);
+  if (nextFingerprint !== projectCatalogFingerprint) {
+    projectCatalog = nextProjects;
+    projectCatalogFingerprint = nextFingerprint;
+    projectDataRevision += 1;
   }
 };
 
@@ -2063,7 +2044,12 @@ const refreshStatus = async () => {
       appendDesktopStartLog(nextStatus);
       return refreshExplorerCredential()
         .catch(() => undefined)
-        .then(() => refreshProjectGraph().catch(() => undefined))
+        .then(() =>
+          Promise.all([
+            refreshProjectGraph().catch(() => undefined),
+            refreshProjectCatalog().catch(() => undefined)
+          ])
+        )
         .then(() => {
           syncUI();
         });
@@ -2890,7 +2876,34 @@ const registerHandlers = () => {
       paneButton?.dataset.pane === "settings"
     ) {
       event.preventDefault();
-      activeDesktopPane = paneButton.dataset.pane;
+      activeDesktopView = paneButton.dataset.pane;
+      if (activeDesktopView === "projects") {
+        selectedProjectId = null;
+        selectedSessionId = null;
+      }
+      syncUI();
+      return;
+    }
+
+    const backToProjects = target.closest<HTMLButtonElement>(
+      "[data-back-to-projects]"
+    );
+    if (backToProjects) {
+      event.preventDefault();
+      activeDesktopView = "projects";
+      selectedProjectId = null;
+      selectedSessionId = null;
+      syncUI();
+      return;
+    }
+
+    const backToProject = target.closest<HTMLButtonElement>(
+      "[data-back-to-project]"
+    );
+    if (backToProject) {
+      event.preventDefault();
+      activeDesktopView = "project";
+      selectedSessionId = null;
       syncUI();
       return;
     }
@@ -2911,6 +2924,7 @@ const registerHandlers = () => {
       event.preventDefault();
       selectedProjectId = projectButton.dataset.projectId;
       selectedSessionId = null;
+      activeDesktopView = "project";
       syncUI();
       return;
     }
@@ -2920,6 +2934,7 @@ const registerHandlers = () => {
     if (sessionButton?.dataset.sessionId) {
       event.preventDefault();
       selectedSessionId = sessionButton.dataset.sessionId;
+      activeDesktopView = "session";
       syncUI();
       return;
     }

@@ -1003,6 +1003,7 @@ export const createKoedServerManager = ({
       models_install: () => runModelInstallJson(),
       package_status: () => runPackageStatusJson(),
       package_install: (args) => runPackageInstallJson(args),
+      project_list: () => runJson(["project", "list"], 10_000),
       explorer_credential: () => provisionExplorerCredential(),
       upstream_connect: connectTeamBackend,
       upstream_disconnect: disconnectTeamBackend,

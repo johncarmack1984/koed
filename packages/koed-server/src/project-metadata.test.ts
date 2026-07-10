@@ -73,14 +73,14 @@ describe("Project metadata discovery", () => {
         },
         git: {
           branch: "feature/koe-219",
-          headCommit: "abcdef1234567890",
-          remoteSetFingerprint: expect.stringMatching(/^grs_/)
+          headCommit: "abcdef1234567890"
         },
         packages: [{ manager: "pnpm", name: "koed" }]
       }
     });
     expect(discovered.project?.localProjectId).toMatch(/^lp_/);
     expect(discovered.project?.sourceProjectId).toMatch(/^sp_/);
+    expect(discovered.project?.git?.remoteSetFingerprint).toMatch(/^grs_/);
     const raw = fs.readFileSync(paths.projectMetadataPath, "utf8");
     expect(raw).toContain(repo);
     expect(raw).not.toMatch(/token|secret|password|cookie|credential/i);

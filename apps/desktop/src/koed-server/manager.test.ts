@@ -98,6 +98,19 @@ describe("Koed server desktop manager", () => {
       command: "/node",
       args: ["/repo/packages/koed-server/dist/cli.js", "status", "--json"]
     });
+
+    await expect(manager.handlers.project_list!()).resolves.toMatchObject({
+      ok: true
+    });
+    expect(calls[1]).toEqual({
+      command: "/node",
+      args: [
+        "/repo/packages/koed-server/dist/cli.js",
+        "project",
+        "list",
+        "--json"
+      ]
+    });
   });
 
   it("runs explicit runtime install through koed-server", async () => {
