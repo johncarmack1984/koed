@@ -94,6 +94,19 @@ packages. Worktrees retain separate local Project ids while a salted Git
 common-directory hash identifies worktrees backed by the same device-local Git
 repository. Local-only repositories have no portable remote signal.
 
+Captured Sessions adopt one unambiguous detected Personal Project immediately.
+Ambiguous or signal-free captures remain `Unassigned`. Users can move a
+Captured Session to another Personal Project in Desktop; that override remains
+authoritative across later capture detection. Resetting returns assignment to
+the latest automatic detection. Original capture candidates and source context
+remain stored separately as immutable provenance. Effective assignment drives
+Personal Memory grouping, counts, filters, and Project-scoped recall.
+
+Personal Project assignment never creates, changes, resolves, or authorizes a
+Team Workspace link. Team Workspace identity still comes only from explicit
+Project linking, and Team access still requires Koed-owned Membership,
+Workspace Access, and Share Grant authorization.
+
 Future personal multi-device enrollment may use remote-alias overlap to
 automatically associate local Project contexts after both devices are bound to
 the same User. This build has no personal multi-device registry or sync path, so

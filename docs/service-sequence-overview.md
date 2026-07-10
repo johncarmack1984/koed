@@ -834,8 +834,10 @@ grant-based visibility model.
    The worker is given only Koed dynamic RAG tools: `scan`, `search`, and
    `expand`.
 3. The local memory-answer worker calls API search through the MCP client's
-   dynamic tools. Project search defaults to the current project path, and that
-   Project context may resolve to a Workspace for Team-shared search; session
+   dynamic tools. Personal Project search uses Captured Sessions' effective
+   organizational assignment: a User override, then automatic detection, then
+   `Unassigned`. Project context may separately resolve to a Workspace for
+   Team-shared search; session
    search requires a captured-session id; global search still only searches
    memory visible through the selected Retrieval Scope.
 4. The API authenticates the API Token and calls the core recall path.
@@ -845,8 +847,10 @@ grant-based visibility model.
    and runs retrieval stages over Memory Nodes, fresh pending Memory Events,
    raw fallback evidence, and lexical matches. Semantic stages use local
    embedding search and may be reranked when configured.
+   Personal assignment changes only Personal Memory grouping and candidate
+   filtering; immutable capture provenance remains available independently.
    Team Workspace recall uses an explicit Team Workspace id separate from local
-   Project matching. The repository resolves the caller's enabled Team
+   Project matching or assignment. The repository resolves the caller's enabled Team
    Membership and Workspace Access before query execution, then admits only the
    caller's Personal Memory plus rows whose sessions have active Share Grants to
    that Team Workspace. Derived Memory Nodes are admitted only when their linked
