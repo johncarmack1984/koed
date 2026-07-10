@@ -16,7 +16,6 @@ const metadata = (
   discoveredAt: "2026-06-01T00:00:00.000Z",
   lastSeenAt: "2026-07-09T12:00:00.000Z",
   localProjectId: "lp_koed",
-  sourceProjectId: "sp_koed",
   displayName: "koed",
   path: {
     cwd: "/Users/jedd/agents/koed",
@@ -65,7 +64,6 @@ describe("project memory UI view model", () => {
       name: "koed",
       eventCount: 12,
       localProjectId: "lp_koed",
-      sourceProjectId: "sp_koed",
       branch: "codex/project-ui",
       remoteDisplay: "github.com/koed-labs/koed",
       catalogued: true

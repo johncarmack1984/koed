@@ -36,11 +36,9 @@ export {
 } from "./http-transport-security.js";
 export {
   deriveLocalProjectId,
-  deriveSourceProjectId,
   hmacProjectValue,
   normalizeGitRemoteUrl,
   normalizeProjectDisplayName,
-  remoteSetFingerprintFor,
   safeProjectMetadataForRemote
 } from "./project-metadata.js";
 export {

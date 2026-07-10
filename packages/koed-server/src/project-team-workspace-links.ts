@@ -15,7 +15,6 @@ export interface ProjectTeamWorkspaceLink {
   teamWorkspaceId: string;
   backendId: string | null;
   localProjectId: string | null;
-  sourceProjectId: string | null;
   projectDisplayName: string | null;
   createdAt: string;
   updatedAt: string;
@@ -90,15 +89,10 @@ const validateBackendId = (backendId: string | undefined): string | null => {
 const linkIdForProjectRoot = (projectRoot: string): string =>
   `ptw_${createHash("sha256").update(projectRoot).digest("hex").slice(0, 16)}`;
 
-const validateProjectIdentity = (
-  value: unknown,
-  prefix: "lp" | "sp"
-): string | null => {
+const validateLocalProjectId = (value: unknown): string | null => {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
-  return new RegExp(`^${prefix}_[a-f0-9]{16,64}$`, "i").test(trimmed)
-    ? trimmed
-    : null;
+  return /^lp_[a-f0-9]{16,64}$/i.test(trimmed) ? trimmed : null;
 };
 
 const normalizeLink = (
@@ -123,8 +117,7 @@ const normalizeLink = (
       typeof value.backendId === "string"
         ? validateBackendId(value.backendId)
         : null,
-    localProjectId: validateProjectIdentity(value.localProjectId, "lp"),
-    sourceProjectId: validateProjectIdentity(value.sourceProjectId, "sp"),
+    localProjectId: validateLocalProjectId(value.localProjectId),
     projectDisplayName:
       typeof value.projectDisplayName === "string" &&
       value.projectDisplayName.trim()
@@ -192,7 +185,6 @@ export const linkProjectTeamWorkspace = (
     teamWorkspaceId: string;
     backendId?: string;
     localProjectId?: string;
-    sourceProjectId?: string;
     projectDisplayName?: string;
   },
   depsInput: ProjectTeamWorkspaceLinkDeps = {}
@@ -210,12 +202,8 @@ export const linkProjectTeamWorkspace = (
     teamWorkspaceId,
     backendId,
     localProjectId:
-      validateProjectIdentity(input.localProjectId, "lp") ??
+      validateLocalProjectId(input.localProjectId) ??
       existing?.localProjectId ??
-      null,
-    sourceProjectId:
-      validateProjectIdentity(input.sourceProjectId, "sp") ??
-      existing?.sourceProjectId ??
       null,
     projectDisplayName: input.projectDisplayName?.trim()
       ? input.projectDisplayName.trim().slice(0, 120)

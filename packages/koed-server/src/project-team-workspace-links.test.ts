@@ -40,8 +40,7 @@ describe("Project Team Workspace links", () => {
         projectRoot: path.resolve(projectRoot),
         teamWorkspaceId,
         backendId: "dev_backend",
-        localProjectId: null,
-        sourceProjectId: null
+        localProjectId: null
       }
     });
     const raw = fs.readFileSync(paths.projectTeamWorkspaceLinksPath, "utf8");

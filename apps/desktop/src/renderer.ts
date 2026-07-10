@@ -1520,7 +1520,7 @@ const renderSessionList = (): string => {
       <nav class="breadcrumbs" aria-label="Breadcrumb"><button type="button" data-back-to-projects>Projects</button><span>›</span><strong>${escapeHtml(project.name)}</strong></nav>
       <header class="project-detail-header"><span class="project-monogram" aria-hidden="true">${escapeHtml(project.name.slice(0, 1).toUpperCase() || "P")}</span><div><p class="eyebrow">Local Project</p><h1>${escapeHtml(project.name)}</h1><p>${escapeHtml(project.path ?? "Local path unavailable")}</p></div></header>
       <div class="project-summary-grid"><div><strong>${project.threads.length}</strong><span>Sessions</span></div><div><strong>${project.eventCount}</strong><span>Memory events</span></div><div><strong>${escapeHtml(relativeTime(projectLatestAt(project)))}</strong><span>Last activity</span></div></div>
-      <div class="project-identity-row">${project.branch ? `<span>Branch · ${escapeHtml(project.branch)}</span>` : ""}${project.isWorktree ? "<span>Git worktree</span>" : ""}${project.catalogued ? "<span>Project identity discovered</span>" : ""}</div>
+      <div class="project-identity-row">${project.branch ? `<span>Branch · ${escapeHtml(project.branch)}</span>` : ""}${project.isWorktree ? "<span>Git worktree</span>" : ""}${project.catalogued ? "<span>Project metadata discovered</span>" : ""}</div>
       <section class="sessions-pane">
         <div class="section-heading"><span></span><strong>CAPTURED SESSIONS</strong><em>${threads.length}</em></div>
         <div class="session-list">
@@ -1532,7 +1532,7 @@ const renderSessionList = (): string => {
                   return `<button type="button" class="session-row" data-session-id="${escapeHtml(id)}"><span class="session-icon" aria-hidden="true">↳</span><span class="session-row-copy"><strong>${escapeHtml(thread.name || "Untitled session")}</strong><small>${escapeHtml(thread.sample || "Captured conversation")}</small><span>${countLabel(thread.eventCount, "memory event")} · ${escapeHtml(relativeTime(thread.latestAt))}</span></span><span class="session-row-tail" aria-hidden="true">›</span></button>`;
                 })
                 .join("")
-            : `<div class="empty-card"><strong>No captured sessions yet</strong><p>The Project identity is ready. Sessions will appear after the Supported Capture Hook records activity here.</p></div>`
+            : `<div class="empty-card"><strong>No captured sessions yet</strong><p>The Project metadata is ready. Sessions will appear after the Supported Capture Hook records activity here.</p></div>`
         }
         </div>
       </section>

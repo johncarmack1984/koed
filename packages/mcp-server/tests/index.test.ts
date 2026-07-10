@@ -259,7 +259,6 @@ describe("Project Team Workspace dogfood mapping", () => {
             teamWorkspaceId: "11111111-1111-4111-8111-111111111111",
             backendId: "dev_backend",
             localProjectId: "lp_1111111111111111",
-            sourceProjectId: "sp_2222222222222222",
             projectDisplayName: "koed"
           }
         ]
@@ -279,15 +278,14 @@ describe("Project Team Workspace dogfood mapping", () => {
       projectRoot: "/repo/koed",
       teamWorkspaceId: "11111111-1111-4111-8111-111111111111",
       backendId: "dev_backend",
-      localProjectId: "lp_1111111111111111",
-      sourceProjectId: "sp_2222222222222222"
+      localProjectId: "lp_1111111111111111"
     });
     expect(fs.readFileSync(configPath, "utf8")).not.toMatch(
       /token|secret|password|cookie|credential/i
     );
   });
 
-  it("resolves Team Workspace mapping by discovered Project identity", () => {
+  it("resolves Team Workspace mapping by device-local Project identity", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "koed-mcp-ptw-"));
     const linkPath = path.join(directory, "project-team-workspaces.json");
     const projectPath = path.join(directory, "projects.json");
@@ -300,7 +298,7 @@ describe("Project Team Workspace dogfood mapping", () => {
             projectRoot: "/old/path/koed",
             teamWorkspaceId: "11111111-1111-4111-8111-111111111111",
             backendId: "dev_backend",
-            sourceProjectId: "sp_2222222222222222"
+            localProjectId: "lp_1111111111111111"
           }
         ]
       })
@@ -312,7 +310,6 @@ describe("Project Team Workspace dogfood mapping", () => {
         projects: [
           {
             localProjectId: "lp_1111111111111111",
-            sourceProjectId: "sp_2222222222222222",
             path: { cwd: "/repo/koed", projectRoot: "/repo/koed" }
           }
         ]
@@ -328,8 +325,162 @@ describe("Project Team Workspace dogfood mapping", () => {
       projectRoot: "/old/path/koed",
       teamWorkspaceId: "11111111-1111-4111-8111-111111111111",
       backendId: "dev_backend",
-      sourceProjectId: "sp_2222222222222222"
+      localProjectId: "lp_1111111111111111"
     });
+  });
+
+  it("prefers exact Project root over a device-local identity match", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "koed-mcp-ptw-"));
+    const linkPath = path.join(directory, "project-team-workspaces.json");
+    const projectPath = path.join(directory, "projects.json");
+    fs.writeFileSync(
+      linkPath,
+      JSON.stringify({
+        links: [
+          {
+            teamWorkspaceId: "33333333-3333-4333-8333-333333333333"
+          },
+          {
+            projectRoot: "   ",
+            teamWorkspaceId: "44444444-4444-4444-8444-444444444444"
+          },
+          {
+            projectRoot: "/old/path/koed",
+            teamWorkspaceId: "11111111-1111-4111-8111-111111111111",
+            localProjectId: "lp_1111111111111111"
+          },
+          {
+            projectRoot: "/repo/koed",
+            teamWorkspaceId: "22222222-2222-4222-8222-222222222222"
+          }
+        ]
+      })
+    );
+    fs.writeFileSync(
+      projectPath,
+      JSON.stringify({
+        projects: [
+          {
+            localProjectId: "lp_1111111111111111",
+            path: { cwd: "/repo/koed", projectRoot: "/repo/koed" }
+          }
+        ]
+      })
+    );
+
+    expect(
+      resolveProjectTeamWorkspaceLink("/repo/koed", {
+        KOED_PROJECT_TEAM_WORKSPACE_LINKS_PATH: linkPath,
+        KOED_PROJECT_METADATA_PATH: projectPath
+      } as NodeJS.ProcessEnv)
+    ).toMatchObject({
+      projectRoot: "/repo/koed",
+      teamWorkspaceId: "22222222-2222-4222-8222-222222222222"
+    });
+  });
+
+  it("fails closed for duplicate exact Project root mappings", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "koed-mcp-ptw-"));
+    const linkPath = path.join(directory, "project-team-workspaces.json");
+    fs.writeFileSync(
+      linkPath,
+      JSON.stringify({
+        links: [
+          {
+            projectRoot: "/repo/koed",
+            teamWorkspaceId: "11111111-1111-4111-8111-111111111111"
+          },
+          {
+            projectRoot: "/repo/koed",
+            teamWorkspaceId: "22222222-2222-4222-8222-222222222222"
+          }
+        ]
+      })
+    );
+
+    expect(
+      resolveProjectTeamWorkspaceLink("/repo/koed", {
+        KOED_PROJECT_TEAM_WORKSPACE_LINKS_PATH: linkPath
+      } as NodeJS.ProcessEnv)
+    ).toBeNull();
+  });
+
+  it("fails closed for ambiguous device-local identity matches", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "koed-mcp-ptw-"));
+    const linkPath = path.join(directory, "project-team-workspaces.json");
+    const projectPath = path.join(directory, "projects.json");
+    fs.writeFileSync(
+      linkPath,
+      JSON.stringify({
+        links: [
+          {
+            projectRoot: "/old/path/koed-a",
+            teamWorkspaceId: "11111111-1111-4111-8111-111111111111",
+            localProjectId: "lp_1111111111111111"
+          },
+          {
+            projectRoot: "/old/path/koed-b",
+            teamWorkspaceId: "22222222-2222-4222-8222-222222222222",
+            localProjectId: "lp_1111111111111111"
+          }
+        ]
+      })
+    );
+    fs.writeFileSync(
+      projectPath,
+      JSON.stringify({
+        projects: [
+          {
+            localProjectId: "lp_1111111111111111",
+            path: { cwd: "/repo/koed", projectRoot: "/repo/koed" }
+          }
+        ]
+      })
+    );
+
+    expect(
+      resolveProjectTeamWorkspaceLink("/repo/koed", {
+        KOED_PROJECT_TEAM_WORKSPACE_LINKS_PATH: linkPath,
+        KOED_PROJECT_METADATA_PATH: projectPath
+      } as NodeJS.ProcessEnv)
+    ).toBeNull();
+  });
+
+  it("does not resolve Team Workspace mapping from source signals", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "koed-mcp-ptw-"));
+    const linkPath = path.join(directory, "project-team-workspaces.json");
+    const projectPath = path.join(directory, "projects.json");
+    fs.writeFileSync(
+      linkPath,
+      JSON.stringify({
+        links: [
+          {
+            projectRoot: "/old/path/koed",
+            teamWorkspaceId: "11111111-1111-4111-8111-111111111111",
+            sourceProjectId: "sp_2222222222222222"
+          }
+        ]
+      })
+    );
+    fs.writeFileSync(
+      projectPath,
+      JSON.stringify({
+        projects: [
+          {
+            localProjectId: "lp_1111111111111111",
+            sourceProjectId: "sp_2222222222222222",
+            path: { cwd: "/repo/koed", projectRoot: "/repo/koed" }
+          }
+        ]
+      })
+    );
+
+    expect(
+      resolveProjectTeamWorkspaceLink("/repo/koed", {
+        KOED_PROJECT_TEAM_WORKSPACE_LINKS_PATH: linkPath,
+        KOED_PROJECT_METADATA_PATH: projectPath
+      } as NodeJS.ProcessEnv)
+    ).toBeNull();
   });
 });
 

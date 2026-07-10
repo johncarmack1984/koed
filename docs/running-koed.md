@@ -82,9 +82,15 @@ node packages/koed-server/dist/cli.js project list --json
 
 Project metadata is local matching/display data, not authorization. Discovery
 stores raw local paths only under `KOED_HOME/config/projects.json`, strips
-credentials from Git remotes, and derives local/source Project identifiers for
-Project-to-Team Workspace matching. The Team Workspace id remains the stable
-Team memory authorization boundary.
+credentials from Git remotes, derives a device-local Project id, and records
+individual remote fingerprints as non-authoritative matching signals. Remote
+signals never select or authorize a Team Workspace; explicit Project linking is
+authoritative. The Team Workspace id remains the stable Team memory boundary.
+
+Discovery inspects the supplied directory and its enclosing Git repository only;
+it does not recursively discover child repositories, submodules, or monorepo
+packages. Worktrees are separate local Projects. Local-only repositories have no
+portable remote signal and require explicit linking on each device.
 
 ## KOED_HOME layout
 

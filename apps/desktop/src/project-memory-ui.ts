@@ -24,7 +24,6 @@ export type DesktopProjectMetadata = {
   discoveredAt: string;
   lastSeenAt: string;
   localProjectId: string;
-  sourceProjectId: string | null;
   displayName: string;
   path: {
     cwd: string;
@@ -44,7 +43,6 @@ export type DesktopProject = DesktopProjectGroup & {
   discoveredAt: string | null;
   lastSeenAt: string | null;
   localProjectId: string | null;
-  sourceProjectId: string | null;
   branch: string | null;
   remoteDisplay: string | null;
   isWorktree: boolean;
@@ -107,7 +105,6 @@ const enrichProject = (
   discoveredAt: metadata?.discoveredAt ?? null,
   lastSeenAt: metadata?.lastSeenAt ?? null,
   localProjectId: metadata?.localProjectId ?? null,
-  sourceProjectId: metadata?.sourceProjectId ?? null,
   branch: metadata?.git?.branch ?? null,
   remoteDisplay:
     metadata?.git?.remotes.find((remote) => remote.display)?.display ?? null,

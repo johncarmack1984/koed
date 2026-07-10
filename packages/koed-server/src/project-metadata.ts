@@ -10,11 +10,9 @@ import {
 import path, { dirname, relative, resolve } from "node:path";
 import {
   deriveLocalProjectId,
-  deriveSourceProjectId,
   hmacProjectValue,
   normalizeGitRemoteUrl,
   normalizeProjectDisplayName,
-  remoteSetFingerprintFor,
   type NormalizedGitRemote,
   type ProjectMetadataV1,
   type ProjectPackageMetadata
@@ -22,7 +20,7 @@ import {
 import type { KoedServerPaths } from "./paths.js";
 
 export interface ProjectMetadataStore {
-  schemaVersion: 1;
+  schemaVersion: 2;
   updatedAt: string;
   deviceSaltId: string;
   projects: ProjectMetadataV1[];
@@ -64,7 +62,7 @@ const defaultStore = (
   now: string,
   deps: Required<ProjectMetadataDeps>
 ): ProjectMetadataStore => ({
-  schemaVersion: 1,
+  schemaVersion: 2,
   updatedAt: now,
   deviceSaltId: `pms_${deps.randomId()}`,
   projects: []
@@ -82,17 +80,23 @@ const readStore = (
     const parsed = JSON.parse(
       deps.readFileSync(paths.projectMetadataPath, "utf8") as string
     ) as Partial<ProjectMetadataStore>;
-    return {
-      schemaVersion: 1,
+    const store: ProjectMetadataStore = {
+      schemaVersion: 2,
       updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : now,
       deviceSaltId:
         typeof parsed.deviceSaltId === "string" && parsed.deviceSaltId.trim()
           ? parsed.deviceSaltId.trim()
           : `pms_${deps.randomId()}`,
       projects: Array.isArray(parsed.projects)
-        ? parsed.projects.filter(isProjectMetadata)
+        ? parsed.projects
+            .filter(isProjectMetadata)
+            .map(normalizeProjectMetadata)
         : []
     };
+    if (parsed.schemaVersion !== 2) {
+      writeStore(paths, store, deps);
+    }
+    return store;
   } catch (error) {
     throw new Error("Project metadata config is malformed.", { cause: error });
   }
@@ -122,6 +126,51 @@ const isProjectMetadata = (value: unknown): value is ProjectMetadataV1 =>
   typeof (value as { localProjectId?: unknown }).localProjectId === "string" &&
   typeof (value as { displayName?: unknown }).displayName === "string" &&
   Boolean((value as { path?: unknown }).path);
+
+const isNormalizedGitRemote = (
+  value: unknown
+): value is NormalizedGitRemote => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const remote = value as Partial<NormalizedGitRemote>;
+  return (
+    typeof remote.name === "string" &&
+    (remote.host === null || typeof remote.host === "string") &&
+    (remote.namespace === null || typeof remote.namespace === "string") &&
+    (remote.repo === null || typeof remote.repo === "string") &&
+    (remote.display === null || typeof remote.display === "string") &&
+    typeof remote.fingerprint === "string"
+  );
+};
+
+const withoutField = <Value extends object>(
+  value: Value,
+  field: string
+): Value => {
+  const copy = { ...value } as Value & Record<string, unknown>;
+  delete copy[field];
+  return copy;
+};
+
+const normalizeProjectMetadata = (
+  value: ProjectMetadataV1
+): ProjectMetadataV1 => {
+  const legacy = value as ProjectMetadataV1 & {
+    sourceProjectId?: unknown;
+    git?: ProjectMetadataV1["git"] & { remoteSetFingerprint?: unknown };
+  };
+  const metadata = withoutField(legacy, "sourceProjectId");
+  if (!metadata.git) return metadata;
+  const git = withoutField(metadata.git, "remoteSetFingerprint");
+  return {
+    ...metadata,
+    git: {
+      ...git,
+      remotes: Array.isArray(git.remotes)
+        ? git.remotes.filter(isNormalizedGitRemote)
+        : []
+    }
+  };
+};
 
 const git = async (
   cwd: string,
@@ -222,12 +271,7 @@ export const discoverProjectMetadata = async (
   const projectRoot = await git(cwd, ["rev-parse", "--show-toplevel"], deps);
   const gitRoot = projectRoot ? resolve(projectRoot) : null;
   const remotes = gitRoot ? await readGitRemotes(gitRoot, deps) : [];
-  const remoteSetFingerprint = remoteSetFingerprintFor(remotes);
   const packages = discoverPackages(gitRoot, cwd, deps);
-  const sourceProjectId = deriveSourceProjectId({
-    remoteSetFingerprint,
-    packages
-  });
   const localProjectId = deriveLocalProjectId({
     salt: store.deviceSaltId,
     projectRoot: gitRoot,
@@ -258,7 +302,6 @@ export const discoverProjectMetadata = async (
         ?.discoveredAt ?? now,
     lastSeenAt: now,
     localProjectId,
-    sourceProjectId,
     displayName,
     path: {
       cwd,
@@ -271,12 +314,11 @@ export const discoverProjectMetadata = async (
           git: {
             rootHash: hmacProjectValue(store.deviceSaltId, gitRoot),
             remotes,
-            remoteSetFingerprint,
             branch,
             headCommit,
             isWorktree,
             worktreeHash: isWorktree
-              ? hmacProjectValue(store.deviceSaltId, commonDir ?? gitRoot)
+              ? hmacProjectValue(store.deviceSaltId, gitRoot)
               : null
           }
         }

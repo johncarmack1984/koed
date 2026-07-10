@@ -783,7 +783,6 @@ export const runKoedServerCli = async (
                 flagValue(args, "--backend-id") ??
                 flagValue(args, "--upstream-backend-id"),
               localProjectId: flagValue(args, "--local-project-id"),
-              sourceProjectId: flagValue(args, "--source-project-id"),
               projectDisplayName: flagValue(args, "--project-display-name")
             })
           : teamWorkspaceCommand === "list"

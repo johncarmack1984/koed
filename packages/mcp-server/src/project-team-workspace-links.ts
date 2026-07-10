@@ -7,13 +7,11 @@ export interface ProjectTeamWorkspaceLink {
   teamWorkspaceId: string;
   backendId: string | null;
   localProjectId: string | null;
-  sourceProjectId: string | null;
   projectDisplayName: string | null;
 }
 
 interface ProjectMetadataRecord {
   localProjectId: string;
-  sourceProjectId: string | null;
   path: {
     cwd: string;
     projectRoot: string | null;
@@ -68,10 +66,6 @@ const readProjectMetadataForRoot = (
   if (!project || typeof project.localProjectId !== "string") return null;
   return {
     localProjectId: project.localProjectId,
-    sourceProjectId:
-      typeof project.sourceProjectId === "string"
-        ? project.sourceProjectId
-        : null,
     path: {
       cwd:
         typeof project.path?.cwd === "string"
@@ -86,25 +80,23 @@ const readProjectMetadataForRoot = (
 };
 
 const normalizeLink = (
-  candidate: Partial<ProjectTeamWorkspaceLink>,
-  fallbackProjectRoot: string
+  candidate: Partial<ProjectTeamWorkspaceLink>
 ): ProjectTeamWorkspaceLink | null => {
-  if (!uuidPattern.test(candidate.teamWorkspaceId ?? "")) return null;
+  if (
+    typeof candidate.projectRoot !== "string" ||
+    !candidate.projectRoot.trim() ||
+    !uuidPattern.test(candidate.teamWorkspaceId ?? "")
+  ) {
+    return null;
+  }
   return {
-    projectRoot:
-      typeof candidate.projectRoot === "string"
-        ? path.resolve(candidate.projectRoot)
-        : fallbackProjectRoot,
+    projectRoot: path.resolve(candidate.projectRoot),
     teamWorkspaceId: candidate.teamWorkspaceId!,
     backendId:
       typeof candidate.backendId === "string" ? candidate.backendId : null,
     localProjectId:
       typeof candidate.localProjectId === "string"
         ? candidate.localProjectId
-        : null,
-    sourceProjectId:
-      typeof candidate.sourceProjectId === "string"
-        ? candidate.sourceProjectId
         : null,
     projectDisplayName:
       typeof candidate.projectDisplayName === "string"
@@ -125,22 +117,22 @@ export const resolveProjectTeamWorkspaceLink = (
     links?: Array<Partial<ProjectTeamWorkspaceLink>>;
   };
   const normalizedProjectRoot = path.resolve(projectRoot);
+  const links = (parsed.links ?? [])
+    .map((candidate) => normalizeLink(candidate))
+    .filter((candidate): candidate is ProjectTeamWorkspaceLink =>
+      Boolean(candidate)
+    );
+  const exactMatches = links.filter(
+    (candidate) => candidate.projectRoot === normalizedProjectRoot
+  );
+  if (exactMatches.length > 0) {
+    return exactMatches.length === 1 ? exactMatches[0]! : null;
+  }
+
   const project = readProjectMetadataForRoot(normalizedProjectRoot, env);
-  const link = parsed.links
-    ?.map((candidate) => normalizeLink(candidate, normalizedProjectRoot))
-    .find((candidate): candidate is ProjectTeamWorkspaceLink => {
-      if (!candidate) return false;
-      if (candidate.projectRoot === normalizedProjectRoot) return true;
-      if (
-        project?.localProjectId &&
-        candidate.localProjectId === project.localProjectId
-      ) {
-        return true;
-      }
-      return Boolean(
-        project?.sourceProjectId &&
-        candidate.sourceProjectId === project.sourceProjectId
-      );
-    });
-  return link ?? null;
+  if (!project?.localProjectId) return null;
+  const localMatches = links.filter(
+    (candidate) => candidate.localProjectId === project.localProjectId
+  );
+  return localMatches.length === 1 ? localMatches[0]! : null;
 };

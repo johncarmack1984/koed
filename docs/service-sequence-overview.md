@@ -740,10 +740,10 @@ cwd is used only to resolve or display a Workspace.
    surface through `personal_deleted_at` lifecycle markers. It is not the same
    as global invalidation and does not revoke an active Team / Workspace Share
    Grant in the first version.
-7. If local Project metadata is supplied during recall, Koed may use local
-   Project id, source Project id, or legacy Project root matching to resolve a
-   linked Workspace before Team-shared retrieval. Local Project metadata is
-   matching/display data only; it is not a durable authorization key.
+7. If local Project metadata is supplied during recall, Koed may use an exact
+   Project root or device-local Project id from an explicit Project-to-Workspace
+   link. Remote fingerprints are non-authoritative matching signals and cannot
+   select or authorize a Workspace.
 8. Archived search is an explicit mode, not the default active recall path. It
    may include retained Workspaces only when the caller and retention policy
    allow it. Access-suspended Team data belongs to a separate admin, legal, or

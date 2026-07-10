@@ -4,7 +4,7 @@ import path from "node:path";
 export interface NormalizedGitRemote {
   name: string;
   host: string | null;
-  owner: string | null;
+  namespace: string | null;
   repo: string | null;
   display: string | null;
   fingerprint: string;
@@ -21,7 +21,6 @@ export interface ProjectMetadataV1 {
   discoveredAt: string;
   lastSeenAt: string;
   localProjectId: string;
-  sourceProjectId: string | null;
   displayName: string;
   path: {
     cwd: string;
@@ -32,7 +31,6 @@ export interface ProjectMetadataV1 {
   git?: {
     rootHash: string;
     remotes: NormalizedGitRemote[];
-    remoteSetFingerprint: string | null;
     branch: string | null;
     headCommit: string | null;
     isWorktree: boolean;
@@ -69,15 +67,15 @@ const stripGitSuffix = (value: string): string => value.replace(/\.git$/i, "");
 
 const normalizedRemoteFingerprint = (parts: {
   host: string | null;
-  owner: string | null;
+  namespace: string | null;
   repo: string | null;
   fallback: string;
 }): string => {
   const canonical =
-    parts.host && parts.owner && parts.repo
-      ? `${parts.host}/${parts.owner}/${parts.repo}`
+    parts.host && parts.namespace && parts.repo
+      ? `${parts.host}/${parts.namespace}/${parts.repo}`
       : parts.fallback;
-  return `gr_${sha256(canonical.toLowerCase()).slice(0, 32)}`;
+  return `gr_${sha256(canonical).slice(0, 32)}`;
 };
 
 const remoteFromPathParts = (
@@ -87,28 +85,38 @@ const remoteFromPathParts = (
   fallback: string
 ): NormalizedGitRemote => {
   const segments = pathName.replace(/^\/+/, "").split("/").filter(Boolean);
-  const owner = segments.length >= 2 ? (segments.at(-2) ?? null) : null;
+  const namespace =
+    segments.length >= 2 ? segments.slice(0, -1).join("/") : null;
   const repo =
     segments.length >= 1 ? stripGitSuffix(segments.at(-1) ?? "") : null;
   const normalizedHost = host?.toLowerCase() ?? null;
   const display =
-    normalizedHost && owner && repo
-      ? `${normalizedHost}/${owner}/${repo}`
+    normalizedHost && namespace && repo
+      ? `${normalizedHost}/${namespace}/${repo}`
       : null;
   return {
     name,
     host: normalizedHost,
-    owner,
+    namespace,
     repo,
     display,
     fingerprint: normalizedRemoteFingerprint({
       host: normalizedHost,
-      owner,
+      namespace,
       repo,
       fallback
     })
   };
 };
+
+const opaqueRemote = (name: string, value: string): NormalizedGitRemote => ({
+  name,
+  host: null,
+  namespace: null,
+  repo: null,
+  display: null,
+  fingerprint: `gr_${sha256(value).slice(0, 32)}`
+});
 
 export const normalizeGitRemoteUrl = (
   value: string,
@@ -130,46 +138,19 @@ export const normalizeGitRemoteUrl = (
     parsed.password = "";
     parsed.search = "";
     parsed.hash = "";
+    if (parsed.protocol === "file:") {
+      return opaqueRemote(name, parsed.toString());
+    }
     return remoteFromPathParts(
       name,
-      parsed.hostname,
+      parsed.host,
       parsed.pathname,
       parsed.toString()
     );
   } catch {
     const sanitized = trimmed.replace(/\b[^\s:@/]+:[^\s@/]+@/g, "[redacted]@");
-    return {
-      name,
-      host: null,
-      owner: null,
-      repo: null,
-      display: null,
-      fingerprint: `gr_${sha256(sanitized).slice(0, 32)}`
-    };
+    return opaqueRemote(name, sanitized);
   }
-};
-
-export const remoteSetFingerprintFor = (
-  remotes: NormalizedGitRemote[]
-): string | null => {
-  const fingerprints = [
-    ...new Set(remotes.map((remote) => remote.fingerprint))
-  ].sort();
-  return fingerprints.length
-    ? `grs_${sha256(fingerprints.join("\n")).slice(0, 32)}`
-    : null;
-};
-
-export const deriveSourceProjectId = (input: {
-  remoteSetFingerprint?: string | null;
-  packages?: ProjectPackageMetadata[];
-}): string | null => {
-  if (!input.remoteSetFingerprint) return null;
-  const packageNames = (input.packages ?? [])
-    .map((entry) => entry.name?.trim())
-    .filter((name): name is string => Boolean(name))
-    .sort();
-  return `sp_${sha256([input.remoteSetFingerprint, ...packageNames].join("\n")).slice(0, 32)}`;
 };
 
 export const deriveLocalProjectId = (input: {
@@ -186,7 +167,6 @@ export const safeProjectMetadataForRemote = (
 ): Record<string, unknown> => ({
   schemaVersion: metadata.schemaVersion,
   localProjectId: metadata.localProjectId,
-  sourceProjectId: metadata.sourceProjectId,
   displayName: metadata.displayName,
   path: {
     basename: metadata.path.basename,
@@ -194,8 +174,9 @@ export const safeProjectMetadataForRemote = (
   },
   git: metadata.git
     ? {
-        remotes: metadata.git.remotes,
-        remoteSetFingerprint: metadata.git.remoteSetFingerprint,
+        remotes: metadata.git.remotes.filter(
+          (remote) => remote.host && remote.namespace && remote.repo
+        ),
         branch: metadata.git.branch,
         headCommit: metadata.git.headCommit,
         isWorktree: metadata.git.isWorktree,

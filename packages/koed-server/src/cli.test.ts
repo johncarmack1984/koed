@@ -324,8 +324,6 @@ describe("JSON command output", () => {
         "dev_backend",
         "--local-project-id",
         "lp_1111111111111111",
-        "--source-project-id",
-        "sp_2222222222222222",
         "--project-display-name",
         "koed",
         "--json"
@@ -346,7 +344,6 @@ describe("JSON command output", () => {
               teamWorkspaceId: input.teamWorkspaceId,
               backendId: input.backendId ?? null,
               localProjectId: input.localProjectId ?? null,
-              sourceProjectId: input.sourceProjectId ?? null,
               projectDisplayName: input.projectDisplayName ?? null,
               createdAt: "2026-01-01T00:00:00.000Z",
               updatedAt: "2026-01-01T00:00:00.000Z"
@@ -362,7 +359,6 @@ describe("JSON command output", () => {
       teamWorkspaceId: "11111111-1111-4111-8111-111111111111",
       backendId: "dev_backend",
       localProjectId: "lp_1111111111111111",
-      sourceProjectId: "sp_2222222222222222",
       projectDisplayName: "koed"
     });
     expect(JSON.parse(stdout.text())).toMatchObject({
@@ -405,7 +401,6 @@ describe("JSON command output", () => {
               teamWorkspaceId: input.teamWorkspaceId,
               backendId: input.backendId ?? null,
               localProjectId: input.localProjectId ?? null,
-              sourceProjectId: input.sourceProjectId ?? null,
               projectDisplayName: input.projectDisplayName ?? null,
               createdAt: "2026-01-01T00:00:00.000Z",
               updatedAt: "2026-01-01T00:00:00.000Z"
@@ -1080,7 +1075,6 @@ describe("JSON command output", () => {
               discoveredAt: "2026-01-01T00:00:00.000Z",
               lastSeenAt: "2026-01-01T00:00:00.000Z",
               localProjectId: "lp_1111111111111111",
-              sourceProjectId: "sp_2222222222222222",
               displayName: "koed",
               path: {
                 cwd: "/repo/koed",
