@@ -175,7 +175,10 @@ function KoedExplorerMain() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selectedThreadId, setSelectedThreadId] = useState(
-    () => window.localStorage.getItem(selectedThreadStorageKey) ?? ""
+    () =>
+      new URLSearchParams(window.location.search).get("selectedThreadId") ??
+      window.localStorage.getItem(selectedThreadStorageKey) ??
+      ""
   );
   const [rawOpen, setRawOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
