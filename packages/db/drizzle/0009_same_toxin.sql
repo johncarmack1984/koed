@@ -18,6 +18,7 @@ SET
       WHEN coalesce(
         nullif("metadata" ->> 'localProjectId', ''),
         nullif("metadata" ->> 'projectId', ''),
+        nullif(nullif("metadata" ->> 'workspaceId', ''), 'default'),
         nullif("metadata" ->> 'projectPath', ''),
         nullif("cwd", ''),
         "workspace_id"::text
@@ -26,6 +27,7 @@ SET
         'id', coalesce(
           nullif("metadata" ->> 'localProjectId', ''),
           nullif("metadata" ->> 'projectId', ''),
+          nullif(nullif("metadata" ->> 'workspaceId', ''), 'default'),
           nullif("metadata" ->> 'projectPath', ''),
           nullif("cwd", ''),
           "workspace_id"::text
@@ -43,6 +45,7 @@ SET
       WHEN coalesce(
         nullif("metadata" ->> 'localProjectId', ''),
         nullif("metadata" ->> 'projectId', ''),
+        nullif(nullif("metadata" ->> 'workspaceId', ''), 'default'),
         nullif("metadata" ->> 'projectPath', ''),
         nullif("cwd", ''),
         "workspace_id"::text
@@ -54,6 +57,7 @@ SET
   "automatic_project_id" = coalesce(
     nullif("metadata" ->> 'localProjectId', ''),
     nullif("metadata" ->> 'projectId', ''),
+    nullif(nullif("metadata" ->> 'workspaceId', ''), 'default'),
     nullif("metadata" ->> 'projectPath', ''),
     nullif("cwd", ''),
     "workspace_id"::text
@@ -69,6 +73,7 @@ SET
     WHEN coalesce(
       nullif("metadata" ->> 'localProjectId', ''),
       nullif("metadata" ->> 'projectId', ''),
+      nullif(nullif("metadata" ->> 'workspaceId', ''), 'default'),
       nullif("metadata" ->> 'projectPath', ''),
       nullif("cwd", ''),
       "workspace_id"::text
