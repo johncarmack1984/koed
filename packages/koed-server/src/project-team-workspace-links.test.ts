@@ -39,10 +39,13 @@ describe("Project Team Workspace links", () => {
       link: {
         projectRoot: path.resolve(projectRoot),
         teamWorkspaceId,
-        backendId: "dev_backend"
+        backendId: "dev_backend",
+        localProjectId: null,
+        sourceProjectId: null
       }
     });
     const raw = fs.readFileSync(paths.projectTeamWorkspaceLinksPath, "utf8");
+    expect(JSON.parse(raw)).toMatchObject({ schemaVersion: 2 });
     expect(raw).toContain(teamWorkspaceId);
     expect(raw).not.toMatch(/token|secret|password|cookie|credential/i);
     expect(getProjectTeamWorkspaceLink(paths, projectRoot).link).toMatchObject({
