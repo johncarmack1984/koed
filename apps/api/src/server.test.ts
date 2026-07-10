@@ -469,6 +469,9 @@ type GraphThreadIndexResponse = {
       sessionId: string | null;
       projectId: string;
       projectName: string;
+      projectPath: string | null;
+      projectAssignmentSource: "detected" | "user_override" | null;
+      capturedProjectProvenance: Record<string, unknown>;
       eventCount: number;
       invalidatedCount: number;
       latestAt: string;
@@ -484,7 +487,7 @@ type GraphEventResponse = {
 };
 type MemoryExportResponse = { nodes: Array<Record<string, unknown>> };
 type EncryptedMemoryExportResponse = EncryptedJsonPackage;
-type SessionResponse = { session: { id: string } };
+type SessionResponse = { session: CapturedSessionRecord };
 type ExpandedResponse = { expanded: { sources: Array<{ content: string }> } };
 type OpenApiResponse = { paths: Record<string, unknown> };
 type MemoryQuestionResponse = { question: MemoryQuestionDetailRecord };
@@ -527,6 +530,7 @@ const createFakeRepository = () => {
     updatedAt: string;
   }> = [];
   const capturedSessions = new Map<string, CapturedSessionRecord>();
+  const capturedSessionIdsByIdempotencyKey = new Map<string, string>();
   let capturedSessionCounter = 0;
   const teams = new Map<string, TeamRecord>();
   const teamInvites = new Map<
@@ -2177,8 +2181,30 @@ const createFakeRepository = () => {
     },
     async createCapturedSession(actor: ActorContext, input) {
       const id = randomUUID();
+      const detectedProjects =
+        input.detectedProjects ??
+        (input.cwd
+          ? [
+              {
+                id: input.cwd,
+                name: input.cwd.split("/").filter(Boolean).at(-1) ?? input.cwd,
+                path: input.cwd
+              }
+            ]
+          : []);
+      const automaticProject =
+        detectedProjects.length === 1 ? detectedProjects[0]! : null;
+      const createdAt = new Date(
+        Date.now() + capturedSessionCounter++
+      ).toISOString();
+      const existingId = input.idempotencyKey
+        ? capturedSessionIdsByIdempotencyKey.get(input.idempotencyKey)
+        : undefined;
+      const existing = existingId
+        ? capturedSessions.get(existingId)
+        : undefined;
       const record: CapturedSessionRecord = {
-        id,
+        id: existing?.id ?? id,
         ownerUserId: actor.userId,
         visibility: "personal",
         externalSessionId: input.externalSessionId ?? null,
@@ -2187,10 +2213,36 @@ const createFakeRepository = () => {
         captureMethod: input.captureMethod ?? "mcp",
         model: input.model ?? null,
         cwd: input.cwd ?? null,
-        metadata: input.metadata ?? {},
-        createdAt: new Date(Date.now() + capturedSessionCounter++).toISOString()
+        metadata: { ...existing?.metadata, ...input.metadata },
+        capturedProjectProvenance: existing?.capturedProjectProvenance ?? {
+          capturedCwd: input.cwd ?? null,
+          candidates: detectedProjects,
+          outcome:
+            detectedProjects.length === 1
+              ? "unambiguous"
+              : detectedProjects.length > 1
+                ? "ambiguous"
+                : "no_signal"
+        },
+        automaticProject,
+        projectOverride: existing?.projectOverride ?? null,
+        project: existing?.projectOverride ?? automaticProject,
+        projectAssignmentSource: existing?.projectOverride
+          ? "user_override"
+          : automaticProject
+            ? "detected"
+            : null,
+        projectAssignmentUpdatedAt: existing?.projectOverride
+          ? existing.projectAssignmentUpdatedAt
+          : automaticProject
+            ? createdAt
+            : null,
+        createdAt: existing?.createdAt ?? createdAt
       };
-      capturedSessions.set(id, record);
+      capturedSessions.set(record.id, record);
+      if (input.idempotencyKey) {
+        capturedSessionIdsByIdempotencyKey.set(input.idempotencyKey, record.id);
+      }
       return record;
     },
     async getCapturedSession(actor, sessionId) {
@@ -2223,6 +2275,45 @@ const createFakeRepository = () => {
           threadNameSource: "manual",
           threadNameEditedAt: new Date().toISOString()
         }
+      };
+      capturedSessions.set(sessionId, nextSession);
+      return nextSession;
+    },
+    async moveCapturedSessionToProject(actor, sessionId, project) {
+      const session = capturedSessions.get(sessionId);
+      if (
+        !session ||
+        session.ownerUserId !== actor.userId ||
+        session.visibility !== "personal"
+      )
+        return null;
+      const updatedAt = new Date().toISOString();
+      const nextSession: CapturedSessionRecord = {
+        ...session,
+        projectOverride: project,
+        project,
+        projectAssignmentSource: "user_override",
+        projectAssignmentUpdatedAt: updatedAt
+      };
+      capturedSessions.set(sessionId, nextSession);
+      return nextSession;
+    },
+    async resetCapturedSessionProject(actor, sessionId) {
+      const session = capturedSessions.get(sessionId);
+      if (
+        !session ||
+        session.ownerUserId !== actor.userId ||
+        session.visibility !== "personal"
+      )
+        return null;
+      const nextSession: CapturedSessionRecord = {
+        ...session,
+        projectOverride: null,
+        project: session.automaticProject,
+        projectAssignmentSource: session.automaticProject ? "detected" : null,
+        projectAssignmentUpdatedAt: session.automaticProject
+          ? new Date().toISOString()
+          : null
       };
       capturedSessions.set(sessionId, nextSession);
       return nextSession;
@@ -2270,14 +2361,8 @@ const createFakeRepository = () => {
       return candidates.map(({ session, sessionEvents, titleEventCount }) => ({
         id: session.id,
         externalSessionId: session.externalSessionId,
-        projectName:
-          typeof session.metadata.projectName === "string"
-            ? session.metadata.projectName
-            : session.cwd,
-        projectPath:
-          typeof session.metadata.projectPath === "string"
-            ? session.metadata.projectPath
-            : session.cwd,
+        projectName: session.project?.name ?? "Unassigned",
+        projectPath: session.project?.path ?? null,
         currentTitle:
           typeof session.metadata.threadName === "string"
             ? session.metadata.threadName
@@ -2308,10 +2393,8 @@ const createFakeRepository = () => {
             (session) =>
               session.ownerUserId === actor.userId &&
               session.visibility === "personal" &&
-              (session.workspaceId === input.workspaceId ||
-                session.cwd === input.workspaceId ||
-                session.metadata.workspaceId === input.workspaceId ||
-                session.metadata.projectPath === input.workspaceId)
+              (session.project?.id === input.workspaceId ||
+                session.project?.path === input.workspaceId)
           )
           .sort((left, right) =>
             right.createdAt.localeCompare(left.createdAt)
@@ -3092,12 +3175,23 @@ const createFakeRepository = () => {
             !event.content.toLowerCase().includes(input.query.toLowerCase())
           )
             return false;
-          const projectId = event.workspaceId ?? null;
+          const session = event.sessionId
+            ? capturedSessions.get(event.sessionId)
+            : undefined;
+          const projectId = session
+            ? (session.project?.id ?? "unassigned")
+            : (event.workspaceId ?? null);
+          const projectPath = session?.project?.path ?? null;
           const threadId =
             typeof event.metadata.externalSessionId === "string"
               ? event.metadata.externalSessionId
               : event.sessionId;
-          if (input.projectId && projectId !== input.projectId) return false;
+          if (
+            input.projectId &&
+            projectId !== input.projectId &&
+            projectPath !== input.projectId
+          )
+            return false;
           if (input.threadId && threadId !== input.threadId) return false;
           if (event.visibility === "personal")
             return event.ownerUserId === actor.userId;
@@ -3141,15 +3235,21 @@ const createFakeRepository = () => {
             captureMethod: "hook" as const,
             model: null,
             workspaceId: event.workspaceId,
-            projectId: event.workspaceId,
+            projectId: session
+              ? (session.project?.id ?? "unassigned")
+              : event.workspaceId,
             projectName:
-              typeof event.metadata.projectName === "string"
+              session?.project?.name ??
+              (typeof event.metadata.projectName === "string"
                 ? event.metadata.projectName
-                : null,
+                : session
+                  ? "Unassigned"
+                  : null),
             projectPath:
-              typeof event.metadata.projectPath === "string"
+              session?.project?.path ??
+              (typeof event.metadata.projectPath === "string"
                 ? event.metadata.projectPath
-                : null,
+                : null),
             sessionId: event.sessionId,
             threadId:
               typeof event.metadata.externalSessionId === "string"
@@ -3204,6 +3304,9 @@ const createFakeRepository = () => {
             sessionId: string | null;
             projectId: string;
             projectName: string;
+            projectPath: string | null;
+            projectAssignmentSource: "detected" | "user_override" | null;
+            capturedProjectProvenance: Record<string, unknown>;
             eventCount: number;
             invalidatedCount: number;
             latestAt: string;
@@ -3222,6 +3325,9 @@ const createFakeRepository = () => {
           sessionId: string | null;
           projectId: string;
           projectName: string;
+          projectPath: string | null;
+          projectAssignmentSource: "detected" | "user_override" | null;
+          capturedProjectProvenance: Record<string, unknown>;
           eventCount: number;
           invalidatedCount: number;
           latestAt: string;
@@ -3233,6 +3339,9 @@ const createFakeRepository = () => {
       >();
 
       for (const event of visibleEvents) {
+        const session = event.sessionId
+          ? capturedSessions.get(event.sessionId)
+          : undefined;
         const projectId =
           event.projectId ??
           event.projectPath ??
@@ -3264,6 +3373,9 @@ const createFakeRepository = () => {
             sessionId: event.sessionId,
             projectId,
             projectName,
+            projectPath: event.projectPath,
+            projectAssignmentSource: session?.projectAssignmentSource ?? null,
+            capturedProjectProvenance: session?.capturedProjectProvenance ?? {},
             eventCount: 0,
             invalidatedCount: 0,
             latestAt: event.timestamp,
@@ -3310,20 +3422,8 @@ const createFakeRepository = () => {
           session.ownerUserId !== actor.userId
         )
           continue;
-        const projectId =
-          (typeof session.metadata.workspaceId === "string"
-            ? session.metadata.workspaceId
-            : null) ??
-          session.workspaceId ??
-          session.cwd ??
-          "unknown-project";
-        const projectName =
-          (typeof session.metadata.projectName === "string"
-            ? session.metadata.projectName
-            : null) ??
-          session.workspaceId ??
-          session.cwd ??
-          "Unknown project";
+        const projectId = session.project?.id ?? "unassigned";
+        const projectName = session.project?.name ?? "Unassigned";
         const threadId =
           (typeof session.metadata.externalSessionId === "string"
             ? session.metadata.externalSessionId
@@ -3342,10 +3442,7 @@ const createFakeRepository = () => {
         const project = projectMap.get(projectId) ?? {
           id: projectId,
           name: projectName,
-          path:
-            typeof session.metadata.projectPath === "string"
-              ? session.metadata.projectPath
-              : session.cwd,
+          path: session.project?.path ?? null,
           eventCount: 0,
           threads: []
         };
@@ -3362,6 +3459,9 @@ const createFakeRepository = () => {
             sessionId: session.id,
             projectId,
             projectName,
+            projectPath: session.project?.path ?? null,
+            projectAssignmentSource: session.projectAssignmentSource,
+            capturedProjectProvenance: session.capturedProjectProvenance,
             eventCount: 0,
             invalidatedCount: 0,
             latestAt: session.createdAt,
@@ -9419,6 +9519,179 @@ describe("account and access flows", () => {
     expect(
       jsonBody<GraphEventsResponse>(selectedThreadEvents).events
     ).toHaveLength(1);
+  });
+
+  it("moves, preserves, resets, and owner-authorizes Personal Project assignment", async () => {
+    const app = await buildServer({
+      repository: createFakeRepository(),
+      runMemoryJobsInlineForTests: true
+    });
+    const owner = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "project-assignment-owner@example.com",
+        password: "password123"
+      }
+    });
+    const other = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "project-assignment-other@example.com",
+        password: "password123"
+      }
+    });
+    const ownerCookie = cookieHeader(owner);
+    const ownerToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie: ownerCookie },
+      payload: { name: "Project assignment capture" }
+    });
+    const captureHeaders = {
+      authorization: `Bearer ${jsonBody<TokenResponse>(ownerToken).token}`
+    };
+    const idempotencyKey = "project-assignment-session";
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/sessions",
+      headers: captureHeaders,
+      payload: {
+        externalSessionId: "project-assignment-thread",
+        cwd: "/work/automatic-a",
+        idempotencyKey,
+        detectedProjects: [
+          { id: "project-a", name: "Project A", path: "/work/automatic-a" }
+        ]
+      }
+    });
+    const session = jsonBody<SessionResponse>(created).session;
+    await app.inject({
+      method: "POST",
+      url: `/v1/sessions/${session.id}/events`,
+      headers: captureHeaders,
+      payload: {
+        actor: "user",
+        eventType: "user_prompt",
+        content: "Effective Project grouping marker",
+        metadata: { externalSessionId: "project-assignment-thread" }
+      }
+    });
+
+    const moved = await app.inject({
+      method: "PATCH",
+      url: `/v1/memory/graph/sessions/${session.id}/project`,
+      headers: { cookie: ownerCookie },
+      payload: {
+        action: "move",
+        project: { id: "project-b", name: "Project B", path: "/work/manual-b" }
+      }
+    });
+    const redetected = await app.inject({
+      method: "POST",
+      url: "/v1/sessions",
+      headers: captureHeaders,
+      payload: {
+        externalSessionId: "project-assignment-thread",
+        cwd: "/work/automatic-c",
+        idempotencyKey,
+        detectedProjects: [
+          { id: "project-c", name: "Project C", path: "/work/automatic-c" }
+        ]
+      }
+    });
+    const groupedAfterMove = await app.inject({
+      method: "GET",
+      url: "/v1/memory/graph/threads?projectId=project-b",
+      headers: { cookie: ownerCookie }
+    });
+    const rejectedOtherOwner = await app.inject({
+      method: "PATCH",
+      url: `/v1/memory/graph/sessions/${session.id}/project`,
+      headers: { cookie: cookieHeader(other) },
+      payload: {
+        action: "move",
+        project: { id: "project-a", name: "Project A", path: null }
+      }
+    });
+    const rejectedTeamAuthority = await app.inject({
+      method: "PATCH",
+      url: `/v1/memory/graph/sessions/${session.id}/project`,
+      headers: { cookie: ownerCookie },
+      payload: {
+        action: "move",
+        project: { id: "project-a", name: "Project A", path: null },
+        teamWorkspaceId: randomUUID()
+      }
+    });
+    const reset = await app.inject({
+      method: "PATCH",
+      url: `/v1/memory/graph/sessions/${session.id}/project`,
+      headers: { cookie: ownerCookie },
+      payload: { action: "reset" }
+    });
+    const ambiguous = await app.inject({
+      method: "POST",
+      url: "/v1/sessions",
+      headers: captureHeaders,
+      payload: {
+        externalSessionId: "ambiguous-project-thread",
+        idempotencyKey: "ambiguous-project-session",
+        detectedProjects: [
+          { id: "project-a", name: "Project A", path: "/work/a" },
+          { id: "project-b", name: "Project B", path: "/work/b" }
+        ]
+      }
+    });
+    const unassigned = await app.inject({
+      method: "GET",
+      url: "/v1/memory/graph/threads?projectId=unassigned",
+      headers: { cookie: ownerCookie }
+    });
+    await app.close();
+
+    expect(session).toMatchObject({
+      project: { id: "project-a" },
+      projectAssignmentSource: "detected",
+      capturedProjectProvenance: {
+        outcome: "unambiguous",
+        candidates: [{ id: "project-a" }]
+      }
+    });
+    expect(jsonBody<SessionResponse>(moved).session).toMatchObject({
+      project: { id: "project-b" },
+      projectOverride: { id: "project-b" },
+      projectAssignmentSource: "user_override"
+    });
+    expect(jsonBody<SessionResponse>(redetected).session).toMatchObject({
+      id: session.id,
+      automaticProject: { id: "project-c" },
+      project: { id: "project-b" },
+      projectAssignmentSource: "user_override",
+      capturedProjectProvenance: {
+        candidates: [{ id: "project-a" }]
+      }
+    });
+    expect(
+      jsonBody<GraphThreadIndexResponse>(groupedAfterMove).projects[0]
+    ).toMatchObject({ id: "project-b", eventCount: 1 });
+    expect(rejectedOtherOwner.statusCode).toBe(404);
+    expect(rejectedTeamAuthority.statusCode).toBe(400);
+    expect(jsonBody<SessionResponse>(reset).session).toMatchObject({
+      automaticProject: { id: "project-c" },
+      projectOverride: null,
+      project: { id: "project-c" },
+      projectAssignmentSource: "detected"
+    });
+    expect(jsonBody<SessionResponse>(ambiguous).session).toMatchObject({
+      project: null,
+      projectAssignmentSource: null,
+      capturedProjectProvenance: { outcome: "ambiguous" }
+    });
+    expect(jsonBody<GraphThreadIndexResponse>(unassigned).projects).toEqual([
+      expect.objectContaining({ id: "unassigned", name: "Unassigned" })
+    ]);
   });
 
   it("renames captured session titles in the graph thread index", async () => {
