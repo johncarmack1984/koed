@@ -950,6 +950,12 @@ const createFakeRepository = () => {
 
   const repository = {
     health: async () => true,
+    getConversationProjectionBacklog: async () => ({
+      liveProjectionRows: 0,
+      historicalImportRows: 0,
+      historicalImportBytes: 0,
+      interactiveQuestionRows: 0
+    }),
     async countUsers() {
       return users.size;
     },
@@ -7933,6 +7939,14 @@ describe("account and access flows", () => {
             details: { endpointOrigin: string };
           };
         };
+        historicalImport: {
+          status: string;
+          details: {
+            diagnosticOnly: boolean;
+            pendingRows: number;
+            pendingBytes: number;
+          };
+        };
         alertDelivery: {
           status: string;
           details: {
@@ -7976,6 +7990,16 @@ describe("account and access flows", () => {
         }
       }
     });
+    expect(body.components.historicalImport).toEqual({
+      status: "ok",
+      details: {
+        diagnosticOnly: true,
+        pendingRows: 0,
+        pendingBytes: 0,
+        liveProjectionRows: 0,
+        interactiveQuestionRows: 0
+      }
+    });
     expect(body.components.alertDelivery).toEqual({
       status: "ok",
       details: {
@@ -7994,6 +8018,55 @@ describe("account and access flows", () => {
     ).toBe(true);
     expect(status.body).not.toContain(rawMemorySentinel);
     expect(status.body).not.toContain(secretSentinel);
+  });
+
+  it("keeps historical backlog out of readiness and diagnostic-only", async () => {
+    const koedHome = mkdtempSync(resolve(tmpdir(), "koed-history-status-"));
+    process.env.KOED_ALLOW_PUBLIC_REGISTRATION = "true";
+    process.env.WORK_QUEUE_BACKEND = "local";
+    process.env.KOED_HOME = koedHome;
+    const repository = createFakeRepository();
+    repository.getConversationProjectionBacklog = async () => ({
+      liveProjectionRows: 0,
+      historicalImportRows: 50_000,
+      historicalImportBytes: 9_000_000,
+      interactiveQuestionRows: 0
+    });
+    repository.getLocalEmbeddingStatus = async () => ({
+      enabled: true,
+      healthy: true,
+      model: "qwen3-0.6b",
+      dimensions: 1024,
+      error: null
+    });
+    const app = await buildServer({ repository });
+    const ready = await app.inject({ method: "GET", url: "/ready" });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "history-status@example.com", password: "password123" }
+    });
+    const ops = await app.inject({
+      method: "GET",
+      url: "/ops/status",
+      headers: { cookie: cookieHeader(registered) }
+    });
+    await app.close();
+
+    expect(ready.statusCode).toBe(200);
+    expect(ready.body).not.toContain("historicalImport");
+    expect(
+      jsonBody<{ components: Record<string, unknown> }>(ops).components
+    ).toHaveProperty("historicalImport", {
+      status: "ok",
+      details: {
+        diagnosticOnly: true,
+        pendingRows: 50_000,
+        pendingBytes: 9_000_000,
+        liveProjectionRows: 0,
+        interactiveQuestionRows: 0
+      }
+    });
   });
 
   it("reports managed KMS status failures as redacted operations alerts", async () => {

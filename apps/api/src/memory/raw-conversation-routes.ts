@@ -1,3 +1,4 @@
+import type { KoedWorkClass } from "@koed/shared";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ApiRouteContext } from "../server/context.js";
 import {
@@ -155,6 +156,7 @@ export const registerRawConversationRoutes = (
           visibility: "personal";
           includeInEmbedding: boolean;
           includeInLcm: boolean;
+          workClass: KoedWorkClass;
         }>
       };
       for (

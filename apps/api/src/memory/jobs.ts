@@ -5,7 +5,9 @@ import {
   lcmCompactionQueueJobId,
   lcmCompactQueueName,
   memoryEmbedQueueName,
-  type KoedJobQueue
+  workClassPriority,
+  type KoedJobQueue,
+  type KoedWorkClass
 } from "@koed/shared";
 import { withTimeout } from "../server/utils.js";
 
@@ -25,11 +27,13 @@ export interface MemoryJobStatus {
 interface EmbeddingQueueJobData {
   sourceType: EmbeddingSourceType;
   sourceId: string;
+  workClass: KoedWorkClass;
 }
 
 interface CompactionQueueJobData {
   userId: string;
   visibility: Visibility;
+  workClass: KoedWorkClass;
 }
 
 interface MemoryJobSchedulerOptions {
@@ -62,7 +66,8 @@ export const createMemoryJobScheduler = ({
 
   const enqueueEmbedding = async (
     sourceType: EmbeddingSourceType,
-    sourceId: string
+    sourceId: string,
+    workClass: KoedWorkClass = "normal_embedding_lcm"
   ): Promise<MemoryJobStatus> => {
     if (!embeddingQueue) {
       log.warn(
@@ -86,8 +91,9 @@ export const createMemoryJobScheduler = ({
       const job = await withTimeout(
         embeddingQueue.add(
           "embed-source",
-          { sourceType, sourceId },
+          { sourceType, sourceId, workClass },
           {
+            priority: workClassPriority(workClass),
             attempts: 5,
             backoff: { type: "exponential", delay: 10_000 },
             removeOnComplete: 1000,
@@ -122,7 +128,8 @@ export const createMemoryJobScheduler = ({
   const enqueueCompaction = async (
     repo: MemorySourceRepository,
     requesterContext: { userId: string },
-    visibility: Visibility
+    visibility: Visibility,
+    workClass: KoedWorkClass = "normal_embedding_lcm"
   ): Promise<MemoryJobStatus> => {
     if (runMemoryJobsInlineForTests) {
       const compaction = await runCompactionInline(
@@ -167,8 +174,9 @@ export const createMemoryJobScheduler = ({
       const job = await withTimeout(
         compactionQueue.add(
           "compact-scope",
-          { userId: requesterContext.userId, visibility },
+          { userId: requesterContext.userId, visibility, workClass },
           {
+            priority: workClassPriority(workClass),
             attempts: 5,
             backoff: { type: "exponential", delay: 10_000 },
             removeOnComplete: 1000,
@@ -208,8 +216,13 @@ export const createMemoryJobScheduler = ({
     visibility: Visibility
   ) => {
     const [embedding, compaction] = await Promise.all([
-      enqueueEmbedding("memory_event", eventId),
-      enqueueCompaction(repo, requesterContext, visibility)
+      enqueueEmbedding("memory_event", eventId, "live_capture_projection"),
+      enqueueCompaction(
+        repo,
+        requesterContext,
+        visibility,
+        "live_capture_projection"
+      )
     ]);
 
     return { embedding, compaction };
@@ -223,22 +236,44 @@ export const createMemoryJobScheduler = ({
       visibility: Visibility;
       includeInEmbedding: boolean;
       includeInLcm: boolean;
+      workClass: KoedWorkClass;
     }>
   ) => {
     const embeddings = await Promise.all(
       scopes
         .filter((scope) => scope.includeInEmbedding)
-        .map((scope) => enqueueEmbedding("memory_event", scope.eventId))
+        .map((scope) =>
+          enqueueEmbedding("memory_event", scope.eventId, scope.workClass)
+        )
     );
-    const scopeMap = new Map<string, { visibility: Visibility }>();
+    const scopeMap = new Map<
+      string,
+      { visibility: Visibility; workClass: KoedWorkClass }
+    >();
     for (const scope of scopes) {
-      if (scope.includeInLcm) {
-        scopeMap.set(scope.visibility, { visibility: scope.visibility });
+      if (!scope.includeInLcm) {
+        continue;
+      }
+      const current = scopeMap.get(scope.visibility);
+      if (
+        !current ||
+        workClassPriority(scope.workClass) <
+          workClassPriority(current.workClass)
+      ) {
+        scopeMap.set(scope.visibility, {
+          visibility: scope.visibility,
+          workClass: scope.workClass
+        });
       }
     }
     const compactions = await Promise.all(
       [...scopeMap.values()].map((scope) =>
-        enqueueCompaction(repo, requesterContext, scope.visibility)
+        enqueueCompaction(
+          repo,
+          requesterContext,
+          scope.visibility,
+          scope.workClass
+        )
       )
     );
 

@@ -16,7 +16,8 @@ describe("worker job workflows", () => {
       embeddingJobData({ sourceType: "memory_event", sourceId: 123 })
     ).toEqual({
       sourceType: "memory_event",
-      sourceId: "123"
+      sourceId: "123",
+      workClass: "normal_embedding_lcm"
     });
   });
 
@@ -62,6 +63,7 @@ describe("worker job workflows", () => {
       add: compactionAdd
     } as unknown as KoedJobQueue<CompactionQueueJobData>;
     const retryOptions = {
+      priority: 10,
       attempts: 5,
       backoff: { type: "exponential", delay: 10_000 },
       removeOnComplete: 1000,
@@ -89,7 +91,11 @@ describe("worker job workflows", () => {
 
     expect(embeddingAdd).toHaveBeenCalledWith(
       "embed-source",
-      { sourceType: "memory_event", sourceId: "event-1" },
+      {
+        sourceType: "memory_event",
+        sourceId: "event-1",
+        workClass: "normal_embedding_lcm"
+      },
       {
         ...retryOptions,
         jobId: "embed-embedding-v1-memory_event-event-1"
@@ -97,7 +103,11 @@ describe("worker job workflows", () => {
     );
     expect(embeddingAdd).toHaveBeenCalledWith(
       "embed-source",
-      { sourceType: "memory_node", sourceId: "node-1" },
+      {
+        sourceType: "memory_node",
+        sourceId: "node-1",
+        workClass: "normal_embedding_lcm"
+      },
       {
         ...retryOptions,
         jobId: "embed-embedding-v1-memory_node-node-1"
@@ -105,7 +115,11 @@ describe("worker job workflows", () => {
     );
     expect(compactionAdd).toHaveBeenCalledWith(
       "compact-scope",
-      { userId: "user-1", visibility: "personal" },
+      {
+        userId: "user-1",
+        visibility: "personal",
+        workClass: "normal_embedding_lcm"
+      },
       {
         ...retryOptions,
         jobId: "compact-user-1-personal-pending-events-v1"
