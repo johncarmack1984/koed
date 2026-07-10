@@ -82,15 +82,25 @@ node packages/koed-server/dist/cli.js project list --json
 
 Project metadata is local matching/display data, not authorization. Discovery
 stores raw local paths only under `KOED_HOME/config/projects.json`, strips
-credentials from Git remotes, derives a device-local Project id, and records
-individual remote fingerprints as non-authoritative matching signals. Remote
-signals never select or authorize a Team Workspace; explicit Project linking is
-authoritative. The Team Workspace id remains the stable Team memory boundary.
+credentials from Git remotes, derives a device-local Project id, and retains
+individual current and historical network remote aliases as non-authoritative
+matching signals. Remote signals never select or authorize a Team Workspace;
+explicit Project linking is authoritative. The Team Workspace id remains the
+stable Team memory boundary.
 
 Discovery inspects the supplied directory and its enclosing Git repository only;
 it does not recursively discover child repositories, submodules, or monorepo
-packages. Worktrees are separate local Projects. Local-only repositories have no
-portable remote signal and require explicit linking on each device.
+packages. Worktrees retain separate local Project ids while a salted Git
+common-directory hash identifies worktrees backed by the same device-local Git
+repository. Local-only repositories have no portable remote signal.
+
+Future personal multi-device enrollment may use remote-alias overlap to
+automatically associate local Project contexts after both devices are bound to
+the same User. This build has no personal multi-device registry or sync path, so
+remote aliases remain evidence only. They cannot merge Personal Memory across
+deployments or create a Team Workspace link. `project forget
+--local-project-id <id>` removes the local Project record, including retained
+remote-alias history.
 
 ## KOED_HOME layout
 

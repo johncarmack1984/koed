@@ -37,6 +37,8 @@ export {
 export {
   deriveLocalProjectId,
   hmacProjectValue,
+  isPortableGitRemote,
+  mergeGitRemoteAliases,
   normalizeGitRemoteUrl,
   normalizeProjectDisplayName,
   safeProjectMetadataForRemote

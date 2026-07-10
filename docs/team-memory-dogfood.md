@@ -34,15 +34,21 @@ node packages/koed-server/dist/cli.js project list --json
 
 Discovery records Git root, normalized remotes with credentials stripped,
 branch, HEAD commit, package name, and device-local Project id. Individual
-remote fingerprints are non-authoritative matching signals; changing the remote
-set does not change local Project identity or relink a Workspace. Raw local
-paths remain local under `KOED_HOME`.
+current and historical network remote aliases are non-authoritative matching
+signals; changing the remote set does not change local Project identity or
+relink a Workspace. Raw local paths remain local under `KOED_HOME`.
 
 Discovery inspects only the supplied directory and its enclosing Git repository.
 It does not recursively discover child repositories, submodules, or monorepo
-packages. Separate Git worktrees remain separate local Projects. A repository
-without a remote has no portable matching signal and must be linked explicitly
-on each device.
+packages. Separate Git worktrees retain separate local Project ids while a
+salted common-directory hash records that they share one device-local Git
+repository. A repository without a remote has no portable matching signal and
+must be linked explicitly on each device.
+
+Future trusted personal-device enrollment may use remote-alias overlap to
+associate Project contexts across devices. That personal association is not
+implemented here and must remain separate from explicit Project-to-Team
+Workspace links.
 
 ## Link A Project To A Team Workspace
 
@@ -127,8 +133,9 @@ id. Remote fingerprints may support future match suggestions, but never select
 or authorize a Team Workspace. If the mapping also has a backend id, MCP sends
 the mapped `team_workspace_id` request through the local `koed-server`
 local-edge upstream proxy. Enrollment creates two distinct scoped credentials in
-secure local storage. A Local-Edge Client Credential authorizes MCP to ask the local proxy
-for `team_workspace_read`; a separate upstream device credential authorizes the
+secure local storage. A Local-Edge Client Credential authorizes MCP to ask the
+local proxy for `team_workspace_read`; a separate upstream device credential
+authorizes the
 local edge against the Team Backend. MCP never receives the upstream credential,
 and a Personal API Token never enters or authorizes the Team path.
 
@@ -144,6 +151,13 @@ Remove the local Project mapping:
 
 ```bash
 node packages/koed-server/dist/cli.js team workspace remove --project-root "$PWD" --json
+```
+
+Separately forget Project metadata and retained remote-alias history when it is
+no longer wanted locally:
+
+```bash
+node packages/koed-server/dist/cli.js project forget --local-project-id "<local-project-id>" --json
 ```
 
 Revoke a Share Grant through the existing Team Workspace API or Team UI:

@@ -446,7 +446,7 @@ describe("Project Team Workspace dogfood mapping", () => {
     ).toBeNull();
   });
 
-  it("does not resolve Team Workspace mapping from source signals", () => {
+  it("does not resolve Team Workspace mapping from source or grouping signals", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "koed-mcp-ptw-"));
     const linkPath = path.join(directory, "project-team-workspaces.json");
     const projectPath = path.join(directory, "projects.json");
@@ -457,7 +457,9 @@ describe("Project Team Workspace dogfood mapping", () => {
           {
             projectRoot: "/old/path/koed",
             teamWorkspaceId: "11111111-1111-4111-8111-111111111111",
-            sourceProjectId: "sp_2222222222222222"
+            sourceProjectId: "sp_2222222222222222",
+            commonDirHash: "hmac_sha256:common",
+            remoteAliases: [{ fingerprint: "gr_shared" }]
           }
         ]
       })
@@ -469,6 +471,10 @@ describe("Project Team Workspace dogfood mapping", () => {
           {
             localProjectId: "lp_1111111111111111",
             sourceProjectId: "sp_2222222222222222",
+            git: {
+              commonDirHash: "hmac_sha256:common",
+              remoteAliases: [{ fingerprint: "gr_shared" }]
+            },
             path: { cwd: "/repo/koed", projectRoot: "/repo/koed" }
           }
         ]

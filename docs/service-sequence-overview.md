@@ -742,8 +742,10 @@ cwd is used only to resolve or display a Workspace.
    Grant in the first version.
 7. If local Project metadata is supplied during recall, Koed may use an exact
    Project root or device-local Project id from an explicit Project-to-Workspace
-   link. Remote fingerprints are non-authoritative matching signals and cannot
-   select or authorize a Workspace.
+   link. Worktrees keep separate local ids and share only a salted local Git
+   common-directory signal. Current and historical remote aliases are
+   non-authoritative matching evidence for future trusted personal-device
+   association; they cannot select or authorize a Workspace.
 8. Archived search is an explicit mode, not the default active recall path. It
    may include retained Workspaces only when the caller and retention policy
    allow it. Access-suspended Team data belongs to a separate admin, legal, or

@@ -30,7 +30,8 @@ const execFileFor = (repo: string) =>
         "origin\thttps://token:secret@github.com/koed-labs/koed.git (fetch)\norigin\thttps://token:secret@github.com/koed-labs/koed.git (push)",
       "branch --show-current": "feature/koe-219",
       "rev-parse HEAD": "abcdef1234567890",
-      "rev-parse --git-common-dir": ".git"
+      "rev-parse --git-common-dir": ".git",
+      "rev-parse --git-dir": ".git"
     };
     const response = responses[command];
     if (response === undefined) {
@@ -73,7 +74,12 @@ describe("Project metadata discovery", () => {
         },
         git: {
           branch: "feature/koe-219",
-          headCommit: "abcdef1234567890"
+          headCommit: "abcdef1234567890",
+          remoteAliases: [
+            expect.objectContaining({
+              display: "github.com/koed-labs/koed"
+            })
+          ]
         },
         packages: [{ manager: "pnpm", name: "koed" }]
       }
@@ -100,7 +106,7 @@ describe("Project metadata discovery", () => {
     fs.writeFileSync(
       paths.projectMetadataPath,
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         updatedAt: "2026-01-01T00:00:00.000Z",
         deviceSaltId: "pms_device-salt",
         projects: [
@@ -127,6 +133,14 @@ describe("Project metadata discovery", () => {
                   repo: "koed",
                   display: "gitlab.example.com/platform/koed",
                   fingerprint: "gr_11111111111111111111111111111111"
+                },
+                {
+                  name: "upstream",
+                  host: "github.com",
+                  namespace: "koed-labs",
+                  repo: "koed",
+                  display: "github.com/koed-labs/koed",
+                  fingerprint: "gr_22222222222222222222222222222222"
                 }
               ],
               remoteSetFingerprint: "grs_11111111111111111111111111111111",
@@ -143,14 +157,113 @@ describe("Project metadata discovery", () => {
 
     const [project] = listProjectMetadata(paths).projects ?? [];
     expect(project).not.toHaveProperty("sourceProjectId");
-    expect(project?.git?.remotes).toEqual([]);
+    expect(project?.git?.remotes).toEqual([
+      expect.objectContaining({ display: "github.com/koed-labs/koed" })
+    ]);
     const migrated = JSON.parse(
       fs.readFileSync(paths.projectMetadataPath, "utf8")
     ) as Record<string, unknown>;
-    expect(migrated.schemaVersion).toBe(2);
+    expect(project?.git).toMatchObject({
+      commonDirHash: null,
+      remoteAliases: [
+        expect.objectContaining({ display: "github.com/koed-labs/koed" })
+      ]
+    });
+    expect(migrated.schemaVersion).toBe(3);
     expect(JSON.stringify(migrated)).not.toMatch(
       /sourceProjectId|remoteSetFingerprint|"owner"/
     );
+  });
+
+  it("retains historical portable remote aliases across discovery", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "koed-project-"));
+    const repo = path.join(directory, "repo");
+    fs.mkdirSync(repo, { recursive: true });
+    const paths = pathsFor(directory);
+    let remoteOutput = "origin\thttps://github.com/koed-labs/koed.git (fetch)";
+    const execFile = ((
+      _file: string,
+      args: readonly string[],
+      _options: unknown,
+      callback: (error: Error | null, stdout: string) => void
+    ) => {
+      const command = args.slice(2).join(" ");
+      const responses: Record<string, string> = {
+        "rev-parse --show-toplevel": repo,
+        "remote -v": remoteOutput,
+        "branch --show-current": "main",
+        "rev-parse HEAD": "abcdef1234567890",
+        "rev-parse --git-common-dir": ".git",
+        "rev-parse --git-dir": ".git"
+      };
+      callback(null, `${responses[command] ?? ""}\n`);
+    }) as never;
+    const deps = { execFile, randomId: () => "device-salt" };
+
+    const first = await discoverProjectMetadata(paths, { cwd: repo }, deps);
+    remoteOutput = "origin\thttps://github.com/alice/koed.git (fetch)";
+    const second = await discoverProjectMetadata(paths, { cwd: repo }, deps);
+
+    expect(second.project?.localProjectId).toBe(first.project?.localProjectId);
+    expect(second.project?.git?.remotes).toHaveLength(1);
+    expect(second.project?.git?.remoteAliases).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ display: "github.com/koed-labs/koed" }),
+        expect.objectContaining({ display: "github.com/alice/koed" })
+      ])
+    );
+  });
+
+  it("groups worktrees by a device-local Git common-directory signal", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "koed-project-"));
+    const main = path.join(directory, "main");
+    const worktree = path.join(directory, "worktree");
+    fs.mkdirSync(main, { recursive: true });
+    fs.mkdirSync(worktree, { recursive: true });
+    const paths = pathsFor(directory);
+    const execFile = ((
+      _file: string,
+      args: readonly string[],
+      _options: unknown,
+      callback: (error: Error | null, stdout: string) => void
+    ) => {
+      const target = args[1] ?? "";
+      const command = args.slice(2).join(" ");
+      const responses: Record<string, string> = {
+        "rev-parse --show-toplevel": target,
+        "remote -v": "origin\thttps://github.com/koed-labs/koed.git (fetch)",
+        "branch --show-current": "main",
+        "rev-parse HEAD": "abcdef1234567890",
+        "rev-parse --git-common-dir":
+          target === main ? ".git" : path.join(main, ".git"),
+        "rev-parse --git-dir":
+          target === main
+            ? ".git"
+            : path.join(main, ".git", "worktrees", "worktree")
+      };
+      callback(null, `${responses[command] ?? ""}\n`);
+    }) as never;
+    const deps = { execFile, randomId: () => "device-salt" };
+
+    const mainProject = await discoverProjectMetadata(
+      paths,
+      { cwd: main },
+      deps
+    );
+    const worktreeProject = await discoverProjectMetadata(
+      paths,
+      { cwd: worktree },
+      deps
+    );
+
+    expect(worktreeProject.project?.localProjectId).not.toBe(
+      mainProject.project?.localProjectId
+    );
+    expect(worktreeProject.project?.git?.commonDirHash).toBe(
+      mainProject.project?.git?.commonDirHash
+    );
+    expect(mainProject.project?.git?.isWorktree).toBe(false);
+    expect(worktreeProject.project?.git?.isWorktree).toBe(true);
   });
 
   it("keeps local-only repositories device-local", async () => {
@@ -176,7 +289,8 @@ describe("Project metadata discovery", () => {
       const responses: Record<string, string> = {
         "branch --show-current": "main",
         "rev-parse HEAD": "abcdef1234567890",
-        "rev-parse --git-common-dir": ".git"
+        "rev-parse --git-common-dir": ".git",
+        "rev-parse --git-dir": ".git"
       };
       callback(null, `${responses[command] ?? ""}\n`);
     }) as never;

@@ -11,6 +11,7 @@ import path, { dirname, relative, resolve } from "node:path";
 import {
   deriveLocalProjectId,
   hmacProjectValue,
+  mergeGitRemoteAliases,
   normalizeGitRemoteUrl,
   normalizeProjectDisplayName,
   type NormalizedGitRemote,
@@ -20,7 +21,7 @@ import {
 import type { KoedServerPaths } from "./paths.js";
 
 export interface ProjectMetadataStore {
-  schemaVersion: 2;
+  schemaVersion: 3;
   updatedAt: string;
   deviceSaltId: string;
   projects: ProjectMetadataV1[];
@@ -62,7 +63,7 @@ const defaultStore = (
   now: string,
   deps: Required<ProjectMetadataDeps>
 ): ProjectMetadataStore => ({
-  schemaVersion: 2,
+  schemaVersion: 3,
   updatedAt: now,
   deviceSaltId: `pms_${deps.randomId()}`,
   projects: []
@@ -81,7 +82,7 @@ const readStore = (
       deps.readFileSync(paths.projectMetadataPath, "utf8") as string
     ) as Partial<ProjectMetadataStore>;
     const store: ProjectMetadataStore = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : now,
       deviceSaltId:
         typeof parsed.deviceSaltId === "string" && parsed.deviceSaltId.trim()
@@ -93,7 +94,7 @@ const readStore = (
             .map(normalizeProjectMetadata)
         : []
     };
-    if (parsed.schemaVersion !== 2) {
+    if (parsed.schemaVersion !== 3) {
       writeStore(paths, store, deps);
     }
     return store;
@@ -156,18 +157,29 @@ const normalizeProjectMetadata = (
 ): ProjectMetadataV1 => {
   const legacy = value as ProjectMetadataV1 & {
     sourceProjectId?: unknown;
-    git?: ProjectMetadataV1["git"] & { remoteSetFingerprint?: unknown };
+    git?: ProjectMetadataV1["git"] & {
+      remoteSetFingerprint?: unknown;
+      commonDirHash?: unknown;
+      remoteAliases?: unknown;
+    };
   };
   const metadata = withoutField(legacy, "sourceProjectId");
   if (!metadata.git) return metadata;
   const git = withoutField(metadata.git, "remoteSetFingerprint");
+  const remotes = Array.isArray(git.remotes)
+    ? git.remotes.filter(isNormalizedGitRemote)
+    : [];
+  const storedAliases = Array.isArray(git.remoteAliases)
+    ? git.remoteAliases.filter(isNormalizedGitRemote)
+    : [];
   return {
     ...metadata,
     git: {
       ...git,
-      remotes: Array.isArray(git.remotes)
-        ? git.remotes.filter(isNormalizedGitRemote)
-        : []
+      commonDirHash:
+        typeof git.commonDirHash === "string" ? git.commonDirHash : null,
+      remotes,
+      remoteAliases: mergeGitRemoteAliases(storedAliases, remotes)
     }
   };
 };
@@ -277,6 +289,14 @@ export const discoverProjectMetadata = async (
     projectRoot: gitRoot,
     cwd
   });
+  const previousProject = store.projects.find(
+    (entry) => entry.localProjectId === localProjectId
+  );
+  const remoteAliases = mergeGitRemoteAliases(
+    previousProject?.git?.remoteAliases ?? [],
+    previousProject?.git?.remotes ?? [],
+    remotes
+  );
   const branch = gitRoot
     ? await git(gitRoot, ["branch", "--show-current"], deps)
     : null;
@@ -286,8 +306,14 @@ export const discoverProjectMetadata = async (
   const commonDir = gitRoot
     ? await git(gitRoot, ["rev-parse", "--git-common-dir"], deps)
     : null;
+  const gitDir = gitRoot
+    ? await git(gitRoot, ["rev-parse", "--git-dir"], deps)
+    : null;
+  const resolvedCommonDir =
+    gitRoot && commonDir ? resolve(gitRoot, commonDir) : null;
+  const resolvedGitDir = gitRoot && gitDir ? resolve(gitRoot, gitDir) : null;
   const isWorktree = Boolean(
-    commonDir && ![".git", resolve(gitRoot ?? cwd, ".git")].includes(commonDir)
+    resolvedCommonDir && resolvedGitDir && resolvedCommonDir !== resolvedGitDir
   );
   const displayName = normalizeProjectDisplayName({
     cwd,
@@ -297,9 +323,7 @@ export const discoverProjectMetadata = async (
   });
   const project: ProjectMetadataV1 = {
     schemaVersion: 1,
-    discoveredAt:
-      store.projects.find((entry) => entry.localProjectId === localProjectId)
-        ?.discoveredAt ?? now,
+    discoveredAt: previousProject?.discoveredAt ?? now,
     lastSeenAt: now,
     localProjectId,
     displayName,
@@ -313,7 +337,11 @@ export const discoverProjectMetadata = async (
       ? {
           git: {
             rootHash: hmacProjectValue(store.deviceSaltId, gitRoot),
+            commonDirHash: resolvedCommonDir
+              ? hmacProjectValue(store.deviceSaltId, resolvedCommonDir)
+              : null,
             remotes,
+            remoteAliases,
             branch,
             headCommit,
             isWorktree,

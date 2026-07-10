@@ -15,6 +15,11 @@ settings. Persisted Project discovery metadata is merged with captured memory
 activity locally, so a discovered Project can remain visible before its first
 captured session. Team Backend enrollment stays in setup/readiness; the main
 Projects flow remains Personal Memory-first and works without an upstream.
+Separate Git worktrees keep distinct local records while sharing a device-local
+Git common-directory signal. Current and historical network remote aliases are
+stored only as future matching evidence; Desktop does not yet combine Personal
+Memory from multiple devices or use those aliases to create Team Workspace
+links.
 
 ## Run
 
