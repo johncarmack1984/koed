@@ -552,24 +552,34 @@ remains a later integration on top of this durable seat lifecycle state.
    and repository read paths hydrate authorized graph, embedding, retrieval,
    LCM source content, and Memory Question payloads from encrypted companions
    after access checks.
-9. The Worker first selects live raw Projection rows. Historical rows have the
-   durable `historical_import_backfill` Projection class and are selected only
-   as one bounded batch when API readiness, queue, and Embedding Service probes
-   are healthy and configured live/interactive pressure thresholds are clear.
-   It yields after each batch and reevaluates after restart.
-10. The API and Worker schedule processing for newly projected Memory Events
-    through the configured work queue backend. Queue payloads hold only
-    identifiers plus one work class: interactive Recall/Memory Questions, live
-    Capture Projection, normal embedding/LCM, or historical import/backfill.
-11. The Worker derives missing embedding jobs and pending LCM compaction scopes
-    from PostgreSQL. Deterministic queue identities make reconciliation
-    idempotent, so queue admission failure or exhausted retries cannot
-    permanently strand work. Embedding reconciliation recognizes only complete
-    active chunk sets for the current source version, and LCM dispatch is
-    bounded per owner.
+9. Projection persists an identifier-only processing outbox before raw rows are
+   marked projected. API and Worker queue producers use deterministic job ids
+   and acknowledge each outbox row only after its policy-eligible embedding and
+   compaction jobs are admitted. Worker catch-up replays unacknowledged rows
+   after queue failures or restart. Queue payloads hold only identifiers plus
+   one work class: interactive Recall/Memory Questions, live Capture Projection,
+   normal embedding/LCM, or historical import/backfill.
+10. Direct API Projection selects only live rows. The Worker also selects live
+    rows first. Historical rows have the durable
+    `historical_import_backfill` Projection class and are selected only as one
+    bounded batch when API readiness, queue, and Embedding Service probes are
+    healthy and configured live/interactive pressure thresholds are clear.
+    Physical row/payload-byte limits and runtime checks apply at completed-turn
+    segment boundaries. A Postgres advisory lease permits one historical batch
+    across Worker processes. It yields after each batch and reevaluates after
+    restart.
+11. The Worker independently derives missing embedding jobs and pending LCM
+    compaction scopes from PostgreSQL. Deterministic queue identities make this
+    reconciliation idempotent, so outbox admission failure, exhausted retries,
+    or restart cannot permanently strand work. Embedding reconciliation accepts
+    only complete active chunk sets for the current source version, and LCM
+    dispatch is bounded per owner.
 12. The Worker consumes queued jobs from Redis/BullMQ or `local_work_queue`.
     Both backends use lower-number-first priority and FIFO within a class, so
-    live capture runs ahead of queued historical embedding/LCM work.
+    live capture runs ahead of queued historical embedding/LCM work. Schema
+    upgrades assign existing local jobs normal priority. Before BullMQ workers
+    start, Koed assigns the same normal priority to legacy waiting, paused, and
+    delayed jobs that have no stored priority.
 13. The Worker embeds Memory Events by calling the Embedding Service and
     atomically replaces the source's complete embedding chunk set.
 14. The Worker schedules compaction, creating or updating LCM Placeholder Memory

@@ -24,7 +24,8 @@ const createScheduler = () => {
         pendingMemoryEventIds: ["event-1"],
         dispatchKey: "lcm-dispatch-user-1"
       }
-    ])
+    ]),
+    markConversationProjectionProcessingDispatched: vi.fn().mockResolvedValue(1)
   };
   return { scheduler, embeddingQueue, compactionQueue, repository };
 };
@@ -128,5 +129,38 @@ describe("memory job scheduler", () => {
     expect(queuedPayloads).not.toContain("payload");
     expect(queuedPayloads).not.toContain("query");
     expect(queuedPayloads).not.toContain("answer");
+    expect(embeddingQueue.add.mock.calls.map((call) => call[2]?.jobId)).toEqual(
+      ["projection-embed-event-2", "projection-embed-event-3"]
+    );
+    expect(
+      compactionQueue.add.mock.calls.map((call) => call[2]?.jobId)
+    ).toEqual(["projection-compact-event-2"]);
+    expect(
+      repository.markConversationProjectionProcessingDispatched
+    ).toHaveBeenCalledWith(["event-2", "event-3"]);
+  });
+
+  it("leaves projected processing pending when queue admission fails", async () => {
+    const { scheduler, compactionQueue, repository } = createScheduler();
+    compactionQueue.add.mockRejectedValueOnce(new Error("queue degraded"));
+
+    const result = await scheduler.scheduleProjectedMemoryEventProcessing(
+      repository as never,
+      { userId: "user-3" },
+      [
+        {
+          eventId: "event-4",
+          visibility: "personal",
+          includeInEmbedding: true,
+          includeInLcm: true,
+          workClass: "historical_import_backfill"
+        }
+      ]
+    );
+
+    expect(result.compactions[0]).toMatchObject({ queued: false });
+    expect(
+      repository.markConversationProjectionProcessingDispatched
+    ).not.toHaveBeenCalled();
   });
 });

@@ -24,15 +24,11 @@ const emptyBacklog = {
   interactiveQuestionRows: 0
 };
 
-const projectionResult = (
-  memoryEventScopes: Array<{
-    eventId: string;
-    visibility: "personal";
-    includeInEmbedding: boolean;
-    includeInLcm: boolean;
-    workClass: "live_capture_projection" | "historical_import_backfill";
-  }>
-) => ({
+type MemoryEventScope = Awaited<
+  ReturnType<MemorySourceRepository["projectPendingConversationItems"]>
+>["memoryEventScopes"][number];
+
+const projectionResult = (memoryEventScopes: MemoryEventScope[]) => ({
   rawItemsScanned: memoryEventScopes.length,
   rawItemsProjected: memoryEventScopes.length,
   rawItemsWaitingForAgentSeal: 0,
@@ -69,9 +65,11 @@ const serviceOptions = (repository: MemorySourceRepository) => ({
   enqueueProjectedMemoryEventProcessing: vi.fn().mockResolvedValue({}),
   enqueueSourceEmbedding: vi.fn().mockResolvedValue({ id: 1 }),
   getHistoricalAdmissionHealth: vi.fn().mockResolvedValue(healthy),
+  recoverProjectedMemoryEventProcessing: vi.fn().mockResolvedValue(0),
   historicalImport: batchConfig,
   intervalMs: 1_000,
-  logger: logger() as never,
+  logger: logger() as ReturnType<typeof logger> &
+    Parameters<typeof createRawProjectionService>[0]["logger"],
   repository
 });
 
@@ -289,9 +287,13 @@ const createHistoricalRepository = () => ({
   listSemanticMemoryRebuildActors: vi.fn().mockResolvedValue([]),
   listPendingLcmDispatchScopes: vi.fn().mockResolvedValue([]),
   listSourcesNeedingEmbeddings: vi.fn().mockResolvedValue([]),
+  processDueSemanticMemoryRebuilds: vi.fn(),
   projectPendingConversationItems: vi.fn((_actor, input) =>
     Promise.resolve(historicalProjectionResult(input.workClass))
-  )
+  ),
+  tryAcquireHistoricalProjectionLease: vi.fn().mockResolvedValue({
+    release: vi.fn().mockResolvedValue(undefined)
+  })
 });
 
 const createHistoricalService = (
@@ -323,6 +325,11 @@ describe("raw Projection historical priority", () => {
       2,
       { userId: "historical-user" },
       expect.objectContaining({ workClass: "historical_import_backfill" })
+    );
+    expect(
+      options.enqueueProjectedMemoryEventProcessing.mock.invocationCallOrder[0]
+    ).toBeLessThan(
+      options.recoverProjectedMemoryEventProcessing.mock.invocationCallOrder[0]!
     );
     expect(options.enqueueProjectedMemoryEventProcessing.mock.calls).toEqual([
       [
@@ -386,6 +393,60 @@ describe("raw Projection historical priority", () => {
       }),
       "historical import admission evaluated"
     );
+  });
+
+  it("honors cross-process historical Projection lease", async () => {
+    const repository = createHistoricalRepository();
+    repository.tryAcquireHistoricalProjectionLease.mockResolvedValueOnce(null);
+    const { service, options } = createHistoricalService(repository);
+
+    await service.run();
+
+    expect(
+      repository.projectPendingConversationItems.mock.calls.filter(
+        ([, input]) => input.workClass === "historical_import_backfill"
+      )
+    ).toHaveLength(0);
+    expect(options.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        historicalImport: expect.objectContaining({
+          admitted: false,
+          reason: "concurrency_cap"
+        })
+      }),
+      "historical import admission evaluated"
+    );
+  });
+
+  it("waits for active Projection before shutdown closes dependencies", async () => {
+    const repository = createHistoricalRepository();
+    const projectionGate: {
+      resolve(value: ReturnType<typeof historicalProjectionResult>): void;
+    } = { resolve: () => undefined };
+    repository.projectPendingConversationItems.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          projectionGate.resolve = resolve;
+        })
+    );
+    const { service } = createHistoricalService(repository);
+
+    const running = service.run();
+    await vi.waitFor(() =>
+      expect(repository.projectPendingConversationItems).toHaveBeenCalled()
+    );
+    let stopped = false;
+    const stopping = service.stop().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    projectionGate.resolve(
+      historicalProjectionResult("live_capture_projection")
+    );
+    await Promise.all([running, stopping]);
+    expect(stopped).toBe(true);
   });
 
   it("resumes after pressure clears on new worker instance", async () => {

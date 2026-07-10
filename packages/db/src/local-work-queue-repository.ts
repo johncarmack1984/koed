@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
+import { defaultKoedQueuePriority } from "@koed/shared";
 
 export type LocalWorkQueueStatus =
   | "pending"
@@ -90,7 +91,10 @@ export const createLocalWorkQueueRepository = (
 ): LocalWorkQueueRepository => ({
   async enqueue(input) {
     const maxAttempts = toPositiveInteger(input.maxAttempts, 1);
-    const priority = toNonNegativeInteger(input.priority, 0);
+    const priority = toNonNegativeInteger(
+      input.priority,
+      defaultKoedQueuePriority
+    );
     const backoffMs = input.backoffMs ?? null;
     const delayMs = toNonNegativeInteger(input.delayMs, 0);
     const result = await pool.query<{ id: string }>(

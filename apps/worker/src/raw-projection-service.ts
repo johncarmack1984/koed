@@ -26,6 +26,11 @@ interface HistoricalAdmissionHealth {
   queueHealthy: boolean;
 }
 
+interface HistoricalBatchResult {
+  decision: HistoricalAdmissionDecision;
+  report: ProjectionReport;
+}
+
 export interface RawProjectionServiceConfig {
   actorLimit: number;
   batchLimit: number;
@@ -49,6 +54,7 @@ export interface RawProjectionServiceConfig {
     workClass?: KoedWorkClass
   ): Promise<unknown>;
   getHistoricalAdmissionHealth(): Promise<HistoricalAdmissionHealth>;
+  recoverProjectedMemoryEventProcessing(): Promise<number>;
   historicalImport: HistoricalImportBatchConfig;
   intervalMs: number;
   logger: Logger;
@@ -58,7 +64,7 @@ export interface RawProjectionServiceConfig {
 export interface RawProjectionService {
   run(): Promise<void>;
   start(): void;
-  stop(): void;
+  stop(): Promise<void>;
 }
 
 const emptyProjectionReport = (): ProjectionReport => ({
@@ -241,13 +247,20 @@ const runHistoricalBatch = async (
   decision: HistoricalAdmissionDecision,
   start: () => void,
   finish: () => void
-): Promise<ProjectionReport> => {
+): Promise<HistoricalBatchResult> => {
   if (!decision.admitted) {
-    return emptyProjectionReport();
+    return { decision, report: emptyProjectionReport() };
+  }
+  const lease = await config.repository.tryAcquireHistoricalProjectionLease();
+  if (!lease) {
+    return {
+      decision: { admitted: false, reason: "concurrency_cap" },
+      report: emptyProjectionReport()
+    };
   }
   start();
   try {
-    return await projectActors(
+    const report = await projectActors(
       config,
       "historical_import_backfill",
       {
@@ -257,8 +270,10 @@ const runHistoricalBatch = async (
       },
       config.historicalImport.maxConcurrency
     );
+    return { decision, report };
   } finally {
     finish();
+    await lease.release();
   }
 };
 
@@ -308,7 +323,8 @@ const createRawProjectionServiceHandle = (
   run: () => Promise<void>,
   intervalMs: number,
   getTimer: () => ReturnType<typeof setInterval> | null,
-  setTimer: (timer: ReturnType<typeof setInterval> | null) => void
+  setTimer: (timer: ReturnType<typeof setInterval> | null) => void,
+  getCurrentRun: () => Promise<void> | null
 ): RawProjectionService => ({
   run,
   start() {
@@ -318,28 +334,24 @@ const createRawProjectionServiceHandle = (
     setTimer(setInterval(() => void run(), intervalMs));
     void run();
   },
-  stop() {
+  async stop() {
     const timer = getTimer();
-    if (!timer) {
-      return;
+    if (timer) {
+      clearInterval(timer);
+      setTimer(null);
     }
-    clearInterval(timer);
-    setTimer(null);
+    await getCurrentRun();
   }
 });
 
 export const createRawProjectionService = (
   config: RawProjectionServiceConfig
 ): RawProjectionService => {
-  let running = false;
+  let currentRun: Promise<void> | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   let activeHistoricalBatches = 0;
 
-  const run = async () => {
-    if (running) {
-      return;
-    }
-    running = true;
+  const runOnce = async () => {
     try {
       const live = await projectActors(
         config,
@@ -347,6 +359,7 @@ export const createRawProjectionService = (
         { limit: config.batchLimit },
         config.actorLimit
       );
+      await config.recoverProjectedMemoryEventProcessing();
       const backlog =
         await config.repository.getConversationProjectionBacklog();
       const health = await config.getHistoricalAdmissionHealth();
@@ -367,8 +380,13 @@ export const createRawProjectionService = (
       const rebuild = await processRebuildActors(config);
       await reconcileEmbeddingJobs(config);
       await reconcileLcmCompactionJobs(config);
-      logHistoricalDecision(config.logger, decision, backlog, historical);
-      logProjectionReport(config.logger, live, historical);
+      logHistoricalDecision(
+        config.logger,
+        historical.decision,
+        backlog,
+        historical.report
+      );
+      logProjectionReport(config.logger, live, historical.report);
       logRebuildReport(config.logger, rebuild);
     } catch (error) {
       config.logger.warn(
@@ -381,9 +399,16 @@ export const createRawProjectionService = (
         },
         "raw conversation projection catch-up failed"
       );
-    } finally {
-      running = false;
     }
+  };
+
+  const run = (): Promise<void> => {
+    if (!currentRun) {
+      currentRun = runOnce().finally(() => {
+        currentRun = null;
+      });
+    }
+    return currentRun;
   };
 
   return createRawProjectionServiceHandle(
@@ -392,6 +417,7 @@ export const createRawProjectionService = (
     () => timer,
     (value) => {
       timer = value;
-    }
+    },
+    () => currentRun
   );
 };

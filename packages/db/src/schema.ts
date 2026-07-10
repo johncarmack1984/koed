@@ -3265,6 +3265,37 @@ export const workflowTokenUsageSourceReferences = pgTable(
   ]
 );
 
+export const conversationProjectionProcessingOutbox = pgTable(
+  "conversation_projection_processing_outbox",
+  {
+    eventId: uuid("event_id")
+      .primaryKey()
+      .references(() => memoryEvents.id, { onDelete: "cascade" }),
+    ownerUserId: uuid("owner_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    visibility: visibilityScope("visibility").notNull(),
+    workClass: text("work_class").notNull(),
+    includeInEmbedding: boolean("include_in_embedding").notNull(),
+    includeInLcm: boolean("include_in_lcm").notNull(),
+    createdAt: now(),
+    dispatchedAt: timestamp("dispatched_at", { withTimezone: true })
+  },
+  (table) => [
+    index("conversation_projection_processing_outbox_pending_idx")
+      .on(table.workClass, table.createdAt, table.eventId)
+      .where(sql`${table.dispatchedAt} is null`),
+    check(
+      "conversation_projection_processing_outbox_owner_check",
+      sql`${table.visibility} = 'personal' and ${table.ownerUserId} is not null`
+    ),
+    check(
+      "conversation_projection_processing_outbox_work_class_check",
+      sql`${table.workClass} in ('live_capture_projection', 'normal_embedding_lcm', 'historical_import_backfill')`
+    )
+  ]
+);
+
 export const localWorkQueue = pgTable(
   "local_work_queue",
   {
@@ -3275,7 +3306,7 @@ export const localWorkQueue = pgTable(
     data: jsonb("data")
       .notNull()
       .default(sql`'{}'::jsonb`),
-    priority: integer("priority").notNull().default(0),
+    priority: integer("priority").notNull().default(10),
     status: text("status").notNull().default("pending"),
     attemptCount: integer("attempt_count").notNull().default(0),
     maxAttempts: integer("max_attempts").notNull().default(1),

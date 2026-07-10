@@ -67,7 +67,8 @@ export const createMemoryJobScheduler = ({
   const enqueueEmbedding = async (
     sourceType: EmbeddingSourceType,
     sourceId: string,
-    workClass: KoedWorkClass = "normal_embedding_lcm"
+    workClass: KoedWorkClass = "normal_embedding_lcm",
+    jobId?: string
   ): Promise<MemoryJobStatus> => {
     if (!embeddingQueue) {
       log.warn(
@@ -98,11 +99,9 @@ export const createMemoryJobScheduler = ({
             backoff: { type: "exponential", delay: 10_000 },
             removeOnComplete: 1000,
             removeOnFail: true,
-            jobId: embeddingQueueJobId(
-              embeddingDispatchKey,
-              sourceType,
-              sourceId
-            )
+            jobId:
+              jobId ??
+              embeddingQueueJobId(embeddingDispatchKey, sourceType, sourceId)
           }
         ),
         750,
@@ -129,7 +128,8 @@ export const createMemoryJobScheduler = ({
     repo: MemorySourceRepository,
     requesterContext: { userId: string },
     visibility: Visibility,
-    workClass: KoedWorkClass = "normal_embedding_lcm"
+    workClass: KoedWorkClass = "normal_embedding_lcm",
+    jobId?: string
   ): Promise<MemoryJobStatus> => {
     if (runMemoryJobsInlineForTests) {
       const compaction = await runCompactionInline(
@@ -181,11 +181,13 @@ export const createMemoryJobScheduler = ({
             backoff: { type: "exponential", delay: 10_000 },
             removeOnComplete: 1000,
             removeOnFail: true,
-            jobId: lcmCompactionQueueJobId(
-              requesterContext.userId,
-              visibility,
-              dispatchScope.dispatchKey
-            )
+            jobId:
+              jobId ??
+              lcmCompactionQueueJobId(
+                requesterContext.userId,
+                visibility,
+                dispatchScope.dispatchKey
+              )
           }
         ),
         750,
@@ -228,6 +230,35 @@ export const createMemoryJobScheduler = ({
     return { embedding, compaction };
   };
 
+  const projectedCompactionScopes = (
+    scopes: Array<{
+      eventId: string;
+      visibility: Visibility;
+      includeInLcm: boolean;
+      workClass: KoedWorkClass;
+    }>
+  ) => {
+    const groups = new Map<
+      string,
+      {
+        eventIds: string[];
+        visibility: Visibility;
+        workClass: KoedWorkClass;
+      }
+    >();
+    for (const scope of scopes.filter((scope) => scope.includeInLcm)) {
+      const key = `${scope.visibility}:${scope.workClass}`;
+      const group = groups.get(key) ?? {
+        eventIds: [],
+        visibility: scope.visibility,
+        workClass: scope.workClass
+      };
+      group.eventIds.push(scope.eventId);
+      groups.set(key, group);
+    }
+    return [...groups.values()];
+  };
+
   const scheduleProjectedMemoryEventProcessing = async (
     repo: MemorySourceRepository,
     requesterContext: { userId: string },
@@ -243,40 +274,33 @@ export const createMemoryJobScheduler = ({
       scopes
         .filter((scope) => scope.includeInEmbedding)
         .map((scope) =>
-          enqueueEmbedding("memory_event", scope.eventId, scope.workClass)
+          enqueueEmbedding(
+            "memory_event",
+            scope.eventId,
+            scope.workClass,
+            `projection-embed-${scope.eventId}`
+          )
         )
     );
-    const scopeMap = new Map<
-      string,
-      { visibility: Visibility; workClass: KoedWorkClass }
-    >();
-    for (const scope of scopes) {
-      if (!scope.includeInLcm) {
-        continue;
-      }
-      const current = scopeMap.get(scope.visibility);
-      if (
-        !current ||
-        workClassPriority(scope.workClass) <
-          workClassPriority(current.workClass)
-      ) {
-        scopeMap.set(scope.visibility, {
-          visibility: scope.visibility,
-          workClass: scope.workClass
-        });
-      }
-    }
     const compactions = await Promise.all(
-      [...scopeMap.values()].map((scope) =>
+      projectedCompactionScopes(scopes).map((scope) =>
         enqueueCompaction(
           repo,
           requesterContext,
           scope.visibility,
-          scope.workClass
+          scope.workClass,
+          `projection-compact-${[...scope.eventIds].sort()[0]}`
         )
       )
     );
-
+    const admitted = [...embeddings, ...compactions].every(
+      (job) => job.queued || job.inline
+    );
+    if (admitted && scopes.length > 0) {
+      await repo.markConversationProjectionProcessingDispatched(
+        scopes.map((scope) => scope.eventId)
+      );
+    }
     return { embeddings, compactions };
   };
 

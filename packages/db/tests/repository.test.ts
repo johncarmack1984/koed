@@ -13337,6 +13337,18 @@ describeDb("memory repository visibility", () => {
     if (!replacementEventId) {
       throw new Error("Expected replacement semantic Memory Event");
     }
+    const rebuildOutbox = await pool.query<{
+      work_class: string;
+      dispatched_at: Date | null;
+    }>(
+      `select work_class, dispatched_at
+       from conversation_projection_processing_outbox
+       where event_id = $1`,
+      [replacementEventId]
+    );
+    expect(rebuildOutbox.rows).toEqual([
+      { work_class: "normal_embedding_lcm", dispatched_at: null }
+    ]);
     const rebuiltEvents = await pool.query<{
       id: string;
       content: string;
@@ -19658,6 +19670,633 @@ describeDb("memory repository visibility", () => {
     }
   }, 15_000);
 
+  it("counts every physical transport chunk against historical row and byte caps", async () => {
+    const alice = await repo.createUser({
+      email: `alice-historical-chunk-caps-${randomUUID()}@example.com`
+    });
+    const session = await repo.createCapturedSession(
+      { userId: alice.id },
+      {
+        externalSessionId: `historical-chunk-caps-${randomUUID()}`,
+        sourceRuntime: "codex",
+        idempotencyKey: `historical-chunk-caps-${randomUUID()}`
+      }
+    );
+    const logicalSourceId = `historical-chunks-${randomUUID()}`;
+    const text = "Historical chunk accounting sentinel.";
+    const envelope = JSON.stringify({
+      rawJson: {
+        method: "item/completed",
+        params: { item: { type: "userMessage", text } }
+      },
+      rawText: text
+    });
+    const midpoint = Math.floor(envelope.length / 2);
+    const chunks = [envelope.slice(0, midpoint), envelope.slice(midpoint)];
+    await repo.createConversationItems(
+      { userId: alice.id },
+      {
+        items: [
+          ...chunks.map((chunk, index) => ({
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-app-server-v1",
+            sourceTransport: "app_server",
+            externalTurnId: "chunked-turn",
+            sourceRecordType: "app_server_notification",
+            sourceEventType: "item/completed",
+            sourceSequence: index,
+            rawJson: {
+              transportChunk: true,
+              sourceItemHash: logicalSourceId,
+              chunkIndex: index,
+              chunkCount: chunks.length
+            },
+            logicalSourceId,
+            transportChunkIndex: index,
+            transportChunkCount: chunks.length,
+            transportChunkText: chunk,
+            transportChunkEncoding: "conversation-item-json-v1",
+            sourceHash: `${logicalSourceId}-${index}`,
+            idempotencyKey: `${logicalSourceId}-${index}`,
+            metadata: { transcriptType: "user_message" }
+          })),
+          {
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-app-server-v1",
+            sourceTransport: "app_server",
+            externalTurnId: "later-turn",
+            sourceRecordType: "app_server_notification",
+            sourceEventType: "item/completed",
+            sourceSequence: 2,
+            rawJson: {
+              method: "item/completed",
+              params: { item: { type: "userMessage", text: "Later item" } }
+            },
+            rawText: "Later item",
+            sourceHash: `later-${randomUUID()}`,
+            idempotencyKey: `later-${randomUUID()}`,
+            metadata: { transcriptType: "user_message" }
+          }
+        ]
+      }
+    );
+    await pool.query(
+      "update conversation_items set projection_work_class = 'historical_import_backfill'"
+    );
+    const physicalBytes = await pool.query<{ bytes: string }>(
+      `select sum(octet_length(raw_json::text) + octet_length(coalesce(raw_text, '')) + octet_length(coalesce(transport_chunk_text, '')))::text as bytes
+       from conversation_items where logical_source_id = $1`,
+      [logicalSourceId]
+    );
+
+    const projection = await repo.projectPendingConversationItems(
+      { userId: alice.id },
+      {
+        workClass: "historical_import_backfill",
+        limit: 2
+      }
+    );
+    const statuses = await pool.query<{ projection_status: string }>(
+      "select projection_status from conversation_items order by source_sequence"
+    );
+
+    expect(projection.rawItemsProjected).toBe(2);
+    expect(statuses.rows.map((row) => row.projection_status)).toEqual([
+      "projected",
+      "projected",
+      "pending"
+    ]);
+
+    await pool.query(
+      `update conversation_items
+       set projection_status = 'pending', projection_version = null,
+         projected_at = null`
+    );
+    const byteCappedProjection = await repo.projectPendingConversationItems(
+      { userId: alice.id },
+      {
+        workClass: "historical_import_backfill",
+        limit: 100,
+        maxBytes: Number(physicalBytes.rows[0]?.bytes)
+      }
+    );
+    const byteCappedStatuses = await pool.query<{
+      projection_status: string;
+    }>(
+      "select projection_status from conversation_items order by source_sequence"
+    );
+
+    expect(byteCappedProjection.rawItemsProjected).toBe(2);
+    expect(byteCappedStatuses.rows.map((row) => row.projection_status)).toEqual(
+      ["projected", "projected", "pending"]
+    );
+  });
+
+  it("admits an oversized first atomic unit under each soft cap", async () => {
+    const alice = await repo.createUser({
+      email: `alice-oversized-first-${randomUUID()}@example.com`
+    });
+    const session = await repo.createCapturedSession(
+      { userId: alice.id },
+      {
+        externalSessionId: `oversized-first-${randomUUID()}`,
+        sourceRuntime: "codex",
+        idempotencyKey: `oversized-first-${randomUUID()}`
+      }
+    );
+    await repo.createConversationItems(
+      { userId: alice.id },
+      {
+        items: ["oversized-first-content", "later-content"].map(
+          (text, index) => ({
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-app-server-v1",
+            sourceTransport: "app_server",
+            externalTurnId: `turn-${index}`,
+            sourceRecordType: "app_server_notification",
+            sourceEventType: "item/completed",
+            sourceSequence: index,
+            rawJson: {
+              method: "item/completed",
+              params: { item: { type: "userMessage", text } }
+            },
+            rawText: text,
+            sourceHash: `oversized-${index}-${randomUUID()}`,
+            idempotencyKey: `oversized-${index}-${randomUUID()}`,
+            metadata: { transcriptType: "user_message" }
+          })
+        )
+      }
+    );
+    await pool.query(
+      "update conversation_items set projection_work_class = 'historical_import_backfill'"
+    );
+
+    const projection = await repo.projectPendingConversationItems(
+      { userId: alice.id },
+      { workClass: "historical_import_backfill", limit: 1 }
+    );
+    const rowCappedStatuses = await pool.query<{ projection_status: string }>(
+      "select projection_status from conversation_items order by source_sequence"
+    );
+
+    expect(projection.rawItemsProjected).toBe(1);
+    expect(rowCappedStatuses.rows.map((row) => row.projection_status)).toEqual([
+      "projected",
+      "pending"
+    ]);
+
+    await pool.query(
+      `update conversation_items
+       set projection_status = 'pending', projection_version = null,
+         projected_at = null`
+    );
+    const byteCappedProjection = await repo.projectPendingConversationItems(
+      { userId: alice.id },
+      {
+        workClass: "historical_import_backfill",
+        limit: 100,
+        maxBytes: 1
+      }
+    );
+    const byteCappedStatuses = await pool.query<{
+      projection_status: string;
+    }>(
+      "select projection_status from conversation_items order by source_sequence"
+    );
+
+    expect(byteCappedProjection.rawItemsProjected).toBe(1);
+    expect(byteCappedStatuses.rows.map((row) => row.projection_status)).toEqual(
+      ["projected", "pending"]
+    );
+  });
+
+  it("checks runtime only before later atomic admission units", async () => {
+    const alice = await repo.createUser({
+      email: `alice-runtime-units-${randomUUID()}@example.com`
+    });
+    const session = await repo.createCapturedSession(
+      { userId: alice.id },
+      {
+        externalSessionId: `runtime-units-${randomUUID()}`,
+        sourceRuntime: "codex",
+        idempotencyKey: `runtime-units-${randomUUID()}`
+      }
+    );
+    await repo.createConversationItems(
+      { userId: alice.id },
+      {
+        items: ["first runtime unit", "second runtime unit"].map(
+          (text, index) => ({
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-app-server-v1",
+            sourceTransport: "app_server",
+            externalTurnId: `runtime-turn-${index}`,
+            sourceRecordType: "app_server_notification",
+            sourceEventType: "item/completed",
+            sourceSequence: index,
+            rawJson: {
+              method: "item/completed",
+              params: { item: { type: "userMessage", text } }
+            },
+            rawText: text,
+            sourceHash: `runtime-${index}-${randomUUID()}`,
+            idempotencyKey: `runtime-${index}-${randomUUID()}`,
+            metadata: { transcriptType: "user_message" }
+          })
+        )
+      }
+    );
+    const now = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(100)
+      .mockReturnValue(102);
+
+    const projection = await repo.projectPendingConversationItems(
+      { userId: alice.id },
+      { limit: 10, maxRuntimeMs: 1 }
+    );
+    now.mockRestore();
+    const statuses = await pool.query<{ projection_status: string }>(
+      "select projection_status from conversation_items order by source_sequence"
+    );
+
+    expect(projection.rawItemsProjected).toBe(1);
+    expect(statuses.rows.map((row) => row.projection_status)).toEqual([
+      "projected",
+      "pending"
+    ]);
+  });
+
+  it("admits and completes a Stop scope atomically before considering runtime", async () => {
+    const alice = await repo.createUser({
+      email: `alice-stop-atomic-${randomUUID()}@example.com`
+    });
+    const session = await repo.createCapturedSession(
+      { userId: alice.id },
+      {
+        externalSessionId: `stop-atomic-${randomUUID()}`,
+        sourceRuntime: "codex",
+        idempotencyKey: `stop-atomic-${randomUUID()}`
+      }
+    );
+    const item = (turn: string, sequence: number, stop = false) => ({
+      sessionId: session.id,
+      sourceKind: "codex",
+      sourceAdapterVersion: stop ? "codex-hook-v1" : "codex-app-server-v1",
+      sourceTransport: stop ? "hook" : "app_server",
+      externalThreadId: session.externalSessionId ?? undefined,
+      externalTurnId: turn,
+      sourceRecordType: stop ? "hook_payload" : "app_server_notification",
+      sourceEventType: stop ? "Stop" : "item/completed",
+      sourceSequence: sequence,
+      rawJson: stop
+        ? { hook_event_name: "Stop", turn_id: turn }
+        : {
+            method: "item/completed",
+            params: { item: { type: "agentMessage", text: `Agent ${turn}` } }
+          },
+      rawText: stop ? undefined : `Agent ${turn}`,
+      sourceHash: `atomic-${sequence}-${randomUUID()}`,
+      idempotencyKey: `atomic-${sequence}-${randomUUID()}`,
+      metadata: stop
+        ? { hookEventName: "Stop" }
+        : { transcriptType: "agent_message" }
+    });
+    await repo.createConversationItems(
+      { userId: alice.id },
+      { items: [item("turn-1", 0), item("turn-2", 1), item("turn-2", 2, true)] }
+    );
+    await pool.query(
+      "update conversation_items set projection_work_class = 'historical_import_backfill'"
+    );
+
+    const projection = await repo.projectPendingConversationItems(
+      { userId: alice.id },
+      {
+        workClass: "historical_import_backfill",
+        limit: 1,
+        maxBytes: 1,
+        maxRuntimeMs: 1
+      }
+    );
+    const statuses = await pool.query<{ projection_status: string }>(
+      "select projection_status from conversation_items order by source_sequence"
+    );
+
+    expect(projection.rawItemsProjected).toBe(3);
+    expect(projection.memoryEventsCreated).toBe(2);
+    expect(statuses.rows.map((row) => row.projection_status)).toEqual([
+      "projected",
+      "projected",
+      "projected"
+    ]);
+  });
+
+  it("keeps successive completed turns in separate bounded units", async () => {
+    const alice = await repo.createUser({
+      email: `alice-bounded-stop-segments-${randomUUID()}@example.com`
+    });
+    const session = await repo.createCapturedSession(
+      { userId: alice.id },
+      {
+        externalSessionId: `bounded-stop-segments-${randomUUID()}`,
+        sourceRuntime: "codex",
+        idempotencyKey: `bounded-stop-segments-${randomUUID()}`
+      }
+    );
+    const items = [0, 1].flatMap((turnIndex) => [
+      {
+        sessionId: session.id,
+        sourceKind: "codex",
+        sourceAdapterVersion: "codex-app-server-v1",
+        sourceTransport: "historical_import",
+        externalThreadId: session.externalSessionId ?? undefined,
+        externalTurnId: `bounded-turn-${turnIndex}`,
+        sourceRecordType: "app_server_notification",
+        sourceEventType: "item/completed",
+        sourceSequence: turnIndex * 2,
+        rawJson: {
+          method: "item/completed",
+          params: {
+            item: { type: "agentMessage", text: `Agent turn ${turnIndex}` }
+          }
+        },
+        rawText: `Agent turn ${turnIndex}`,
+        sourceHash: `bounded-agent-${turnIndex}-${randomUUID()}`,
+        idempotencyKey: `bounded-agent-${turnIndex}-${randomUUID()}`,
+        metadata: { transcriptType: "agent_message" }
+      },
+      {
+        sessionId: session.id,
+        sourceKind: "codex",
+        sourceAdapterVersion: "codex-hook-v1",
+        sourceTransport: "historical_import",
+        externalThreadId: session.externalSessionId ?? undefined,
+        externalTurnId: `bounded-turn-${turnIndex}`,
+        sourceRecordType: "hook_payload",
+        sourceEventType: "Stop",
+        sourceSequence: turnIndex * 2 + 1,
+        rawJson: { hook_event_name: "Stop" },
+        sourceHash: `bounded-stop-${turnIndex}-${randomUUID()}`,
+        idempotencyKey: `bounded-stop-${turnIndex}-${randomUUID()}`,
+        metadata: { hookEventName: "Stop" }
+      }
+    ]);
+    await repo.createConversationItems({ userId: alice.id }, { items });
+
+    const projection = await repo.projectPendingConversationItems(
+      { userId: alice.id },
+      { workClass: "historical_import_backfill", limit: 2 }
+    );
+    const statuses = await pool.query<{ projection_status: string }>(
+      "select projection_status from conversation_items order by source_sequence"
+    );
+
+    expect(projection.rawItemsProjected).toBe(2);
+    expect(statuses.rows.map((row) => row.projection_status)).toEqual([
+      "projected",
+      "projected",
+      "pending",
+      "pending"
+    ]);
+  });
+
+  it("persists Projection processing until queue dispatch is acknowledged", async () => {
+    const alice = await repo.createUser({
+      email: `alice-projection-outbox-${randomUUID()}@example.com`
+    });
+    const session = await repo.createCapturedSession(
+      { userId: alice.id },
+      {
+        externalSessionId: `projection-outbox-${randomUUID()}`,
+        sourceRuntime: "codex",
+        idempotencyKey: `projection-outbox-${randomUUID()}`
+      }
+    );
+    await repo.createConversationItems(
+      { userId: alice.id },
+      {
+        items: [
+          {
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-app-server-v1",
+            sourceTransport: "historical_import",
+            externalTurnId: "outbox-turn",
+            sourceRecordType: "app_server_notification",
+            sourceEventType: "item/completed",
+            rawJson: {
+              method: "item/completed",
+              params: { item: { type: "userMessage", text: "Durable outbox" } }
+            },
+            rawText: "Durable outbox",
+            sourceHash: `outbox-${randomUUID()}`,
+            idempotencyKey: `outbox-${randomUUID()}`,
+            metadata: { transcriptType: "user_message" }
+          }
+        ]
+      }
+    );
+
+    const projection = await repo.projectPendingConversationItems(
+      { userId: alice.id },
+      { workClass: "historical_import_backfill", limit: 10 }
+    );
+    const pending = await repo.listPendingConversationProjectionProcessing(10);
+
+    expect(pending).toEqual([
+      {
+        eventId: projection.memoryEventIds[0],
+        userId: alice.id,
+        visibility: "personal",
+        workClass: "historical_import_backfill",
+        includeInEmbedding: true,
+        includeInLcm: true
+      }
+    ]);
+    await expect(
+      repo.markConversationProjectionProcessingDispatched(
+        projection.memoryEventIds
+      )
+    ).resolves.toBe(1);
+    await expect(
+      repo.listPendingConversationProjectionProcessing(10)
+    ).resolves.toEqual([]);
+  });
+
+  it("serializes historical Projection batches with a database lease", async () => {
+    const first = await repo.tryAcquireHistoricalProjectionLease();
+    expect(first).not.toBeNull();
+    try {
+      await expect(
+        repo.tryAcquireHistoricalProjectionLease()
+      ).resolves.toBeNull();
+    } finally {
+      await first?.release();
+    }
+
+    const resumed = await repo.tryAcquireHistoricalProjectionLease();
+    expect(resumed).not.toBeNull();
+    await resumed?.release();
+    await resumed?.release();
+  });
+
+  it("promotes cross-transport duplicates to live Projection without later demotion", async () => {
+    const alice = await repo.createUser({
+      email: `alice-projection-class-merge-${randomUUID()}@example.com`
+    });
+    const session = await repo.createCapturedSession(
+      { userId: alice.id },
+      {
+        externalSessionId: `projection-class-merge-${randomUUID()}`,
+        sourceRuntime: "codex",
+        idempotencyKey: `projection-class-merge-${randomUUID()}`
+      }
+    );
+    const shared = {
+      sessionId: session.id,
+      sourceKind: "codex",
+      externalThreadId: session.externalSessionId ?? undefined,
+      externalTurnId: "projection-class-turn",
+      rawText: "Same record observed by import and live capture.",
+      metadata: { transcriptType: "user_message" }
+    };
+    const historicalItem = (suffix: string) => ({
+      ...shared,
+      sourceAdapterVersion: "codex-transcript-v1",
+      sourceTransport: "historical_import",
+      sourceRecordType: "event_msg",
+      sourceEventType: "user_message",
+      rawJson: {
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: "Same record observed by import and live capture."
+        }
+      },
+      sourceHash: `historical-${suffix}-${randomUUID()}`,
+      idempotencyKey: `historical-${suffix}-${randomUUID()}`
+    });
+    const [created] = await repo.createConversationItems(
+      { userId: alice.id },
+      { items: [historicalItem("first")] }
+    );
+    const projectionClass = async () =>
+      (
+        await pool.query<{ projection_work_class: string }>(
+          "select projection_work_class from conversation_items where id = $1",
+          [created!.id]
+        )
+      ).rows[0]?.projection_work_class;
+
+    await expect(projectionClass()).resolves.toBe("historical_import_backfill");
+    await repo.createConversationItems(
+      { userId: alice.id },
+      {
+        items: [
+          {
+            ...shared,
+            sourceAdapterVersion: "codex-transcript-v1",
+            sourceTransport: "hook",
+            sourceRecordType: "event_msg",
+            sourceEventType: "user_message",
+            rawJson: {
+              type: "event_msg",
+              payload: {
+                type: "user_message",
+                message: "Same record observed by import and live capture."
+              }
+            },
+            sourceHash: `live-${randomUUID()}`,
+            idempotencyKey: `live-${randomUUID()}`
+          }
+        ]
+      }
+    );
+    await expect(projectionClass()).resolves.toBe("live_capture_projection");
+
+    await repo.createConversationItems(
+      { userId: alice.id },
+      { items: [historicalItem("later")] }
+    );
+    await expect(projectionClass()).resolves.toBe("live_capture_projection");
+  });
+
+  it("does not expand an explicit non-Stop Projection request through a later Stop", async () => {
+    const alice = await repo.createUser({
+      email: `alice-explicit-projection-${randomUUID()}@example.com`
+    });
+    const session = await repo.createCapturedSession(
+      { userId: alice.id },
+      {
+        externalSessionId: `explicit-projection-${randomUUID()}`,
+        sourceRuntime: "codex",
+        idempotencyKey: `explicit-projection-${randomUUID()}`
+      }
+    );
+    const items = await repo.createConversationItems(
+      { userId: alice.id },
+      {
+        items: [
+          {
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-app-server-v1",
+            sourceTransport: "app_server",
+            externalThreadId: session.externalSessionId ?? undefined,
+            externalTurnId: "ordinary-turn",
+            sourceRecordType: "app_server_notification",
+            sourceEventType: "item/completed",
+            sourceSequence: 0,
+            rawJson: {
+              method: "item/completed",
+              params: { item: { type: "userMessage", text: "Only this row" } }
+            },
+            rawText: "Only this row",
+            sourceHash: `explicit-row-${randomUUID()}`,
+            idempotencyKey: `explicit-row-${randomUUID()}`,
+            metadata: { transcriptType: "user_message" }
+          },
+          {
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-hook-v1",
+            sourceTransport: "hook",
+            externalThreadId: session.externalSessionId ?? undefined,
+            externalTurnId: "later-turn",
+            sourceRecordType: "hook_payload",
+            sourceEventType: "Stop",
+            sourceSequence: 1,
+            rawJson: { hook_event_name: "Stop" },
+            sourceHash: `explicit-stop-${randomUUID()}`,
+            idempotencyKey: `explicit-stop-${randomUUID()}`,
+            metadata: { hookEventName: "Stop" }
+          }
+        ]
+      }
+    );
+
+    const projection = await repo.projectPendingConversationItems(
+      { userId: alice.id },
+      { conversationItemIds: [items[0]!.id], limit: 10 }
+    );
+    const statuses = await pool.query<{ projection_status: string }>(
+      "select projection_status from conversation_items order by source_sequence"
+    );
+
+    expect(projection.rawItemsScanned).toBe(1);
+    expect(projection.rawItemsProjected).toBe(1);
+    expect(statuses.rows.map((row) => row.projection_status)).toEqual([
+      "projected",
+      "pending"
+    ]);
+  });
+
   it("reconstructs oversized transport chunks before semantic projection", async () => {
     const alice = await repo.createUser({
       email: `alice-transport-chunks-${randomUUID()}@example.com`
@@ -20660,6 +21299,61 @@ describeDb("memory repository visibility", () => {
       threadName: "Manual Rename Wins",
       threadNameSource: "manual"
     });
+  });
+
+  it("excludes personally deleted rows and uses user id to break actor ties", async () => {
+    const users = await Promise.all([
+      repo.createUser({ email: `actor-a-${randomUUID()}@example.com` }),
+      repo.createUser({ email: `actor-b-${randomUUID()}@example.com` }),
+      repo.createUser({ email: `actor-deleted-${randomUUID()}@example.com` })
+    ]);
+    for (const [index, user] of users.entries()) {
+      const session = await repo.createCapturedSession(
+        { userId: user.id },
+        {
+          externalSessionId: `actor-session-${index}-${randomUUID()}`,
+          sourceRuntime: "codex",
+          idempotencyKey: `actor-session-${index}-${randomUUID()}`
+        }
+      );
+      await repo.createConversationItems(
+        { userId: user.id },
+        {
+          items: [
+            {
+              sessionId: session.id,
+              sourceKind: "codex",
+              sourceAdapterVersion: "codex-app-server-v1",
+              sourceTransport: "app_server",
+              externalTurnId: `actor-turn-${index}`,
+              sourceRecordType: "app_server_notification",
+              sourceEventType: "item/completed",
+              rawJson: { text: `actor ${index}` },
+              sourceHash: `actor-${index}-${randomUUID()}`,
+              idempotencyKey: `actor-${index}-${randomUUID()}`
+            }
+          ]
+        }
+      );
+    }
+    await pool.query(
+      `update conversation_items
+       set observed_at = '2026-01-01T00:00:00Z'
+       where owner_user_id = any($1::uuid[])`,
+      [users.map((user) => user.id)]
+    );
+    await pool.query(
+      "update conversation_items set personal_deleted_at = now() where owner_user_id = $1",
+      [users[2]!.id]
+    );
+
+    const actors = await repo.listConversationProjectionActors({ limit: 10 });
+    const expected = users
+      .slice(0, 2)
+      .map((user) => user.id)
+      .sort();
+
+    expect(actors.map((actor) => actor.userId)).toEqual(expected);
   });
 
   it("uses capture-hook subagent actors for generated title eligibility", async () => {

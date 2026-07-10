@@ -221,6 +221,9 @@ const workClassPriorities: Record<KoedWorkClass, number> = {
 export const workClassPriority = (workClass: KoedWorkClass): number =>
   workClassPriorities[workClass];
 
+export const defaultKoedQueuePriority =
+  workClassPriorities.normal_embedding_lcm;
+
 export const resolveKoedWorkClass = (
   value: unknown,
   fallback: KoedWorkClass = "normal_embedding_lcm"
