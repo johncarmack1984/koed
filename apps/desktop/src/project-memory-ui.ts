@@ -166,6 +166,16 @@ export const relativeTime = (
 export const sessionSelectionId = (thread: DesktopThreadGroup): string =>
   thread.sessionId ?? thread.id;
 
+export const projectIdForSession = (
+  projects: DesktopProjectGroup[],
+  selectedSessionId: string
+): string | null =>
+  projects.find((project) =>
+    project.threads.some(
+      (thread) => sessionSelectionId(thread) === selectedSessionId
+    )
+  )?.id ?? null;
+
 export const assignmentTargetProjects = (
   projects: DesktopProject[],
   currentProjectId?: string

@@ -3,6 +3,7 @@ import {
   assignmentTargetProjects,
   LatestRequestGate,
   mergeProjectSources,
+  projectIdForSession,
   projectIsActive,
   projectLatestAt,
   relativeTime,
@@ -104,6 +105,8 @@ describe("project memory UI view model", () => {
       relativeTime(thread.latestAt, Date.parse("2026-07-10T10:00:00Z"))
     ).toBe("2d ago");
     expect(sessionSelectionId(thread)).toBe("session-1");
+    expect(projectIdForSession([project], "session-1")).toBe("graph-koed");
+    expect(projectIdForSession([project], "missing-session")).toBeNull();
   });
 
   it("excludes Unassigned from manual move targets", () => {

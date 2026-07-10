@@ -12,6 +12,7 @@ import {
   assignmentTargetProjects,
   LatestRequestGate,
   mergeProjectSources,
+  projectIdForSession,
   projectIsActive,
   projectLatestAt,
   relativeTime,
@@ -39,6 +40,9 @@ const startupStepLabels = {
   integration: "Codex/MCP/Capture Hook",
   health: "Health checks"
 } as const;
+
+const PROJECT_ASSIGNMENT_REFRESH_ERROR =
+  "Project assignment saved, but Project list could not refresh. Koed will retry automatically.";
 
 const startupPhaseLabels = {
   status: "Checking local status",
@@ -2008,7 +2012,7 @@ const refreshExplorerCredential = async (): Promise<void> => {
   }
 };
 
-const refreshProjectGraph = async (): Promise<void> => {
+const refreshProjectGraph = async (): Promise<boolean> => {
   const requestRevision = projectGraphRequestGate.begin();
   if (!status?.api.url || !explorerApiToken) {
     if (projectGraph.length) {
@@ -2016,7 +2020,7 @@ const refreshProjectGraph = async (): Promise<void> => {
       projectGraphFingerprint = "";
       projectDataRevision += 1;
     }
-    return;
+    return false;
   }
   try {
     const response = await fetch(
@@ -2028,7 +2032,7 @@ const refreshProjectGraph = async (): Promise<void> => {
         }
       }
     );
-    const payload = (await response.json()) as {
+    const payload = (await response.json().catch(() => ({}))) as {
       projects?: DesktopProjectGroup[];
     };
     if (!response.ok) {
@@ -2038,7 +2042,7 @@ const refreshProjectGraph = async (): Promise<void> => {
           : `Project graph failed with HTTP ${response.status}`
       );
     }
-    if (!projectGraphRequestGate.isCurrent(requestRevision)) return;
+    if (!projectGraphRequestGate.isCurrent(requestRevision)) return false;
     const nextProjects = Array.isArray(payload.projects)
       ? payload.projects
       : [];
@@ -2046,19 +2050,30 @@ const refreshProjectGraph = async (): Promise<void> => {
     if (nextFingerprint !== projectGraphFingerprint) {
       projectGraph = nextProjects;
       projectGraphFingerprint = nextFingerprint;
+      if (selectedSessionId) {
+        selectedProjectId =
+          projectIdForSession(nextProjects, selectedSessionId) ??
+          selectedProjectId;
+      }
+      projectDataRevision += 1;
+    }
+    if (projectAssignmentError === PROJECT_ASSIGNMENT_REFRESH_ERROR) {
+      projectAssignmentError = "";
       projectDataRevision += 1;
     }
     if (projectGraphError) {
       projectGraphError = "";
       projectDataRevision += 1;
     }
+    return true;
   } catch (error) {
-    if (!projectGraphRequestGate.isCurrent(requestRevision)) return;
+    if (!projectGraphRequestGate.isCurrent(requestRevision)) return false;
     const message = error instanceof Error ? error.message : String(error);
     if (message !== projectGraphError) {
       projectGraphError = message;
       projectDataRevision += 1;
     }
+    return false;
   }
 };
 
@@ -2108,7 +2123,7 @@ const patchSessionProject = async (
       )
     }
   );
-  const payload = (await response.json()) as {
+  const payload = (await response.json().catch(() => ({}))) as {
     error?: unknown;
     session?: { project?: { id: string } | null };
   };
@@ -2142,14 +2157,17 @@ const updateSessionProject = async (
   projectAssignmentError = "";
   syncUI();
   try {
-    selectedProjectId = await patchSessionProject(
+    const nextProjectId = await patchSessionProject(
       status.api.url,
       explorerApiToken,
       session.sessionId,
       action,
       target
     );
-    await refreshProjectGraph();
+    const refreshed = await refreshProjectGraph();
+    if (!refreshed && selectedProjectId !== nextProjectId) {
+      projectAssignmentError = PROJECT_ASSIGNMENT_REFRESH_ERROR;
+    }
     projectDataRevision += 1;
   } catch (error) {
     projectAssignmentError =
