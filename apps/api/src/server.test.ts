@@ -2215,12 +2215,15 @@ const createFakeRepository = () => {
         id: existing?.id ?? id,
         ownerUserId: actor.userId,
         visibility: "personal",
-        externalSessionId: input.externalSessionId ?? null,
-        workspaceId: input.workspaceId ?? input.cwd ?? null,
-        sourceRuntime: input.sourceRuntime ?? "codex",
-        captureMethod: input.captureMethod ?? "mcp",
-        model: input.model ?? null,
-        cwd: input.cwd ?? null,
+        externalSessionId:
+          existing?.externalSessionId ?? input.externalSessionId ?? null,
+        workspaceId:
+          existing?.workspaceId ?? input.workspaceId ?? input.cwd ?? null,
+        sourceRuntime:
+          existing?.sourceRuntime ?? input.sourceRuntime ?? "codex",
+        captureMethod: existing?.captureMethod ?? input.captureMethod ?? "mcp",
+        model: existing?.model ?? input.model ?? null,
+        cwd: existing?.cwd ?? input.cwd ?? null,
         metadata: { ...existing?.metadata, ...input.metadata },
         capturedProjectProvenance: existing?.capturedProjectProvenance ?? {
           capturedCwd: input.cwd ?? null,
@@ -2401,8 +2404,10 @@ const createFakeRepository = () => {
             (session) =>
               session.ownerUserId === actor.userId &&
               session.visibility === "personal" &&
-              (session.project?.id === input.workspaceId ||
-                session.project?.path === input.workspaceId)
+              (session.workspaceId === input.workspaceId ||
+                session.cwd === input.workspaceId ||
+                session.metadata.workspaceId === input.workspaceId ||
+                session.metadata.projectPath === input.workspaceId)
           )
           .sort((left, right) =>
             right.createdAt.localeCompare(left.createdAt)
@@ -9635,6 +9640,16 @@ describe("account and access flows", () => {
         ]
       }
     });
+    const originalCaptureLookup = await app.inject({
+      method: "GET",
+      url: "/v1/sessions/latest?workspace_id=%2Fwork%2Fautomatic-a",
+      headers: captureHeaders
+    });
+    const organizationalLookup = await app.inject({
+      method: "GET",
+      url: "/v1/sessions/latest?workspace_id=project-b",
+      headers: captureHeaders
+    });
     const groupedAfterMove = await app.inject({
       method: "GET",
       url: "/v1/memory/graph/threads?projectId=project-b",
@@ -9711,6 +9726,11 @@ describe("account and access flows", () => {
         candidates: [{ id: "project-a" }]
       }
     });
+    expect(originalCaptureLookup.statusCode).toBe(200);
+    expect(jsonBody<SessionResponse>(originalCaptureLookup).session.id).toBe(
+      session.id
+    );
+    expect(organizationalLookup.statusCode).toBe(404);
     expect(
       jsonBody<GraphThreadIndexResponse>(groupedAfterMove).projects[0]
     ).toMatchObject({ id: "project-b", eventCount: 1 });

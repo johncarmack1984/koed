@@ -16073,6 +16073,14 @@ describeDb("memory repository visibility", () => {
         ]
       }
     );
+    const latestCapturedSession = await repo.getLatestCapturedSessionForProject(
+      { userId: alice.id },
+      { workspaceId: capturedWorkspaceId }
+    );
+    const organizationalLookup = await repo.getLatestCapturedSessionForProject(
+      { userId: alice.id },
+      { workspaceId: "project-manual" }
+    );
     await repo.createMemoryEvent(
       { userId: alice.id },
       {
@@ -16122,6 +16130,8 @@ describeDb("memory repository visibility", () => {
       projectAssignmentSource: "user_override",
       capturedProjectProvenance: capturedProvenance
     });
+    expect(latestCapturedSession?.id).toBe(session.id);
+    expect(organizationalLookup).toBeNull();
     expect(manualGraph[0]).toMatchObject({
       id: "project-manual",
       eventCount: 1,

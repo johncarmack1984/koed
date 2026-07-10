@@ -609,8 +609,10 @@ export const createCapturedSessionRepository = (
           and invalidated_at is null
           and personal_deleted_at is null
           and (
-            coalesce(project_override_id, automatic_project_id) = $2
-            or coalesce(project_override_path, automatic_project_path) = $2
+            workspace_id::text = $2
+            or cwd = $2
+            or metadata ->> 'workspaceId' = $2
+            or metadata ->> 'projectPath' = $2
           )
         order by created_at desc, id desc
         limit 1
