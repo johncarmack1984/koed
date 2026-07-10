@@ -17,6 +17,7 @@ describe("local work queue repository", () => {
         jobName: "embed-source",
         data: { sourceId: "event-1" },
         jobKey: "job-1",
+        priority: 20,
         maxAttempts: 5,
         backoffMs: 10_000,
         delayMs: 500
@@ -30,6 +31,7 @@ describe("local work queue repository", () => {
         "embed-source",
         "job-1",
         JSON.stringify({ sourceId: "event-1" }),
+        20,
         5,
         10_000,
         "500 milliseconds"
@@ -41,17 +43,18 @@ describe("local work queue repository", () => {
     expect(sql).toContain("then 'pending'");
   });
 
-  it("claims pending jobs with a lease token", async () => {
+  it("claims newer live work ahead of queued historical work", async () => {
     const pool = createPool();
     pool.query.mockResolvedValueOnce({
       rows: [
         {
           id: "7",
           queue_name: "lcm-compact",
-          job_name: "compact-scope",
-          data: { userId: "user-1" },
+          job_name: "compact-live-scope",
+          data: { userId: "user-1", workClass: "live_capture_projection" },
           attempt_count: 1,
           max_attempts: 5,
+          priority: 5,
           lock_token: "lock-1"
         }
       ]
@@ -66,10 +69,11 @@ describe("local work queue repository", () => {
     ).resolves.toEqual({
       id: 7,
       queueName: "lcm-compact",
-      jobName: "compact-scope",
-      data: { userId: "user-1" },
+      jobName: "compact-live-scope",
+      data: { userId: "user-1", workClass: "live_capture_projection" },
       attemptCount: 1,
       maxAttempts: 5,
+      priority: 5,
       lockToken: "lock-1"
     });
 
@@ -78,6 +82,7 @@ describe("local work queue repository", () => {
     expect(sql).toContain("expired_failed");
     expect(sql).toContain("attempt_count >= max_attempts");
     expect(sql).toContain("attempt_count < max_attempts");
+    expect(sql).toContain("order by priority asc, available_at asc, id asc");
     expect(pool.query).toHaveBeenCalledWith(expect.any(String), [
       "lcm-compact",
       expect.any(String),

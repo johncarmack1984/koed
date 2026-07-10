@@ -13,6 +13,7 @@ import {
   RAW_CONVERSATION_TRANSPORT_CHUNK_MAX_COUNT,
   rawConversationTransportChunkGroupId,
   sanitizeForPostgresStorage,
+  projectionWorkClassForSourceTransport,
   type EnvelopeEncryptionProvider
 } from "@koed/shared";
 import type {
@@ -1902,6 +1903,7 @@ export const createConversationItemRepository = (
           canonical_item_key,
           canonical_source_priority,
           projection_status,
+          projection_work_class,
           projection_version,
           projection_error,
           metadata
@@ -1910,7 +1912,7 @@ export const createConversationItemRepository = (
           $1, $2, $3, $4, $5, $6, $7, $8, $9,
           $10, $11, $12, $13, $14, $15, $16, $17, $18,
           $19, $20, $21, $22, $23, $24, $25, $26, $27, $28,
-          $29, $30, $31, $32, $33, $34, $35
+          $29, $30, $31, $32, $33, $34, $35, $36
         )
         on conflict (owner_user_id, canonical_item_key)
           where visibility = 'personal'
@@ -2098,6 +2100,11 @@ export const createConversationItemRepository = (
             then excluded.projection_status
             else conversation_items.projection_status
           end,
+          projection_work_class = case
+            when excluded.canonical_source_priority >= conversation_items.canonical_source_priority
+            then excluded.projection_work_class
+            else conversation_items.projection_work_class
+          end,
           projection_version = case
             when excluded.canonical_source_priority > conversation_items.canonical_source_priority
             then excluded.projection_version
@@ -2191,6 +2198,7 @@ export const createConversationItemRepository = (
           canonicalItemKey,
           canonicalSourcePriority,
           managedProjectionHold ? "held" : "pending",
+          projectionWorkClassForSourceTransport(item.sourceTransport),
           item.projectionVersion ?? null,
           item.projectionError ?? null,
           metadataForStorage

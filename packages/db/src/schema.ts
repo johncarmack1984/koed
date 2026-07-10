@@ -1930,6 +1930,9 @@ export const conversationItems = pgTable(
       .notNull()
       .default(0),
     projectionStatus: text("projection_status").notNull().default("pending"),
+    projectionWorkClass: text("projection_work_class")
+      .notNull()
+      .default("live_capture_projection"),
     projectionVersion: text("projection_version"),
     projectionPolicyRevision: bigint("projection_policy_revision", {
       mode: "number"
@@ -2003,6 +2006,7 @@ export const conversationItems = pgTable(
       .where(sql`${table.canonicalStableItemId} is not null`),
     index("conversation_items_projection_idx").on(
       table.projectionStatus,
+      table.projectionWorkClass,
       table.projectedAt,
       table.observedAt,
       table.id
@@ -2018,6 +2022,10 @@ export const conversationItems = pgTable(
     check(
       "conversation_items_personal_owner_check",
       sql`${table.visibility} = 'personal' and ${table.ownerUserId} is not null`
+    ),
+    check(
+      "conversation_items_projection_work_class_check",
+      sql`${table.projectionWorkClass} in ('live_capture_projection', 'historical_import_backfill')`
     ),
     check(
       "conversation_items_source_line_number_check",
@@ -3267,6 +3275,7 @@ export const localWorkQueue = pgTable(
     data: jsonb("data")
       .notNull()
       .default(sql`'{}'::jsonb`),
+    priority: integer("priority").notNull().default(0),
     status: text("status").notNull().default("pending"),
     attemptCount: integer("attempt_count").notNull().default(0),
     maxAttempts: integer("max_attempts").notNull().default(1),
@@ -3288,7 +3297,7 @@ export const localWorkQueue = pgTable(
       .on(table.queueName, table.jobKey)
       .where(sql`${table.jobKey} is not null`),
     index("local_work_queue_claim_idx")
-      .on(table.queueName, table.availableAt, table.id)
+      .on(table.queueName, table.priority, table.availableAt, table.id)
       .where(sql`${table.status} = 'pending'`),
     index("local_work_queue_active_lease_idx")
       .on(table.lockedUntil)
@@ -3297,6 +3306,7 @@ export const localWorkQueue = pgTable(
       "local_work_queue_status_check",
       sql`${table.status} in ('pending', 'active', 'completed', 'failed')`
     ),
+    check("local_work_queue_priority_check", sql`${table.priority} >= 0`),
     check(
       "local_work_queue_max_attempts_check",
       sql`${table.maxAttempts} >= 1`
