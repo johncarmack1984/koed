@@ -10,6 +10,7 @@ import {
   validateEnvelopeEncryptionProviderEnvironment,
   type KoedQueueBackend
 } from "@koed/shared";
+import type { HistoricalImportBatchConfig } from "./historical-admission.js";
 import {
   resolveWorkerLogDestinationConfig,
   resolveWorkerLogLevel,
@@ -29,6 +30,9 @@ export interface WorkerEnvConfig {
   rawProjectionIntervalMs: number;
   rawProjectionBatchLimit: number;
   rawProjectionActorLimit: number;
+  historicalImport: HistoricalImportBatchConfig;
+  historicalImportApiReadyUrl?: string;
+  historicalImportApiReadyTimeoutMs: number;
   logLevel: WorkerLogLevel;
   logDestination: WorkerLogDestinationConfig;
   nodeEnv: string;
@@ -55,6 +59,43 @@ const positiveIntEnv = (
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+const boundedIntEnv = (
+  environment: NodeJS.ProcessEnv,
+  name: string,
+  fallback: number,
+  min: number,
+  max: number
+): number => {
+  const value = environment[name];
+  if (value === undefined || value.trim() === "") {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${name} must be an integer from ${min} to ${max}`);
+  }
+  return parsed;
+};
+
+const optionalHttpUrl = (
+  environment: NodeJS.ProcessEnv,
+  name: string
+): string | undefined => {
+  const value = optionalEnv(environment[name]);
+  if (!value) {
+    return undefined;
+  }
+  const url = new URL(value);
+  if (
+    !["http:", "https:"].includes(url.protocol) ||
+    url.username ||
+    url.password
+  ) {
+    throw new Error(`${name} must be an HTTP(S) URL without credentials`);
+  }
+  return url.toString();
+};
+
 export const resolveWorkerEnv = (
   environment: NodeJS.ProcessEnv = process.env
 ): WorkerEnvConfig => {
@@ -63,6 +104,10 @@ export const resolveWorkerEnv = (
   const databaseUrl = optionalEnv(environment.DATABASE_URL);
   const embeddingServiceToken = optionalEnv(
     environment.EMBEDDING_SERVICE_TOKEN
+  );
+  const historicalImportApiReadyUrl = optionalHttpUrl(
+    environment,
+    "MEMORY_HISTORICAL_IMPORT_API_READY_URL"
   );
   const embeddingModel = resolveSupportedEmbeddingModelConfig(
     environment.EMBEDDING_MODEL
@@ -106,6 +151,58 @@ export const resolveWorkerEnv = (
       environment,
       "MEMORY_RAW_PROJECTION_ACTOR_LIMIT",
       10
+    ),
+    historicalImport: {
+      maxRows: boundedIntEnv(
+        environment,
+        "MEMORY_HISTORICAL_IMPORT_BATCH_ROWS",
+        100,
+        1,
+        1000
+      ),
+      maxBytes: boundedIntEnv(
+        environment,
+        "MEMORY_HISTORICAL_IMPORT_BATCH_BYTES",
+        1_000_000,
+        1,
+        10_000_000
+      ),
+      maxRuntimeMs: boundedIntEnv(
+        environment,
+        "MEMORY_HISTORICAL_IMPORT_BATCH_RUNTIME_MS",
+        15_000,
+        100,
+        60_000
+      ),
+      maxConcurrency: boundedIntEnv(
+        environment,
+        "MEMORY_HISTORICAL_IMPORT_CONCURRENCY",
+        1,
+        1,
+        1
+      ),
+      maxLiveProjectionRows: boundedIntEnv(
+        environment,
+        "MEMORY_HISTORICAL_IMPORT_LIVE_BACKLOG_MAX",
+        0,
+        0,
+        10_000
+      ),
+      maxInteractiveQuestionRows: boundedIntEnv(
+        environment,
+        "MEMORY_HISTORICAL_IMPORT_INTERACTIVE_BACKLOG_MAX",
+        0,
+        0,
+        10_000
+      )
+    },
+    ...(historicalImportApiReadyUrl ? { historicalImportApiReadyUrl } : {}),
+    historicalImportApiReadyTimeoutMs: boundedIntEnv(
+      environment,
+      "MEMORY_HISTORICAL_IMPORT_API_READY_TIMEOUT_MS",
+      1_000,
+      100,
+      10_000
     ),
     logLevel: resolveWorkerLogLevel(environment),
     logDestination: resolveWorkerLogDestinationConfig(environment),

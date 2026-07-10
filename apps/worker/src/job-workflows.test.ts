@@ -13,7 +13,8 @@ describe("worker job workflows", () => {
       embeddingJobData({ sourceType: "memory_event", sourceId: 123 })
     ).toEqual({
       sourceType: "memory_event",
-      sourceId: "123"
+      sourceId: "123",
+      workClass: "normal_embedding_lcm"
     });
   });
 

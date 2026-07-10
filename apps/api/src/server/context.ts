@@ -1,6 +1,6 @@
 import type { Visibility } from "@koed/core";
 import type { MemorySourceRepository } from "@koed/db";
-import type { EnvelopeEncryptionProvider } from "@koed/shared";
+import type { EnvelopeEncryptionProvider, KoedWorkClass } from "@koed/shared";
 import type { AuthHelpers } from "../auth/session.js";
 import type { CacheProvider } from "../infra/cache.js";
 import type { RateLimitHandler, RateLimitName } from "../infra/rate-limit.js";
@@ -44,6 +44,7 @@ export interface ApiRouteContext {
       scopes: Array<{
         eventId: string;
         visibility: Visibility;
+        workClass: KoedWorkClass;
       }>
     ): Promise<{
       embeddings: MemoryJobStatus[];

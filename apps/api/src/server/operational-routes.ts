@@ -290,6 +290,32 @@ const collectQueueCounts = async (
   }
 };
 
+const collectHistoricalImportStatus = async (
+  repository: MemorySourceRepository
+): Promise<OpsComponent> => {
+  try {
+    const backlog = await repository.getConversationProjectionBacklog();
+    return {
+      status: "ok",
+      details: {
+        diagnosticOnly: true,
+        pendingRows: backlog.historicalImportRows,
+        pendingBytes: backlog.historicalImportBytes,
+        liveProjectionRows: backlog.liveProjectionRows,
+        interactiveQuestionRows: backlog.interactiveQuestionRows
+      }
+    };
+  } catch {
+    return {
+      status: "ok",
+      details: {
+        diagnosticOnly: true,
+        availability: "unavailable"
+      }
+    };
+  }
+};
+
 const envelopeProviderStatusToOpsStatus = (
   status: EnvelopeEncryptionProviderStatus["status"]
 ): OpsComponentStatus => {
@@ -933,6 +959,7 @@ export const registerOperationalRoutes = (
 
     components.memoryEmbedQueue = await collectQueueCounts(embeddingQueue);
     components.lcmCompactQueue = await collectQueueCounts(compactionQueue);
+    components.historicalImport = await collectHistoricalImportStatus(repo);
     components.envelopeEncryption = await collectEnvelopeEncryptionStatus(
       options.envelopeEncryptionProvider
     );

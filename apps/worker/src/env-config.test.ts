@@ -13,6 +13,15 @@ describe("resolveWorkerEnv", () => {
       rawProjectionIntervalMs: 5000,
       rawProjectionBatchLimit: 1000,
       rawProjectionActorLimit: 10,
+      historicalImport: {
+        maxRows: 100,
+        maxBytes: 1_000_000,
+        maxRuntimeMs: 15_000,
+        maxConcurrency: 1,
+        maxLiveProjectionRows: 0,
+        maxInteractiveQuestionRows: 0
+      },
+      historicalImportApiReadyTimeoutMs: 1_000,
       logLevel: "info",
       logDestination: { destination: "stderr" },
       nodeEnv: "development",
@@ -30,6 +39,14 @@ describe("resolveWorkerEnv", () => {
         MEMORY_RAW_PROJECTION_INTERVAL_MS: "3000",
         MEMORY_RAW_PROJECTION_BATCH_LIMIT: "50",
         MEMORY_RAW_PROJECTION_ACTOR_LIMIT: "4",
+        MEMORY_HISTORICAL_IMPORT_BATCH_ROWS: "25",
+        MEMORY_HISTORICAL_IMPORT_BATCH_BYTES: "250000",
+        MEMORY_HISTORICAL_IMPORT_BATCH_RUNTIME_MS: "2000",
+        MEMORY_HISTORICAL_IMPORT_CONCURRENCY: "1",
+        MEMORY_HISTORICAL_IMPORT_LIVE_BACKLOG_MAX: "3",
+        MEMORY_HISTORICAL_IMPORT_INTERACTIVE_BACKLOG_MAX: "2",
+        MEMORY_HISTORICAL_IMPORT_API_READY_URL: "http://api.test/ready",
+        MEMORY_HISTORICAL_IMPORT_API_READY_TIMEOUT_MS: "500",
         WORKER_LOG_LEVEL: "debug",
         WORKER_LOG_DESTINATION: "both",
         WORKER_LOG_FILE: "/tmp/koed-worker.log",
@@ -47,12 +64,43 @@ describe("resolveWorkerEnv", () => {
       rawProjectionIntervalMs: 3000,
       rawProjectionBatchLimit: 50,
       rawProjectionActorLimit: 4,
+      historicalImport: {
+        maxRows: 25,
+        maxBytes: 250000,
+        maxRuntimeMs: 2000,
+        maxConcurrency: 1,
+        maxLiveProjectionRows: 3,
+        maxInteractiveQuestionRows: 2
+      },
+      historicalImportApiReadyUrl: "http://api.test/ready",
+      historicalImportApiReadyTimeoutMs: 500,
       logLevel: "debug",
       logDestination: {
         destination: "both",
         filePath: "/tmp/koed-worker.log"
       }
     });
+  });
+
+  it("rejects unsafe historical import bounds and health URLs", () => {
+    expect(() =>
+      resolveWorkerEnv({ MEMORY_HISTORICAL_IMPORT_CONCURRENCY: "2" })
+    ).toThrow(
+      "MEMORY_HISTORICAL_IMPORT_CONCURRENCY must be an integer from 1 to 1"
+    );
+    expect(() =>
+      resolveWorkerEnv({ MEMORY_HISTORICAL_IMPORT_BATCH_ROWS: "0" })
+    ).toThrow(
+      "MEMORY_HISTORICAL_IMPORT_BATCH_ROWS must be an integer from 1 to 1000"
+    );
+    expect(() =>
+      resolveWorkerEnv({
+        MEMORY_HISTORICAL_IMPORT_API_READY_URL:
+          "https://user:secret@api.test/ready"
+      })
+    ).toThrow(
+      "MEMORY_HISTORICAL_IMPORT_API_READY_URL must be an HTTP(S) URL without credentials"
+    );
   });
 
   it("rejects unsupported embedding model keys", () => {

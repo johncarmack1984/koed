@@ -1,11 +1,18 @@
 import { scheduleCompaction, type Visibility } from "@koed/core";
 import type { EmbeddableSourceType, MemorySourceRepository } from "@koed/db";
-import { type KoedJobQueue, type WorkerQueueName } from "@koed/shared";
+import {
+  resolveKoedWorkClass,
+  workClassPriority,
+  type KoedJobQueue,
+  type KoedWorkClass,
+  type WorkerQueueName
+} from "@koed/shared";
 import type { EmbeddingWorkflow } from "./embedding-workflow.js";
 
 export interface EmbeddingQueueJobData {
   sourceType: EmbeddableSourceType;
   sourceId: string;
+  workClass?: KoedWorkClass;
 }
 
 export interface WorkerJobWorkflowConfig {
@@ -38,6 +45,7 @@ export const embeddingJobData = (data: unknown): EmbeddingQueueJobData => {
   const record = workerJobData(data);
   const sourceType = stringValue(record.sourceType);
   const sourceId = stringValue(record.sourceId);
+  const workClass = resolveKoedWorkClass(record.workClass);
   if (!isEmbeddableSourceType(sourceType)) {
     throw new Error("Embedding job sourceType is invalid");
   }
@@ -46,7 +54,8 @@ export const embeddingJobData = (data: unknown): EmbeddingQueueJobData => {
   }
   return {
     sourceType,
-    sourceId
+    sourceId,
+    workClass
   };
 };
 
@@ -55,16 +64,21 @@ const visibilityFromJobData = (data: Record<string, unknown>): Visibility => {
   return visibility === "personal" ? visibility : "personal";
 };
 
+const workClassFromJobData = (data: Record<string, unknown>): KoedWorkClass =>
+  resolveKoedWorkClass(data.workClass);
+
 export const enqueueLcmNodeEmbeddings = async (
   lcmEmbedQueue: KoedJobQueue<EmbeddingQueueJobData>,
-  nodeIds: string[]
+  nodeIds: string[],
+  workClass: KoedWorkClass = "normal_embedding_lcm"
 ) =>
   Promise.all(
     nodeIds.map((nodeId) =>
       lcmEmbedQueue.add(
         "embed-lcm-node",
-        { sourceType: "memory_node", sourceId: nodeId },
+        { sourceType: "memory_node", sourceId: nodeId, workClass },
         {
+          priority: workClassPriority(workClass),
           attempts: 5,
           backoff: { type: "exponential", delay: 10_000 },
           removeOnComplete: 1000,
@@ -79,6 +93,7 @@ export const createWorkerJobWorkflow = (config: WorkerJobWorkflowConfig) => {
     const record = workerJobData(data);
     const userId = stringValue(record.userId);
     const visibility = visibilityFromJobData(record);
+    const workClass = workClassFromJobData(record);
     const compaction = await scheduleCompaction({
       repository: config.repository(),
       requesterContext: { userId },
@@ -90,7 +105,8 @@ export const createWorkerJobWorkflow = (config: WorkerJobWorkflowConfig) => {
     ];
     const embeddingJobs = await enqueueLcmNodeEmbeddings(
       config.lcmEmbedQueue,
-      nodeIds
+      nodeIds,
+      workClass
     );
     return {
       compaction,

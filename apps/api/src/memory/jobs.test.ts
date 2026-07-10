@@ -36,12 +36,20 @@ describe("memory job scheduler", () => {
 
     expect(embeddingQueue.add).toHaveBeenCalledWith(
       "embed-source",
-      { sourceType: "memory_event", sourceId: "event-1" },
+      {
+        sourceType: "memory_event",
+        sourceId: "event-1",
+        workClass: "live_capture_projection"
+      },
       expect.any(Object)
     );
     expect(compactionQueue.add).toHaveBeenCalledWith(
       "compact-scope",
-      { userId: "user-1", visibility: "personal" },
+      {
+        userId: "user-1",
+        visibility: "personal",
+        workClass: "live_capture_projection"
+      },
       expect.any(Object)
     );
     const queuedPayloads = JSON.stringify([
@@ -62,8 +70,16 @@ describe("memory job scheduler", () => {
         {} as never,
         { userId: "user-2" },
         [
-          { eventId: "event-2", visibility: "personal" },
-          { eventId: "event-3", visibility: "personal" }
+          {
+            eventId: "event-2",
+            visibility: "personal",
+            workClass: "live_capture_projection"
+          },
+          {
+            eventId: "event-3",
+            visibility: "personal",
+            workClass: "historical_import_backfill"
+          }
         ]
       )
     ).resolves.toMatchObject({

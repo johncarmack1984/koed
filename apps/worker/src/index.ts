@@ -8,12 +8,14 @@ import { createEmbeddingWorkflow } from "./embedding-workflow.js";
 import { loadWorkerEnv, resolveWorkerEnv } from "./env-config.js";
 import {
   createEnvelopeEncryptionProviderFromEnvironment,
+  lcmCompactQueueName,
   lcmEmbedQueueName,
+  memoryEmbedQueueName,
+  type KoedWorkClass,
   workerQueueNames
 } from "@koed/shared";
 import {
   createWorkerJobWorkflow,
-  enqueueLcmNodeEmbeddings,
   type EmbeddingQueueJobData
 } from "./job-workflows.js";
 import {
@@ -22,6 +24,8 @@ import {
 } from "./queue.js";
 import { createWorkerLogger } from "./logging.js";
 import { createRawProjectionService } from "./raw-projection-service.js";
+import { createHistoricalAdmissionHealth } from "./historical-admission-health.js";
+import { createProjectionJobScheduler } from "./projection-job-scheduler.js";
 
 loadWorkerEnv();
 
@@ -63,13 +67,24 @@ const embeddingWorkflow = createEmbeddingWorkflow({
   repository: requireRepository
 });
 
+const queueProducerOptions = {
+  backend: workerEnv.queueBackend,
+  redisUrl: workerEnv.redisUrl,
+  pool
+};
+
+const memoryEmbedQueue = createWorkerQueueProducer<EmbeddingQueueJobData>(
+  memoryEmbedQueueName,
+  queueProducerOptions
+);
+const compactionQueue = createWorkerQueueProducer<{
+  userId: string;
+  visibility: "personal";
+  workClass: KoedWorkClass;
+}>(lcmCompactQueueName, queueProducerOptions);
 const lcmEmbedQueue = createWorkerQueueProducer<EmbeddingQueueJobData>(
   lcmEmbedQueueName,
-  {
-    backend: workerEnv.queueBackend,
-    redisUrl: workerEnv.redisUrl,
-    pool
-  }
+  queueProducerOptions
 );
 
 const handleJob = createWorkerJobWorkflow({
@@ -104,9 +119,17 @@ const rawProjectionService = repository
   ? createRawProjectionService({
       actorLimit: workerEnv.rawProjectionActorLimit,
       batchLimit: workerEnv.rawProjectionBatchLimit,
-      embeddingWorkflow,
-      enqueueLcmNodeEmbeddings: (nodeIds) =>
-        enqueueLcmNodeEmbeddings(lcmEmbedQueue, nodeIds),
+      enqueueProjectedMemoryEventProcessing: createProjectionJobScheduler({
+        embeddingQueue: memoryEmbedQueue,
+        compactionQueue
+      }),
+      getHistoricalAdmissionHealth: createHistoricalAdmissionHealth({
+        apiReadyUrl: workerEnv.historicalImportApiReadyUrl,
+        apiReadyTimeoutMs: workerEnv.historicalImportApiReadyTimeoutMs,
+        embeddingQueue: memoryEmbedQueue,
+        repository
+      }),
+      historicalImport: workerEnv.historicalImport,
       intervalMs: workerEnv.rawProjectionIntervalMs,
       logger,
       repository
@@ -126,6 +149,7 @@ const shutdown = async () => {
   );
   rawProjectionService?.stop();
   await queueRuntime.close();
+  await Promise.all([memoryEmbedQueue.close(), compactionQueue.close()]);
   await pool?.end();
   logger.info(
     {
