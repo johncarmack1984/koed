@@ -36,6 +36,7 @@ SET
           nullif("metadata" ->> 'projectName', ''),
           nullif("metadata" ->> 'projectPath', ''),
           nullif("cwd", ''),
+          nullif(nullif("metadata" ->> 'workspaceId', ''), 'default'),
           "workspace_id"::text
         ),
         'path', coalesce(nullif("metadata" ->> 'projectPath', ''), nullif("cwd", ''))
@@ -66,6 +67,7 @@ SET
     nullif("metadata" ->> 'projectName', ''),
     nullif("metadata" ->> 'projectPath', ''),
     nullif("cwd", ''),
+    nullif(nullif("metadata" ->> 'workspaceId', ''), 'default'),
     "workspace_id"::text
   ),
   "automatic_project_path" = coalesce(nullif("metadata" ->> 'projectPath', ''), nullif("cwd", '')),
