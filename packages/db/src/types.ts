@@ -3,6 +3,7 @@ import type {
   MemoryActor,
   MemoryEngineRepository
 } from "@koed/core";
+import type { KoedWorkClass } from "@koed/shared";
 import type { CapturedSessionRepository } from "./captured-session-repository.js";
 import type { ConversationItemRepository } from "./conversation-item-repository.js";
 import type { CrossIdentitySyncRepository } from "./cross-identity-sync-repository.js";
@@ -875,13 +876,24 @@ export interface ConversationProjectionResult {
   memoryEventScopes: Array<{
     eventId: string;
     visibility: Visibility;
+    workClass: KoedWorkClass;
   }>;
+}
+
+export interface ConversationProjectionBacklog {
+  liveProjectionRows: number;
+  historicalImportRows: number;
+  historicalImportBytes: number;
+  interactiveQuestionRows: number;
 }
 
 interface ConversationProjectionInput {
   limit?: number;
+  maxBytes?: number;
+  maxRuntimeMs?: number;
   conversationItemIds?: string[];
   visibility?: Visibility;
+  workClass?: "live_capture_projection" | "historical_import_backfill";
 }
 
 export type SemanticMemoryRebuildInput = {
@@ -898,6 +910,7 @@ export interface SemanticMemoryRebuildResult {
   memoryEventScopes: Array<{
     eventId: string;
     visibility: Visibility;
+    workClass: KoedWorkClass;
   }>;
 }
 
@@ -1183,7 +1196,9 @@ export interface MemorySourceRepository
   ): Promise<ConversationProjectionResult>;
   listConversationProjectionActors(input?: {
     limit?: number;
+    workClass?: "live_capture_projection" | "historical_import_backfill";
   }): Promise<ActorContext[]>;
+  getConversationProjectionBacklog(): Promise<ConversationProjectionBacklog>;
   listSemanticMemoryRebuildActors(input?: {
     limit?: number;
   }): Promise<ActorContext[]>;

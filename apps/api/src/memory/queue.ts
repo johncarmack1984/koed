@@ -57,6 +57,7 @@ export const createMemoryJobQueue = <TJobData>(
           jobName,
           data,
           jobKey: jobOptions?.jobId,
+          priority: jobOptions?.priority,
           maxAttempts: jobOptions?.attempts,
           backoffMs: jobOptions?.backoff?.delay
         }),

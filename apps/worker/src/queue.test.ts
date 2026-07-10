@@ -1,4 +1,23 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const bullQueue = vi.hoisted(() => ({
+  add: vi.fn(),
+  close: vi.fn(),
+  getJobCounts: vi.fn()
+}));
+
+vi.mock("bullmq", () => ({
+  Queue: class {
+    add = bullQueue.add;
+    close = bullQueue.close;
+    getJobCounts = bullQueue.getJobCounts;
+  },
+  Worker: class {
+    close = vi.fn();
+    on = vi.fn();
+  }
+}));
+
 import {
   createWorkerQueueProducer,
   createWorkerQueueRuntime
@@ -19,6 +38,12 @@ const logger = {
 };
 
 describe("createWorkerQueueProducer", () => {
+  beforeEach(() => {
+    bullQueue.add.mockReset();
+    bullQueue.close.mockReset();
+    bullQueue.getJobCounts.mockReset();
+  });
+
   it("creates local durable queue producer when repository exists", async () => {
     const repository = createRepository();
     const queue = createWorkerQueueProducer<{ sourceId: string }>(
@@ -38,9 +63,31 @@ describe("createWorkerQueueProducer", () => {
       jobName: "embed-source",
       data: { sourceId: "event-1" },
       jobKey: "job-1",
+      priority: undefined,
       maxAttempts: undefined,
       backoffMs: undefined
     });
+  });
+
+  it("passes live priority ahead of historical priority to BullMQ", async () => {
+    bullQueue.add
+      .mockResolvedValueOnce({ id: "historical" })
+      .mockResolvedValueOnce({ id: "live" });
+    const queue = createWorkerQueueProducer<{ sourceId: string }>(
+      "memory-embed",
+      { backend: "bullmq", redisUrl: "redis://operator:6379" }
+    );
+
+    await queue.add(
+      "embed-source",
+      { sourceId: "historical" },
+      { priority: 20 }
+    );
+    await queue.add("embed-source", { sourceId: "live" }, { priority: 5 });
+
+    expect(bullQueue.add.mock.calls.map((call) => call[2]?.priority)).toEqual([
+      20, 5
+    ]);
   });
 
   it("fails fast for local queue backend without database", () => {
@@ -63,6 +110,7 @@ describe("createWorkerQueueRuntime", () => {
       data: { sourceId: "event-1" },
       attemptCount: 1,
       maxAttempts: 5,
+      priority: 5,
       lockToken: "lock-1"
     });
     const handleJob = vi.fn().mockResolvedValue({ ok: true });

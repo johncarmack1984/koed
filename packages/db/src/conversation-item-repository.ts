@@ -5,6 +5,7 @@ import {
   combineStorageSanitizationCounts,
   metadataWithStorageSanitization,
   sanitizeForPostgresStorage,
+  projectionWorkClassForSourceTransport,
   type EnvelopeEncryptionProvider
 } from "@koed/shared";
 import type {
@@ -640,6 +641,7 @@ export const createConversationItemRepository = (
           source_hash,
           idempotency_key,
           projection_status,
+          projection_work_class,
           projection_version,
           projection_error,
           metadata
@@ -648,7 +650,7 @@ export const createConversationItemRepository = (
           $1, $2, $3, $4, $5, $6, $7, $8, $9,
           $10, $11, $12, $13, $14, $15, $16, $17, $18,
           $19, $20, $21, $22, $23, $24, $25, $26, $27, $28,
-          $29, $30, $31
+          $29, $30, $31, $32
         )
         on conflict (owner_user_id, idempotency_key)
           where visibility = 'personal'
@@ -772,6 +774,14 @@ export const createConversationItemRepository = (
             then 'pending'
             else conversation_items.projection_status
           end,
+          projection_work_class = case
+            when excluded.metadata ? 'canonicalConversationItemKey' and (
+              case when excluded.source_record_type = 'hook_payload' then 0 else 1 end
+            ) >= (
+              case when conversation_items.source_record_type = 'hook_payload' then 0 else 1 end
+            ) then excluded.projection_work_class
+            else conversation_items.projection_work_class
+          end,
           projection_version = case
             when excluded.metadata ? 'canonicalConversationItemKey' and (
               case when excluded.source_record_type = 'hook_payload' then 0 else 1 end
@@ -829,6 +839,7 @@ export const createConversationItemRepository = (
         item.sourceHash,
         item.idempotencyKey,
         item.projectionStatus ?? "pending",
+        projectionWorkClassForSourceTransport(item.sourceTransport),
         item.projectionVersion ?? null,
         item.projectionError ?? null,
         metadataForStorage
