@@ -404,6 +404,9 @@ describe("JSON command output", () => {
               projectRoot: input.projectRoot,
               teamWorkspaceId: input.teamWorkspaceId,
               backendId: input.backendId ?? null,
+              localProjectId: input.localProjectId ?? null,
+              sourceProjectId: input.sourceProjectId ?? null,
+              projectDisplayName: input.projectDisplayName ?? null,
               createdAt: "2026-01-01T00:00:00.000Z",
               updatedAt: "2026-01-01T00:00:00.000Z"
             }
