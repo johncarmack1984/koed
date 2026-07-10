@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assignmentTargetProjects,
   mergeProjectSources,
   projectIsActive,
   projectLatestAt,
@@ -102,5 +103,24 @@ describe("project memory UI view model", () => {
       relativeTime(thread.latestAt, Date.parse("2026-07-10T10:00:00Z"))
     ).toBe("2d ago");
     expect(sessionSelectionId(thread)).toBe("session-1");
+  });
+
+  it("excludes Unassigned from manual move targets", () => {
+    const projects = mergeProjectSources(
+      [
+        graphProject(),
+        graphProject({
+          id: "unassigned",
+          name: "Unassigned",
+          path: null,
+          threads: []
+        })
+      ],
+      [metadata()]
+    );
+
+    expect(
+      assignmentTargetProjects(projects).map((project) => project.id)
+    ).toEqual(["graph-koed"]);
   });
 });

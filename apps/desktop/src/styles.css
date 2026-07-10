@@ -1413,13 +1413,13 @@ iframe.explorer-blurred {
   border-radius: 16px;
   box-shadow: 0 8px 28px rgb(47 40 26 / 3%);
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
 }
 
 .conversation-frame {
-  grid-row: 2;
+  grid-row: 3;
 }
 
 .conversation-toolbar {
@@ -1445,10 +1445,75 @@ iframe.explorer-blurred {
 }
 
 .conversation-toolbar .secondary,
+.project-assignment-form .secondary,
 .settings-actions .secondary {
   background: var(--memory-card);
   border: 1px solid var(--memory-border);
   color: var(--memory-ink);
+}
+
+.conversation-assignment {
+  background: #faf7ef;
+  border-bottom: 1px solid var(--memory-border);
+  padding: 10px 16px;
+}
+
+.project-assignment-form {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.project-assignment-form label {
+  display: grid;
+  gap: 4px;
+  min-width: 220px;
+}
+
+.project-assignment-form label > span {
+  color: var(--memory-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.project-assignment-form select {
+  background: var(--memory-card);
+  border: 1px solid var(--memory-border);
+  border-radius: 8px;
+  color: var(--memory-ink);
+  font: inherit;
+  min-height: 34px;
+  padding: 6px 30px 6px 9px;
+}
+
+.assignment-state {
+  align-self: center;
+  background: #ece8dd;
+  border-radius: 999px;
+  color: #6f695d;
+  font-size: 10px;
+  font-weight: 750;
+  margin-left: auto;
+  padding: 5px 8px;
+}
+
+.assignment-state.user_override {
+  background: #eee8ff;
+  color: #6c51d8;
+}
+
+.assignment-state.detected {
+  background: #e8f7ec;
+  color: #27824a;
+}
+
+.assignment-error {
+  color: #a43d3d;
+  font-size: 11px;
+  margin: 7px 0 0;
 }
 
 .project-dashboard:has(.conversation-screen) {

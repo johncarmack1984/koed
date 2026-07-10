@@ -5,6 +5,8 @@ export type DesktopThreadGroup = {
   projectId: string;
   projectName: string;
   projectPath?: string | null;
+  projectAssignmentSource?: "detected" | "user_override" | null;
+  capturedProjectProvenance?: Record<string, unknown>;
   eventCount: number;
   invalidatedCount: number;
   latestAt: string;
@@ -163,3 +165,15 @@ export const relativeTime = (
 
 export const sessionSelectionId = (thread: DesktopThreadGroup): string =>
   thread.sessionId ?? thread.id;
+
+export const assignmentTargetProjects = (
+  projects: DesktopProject[]
+): DesktopProject[] =>
+  sortProjects(
+    projects.filter(
+      (project) =>
+        project.id !== "unassigned" &&
+        Boolean(project.id.trim()) &&
+        Boolean(project.name.trim())
+    )
+  );

@@ -9,6 +9,7 @@ import {
   type StatusComponentKey
 } from "./status-model.js";
 import {
+  assignmentTargetProjects,
   mergeProjectSources,
   projectIsActive,
   projectLatestAt,
@@ -120,6 +121,8 @@ let projectGraphError = "";
 let projectDataRevision = 0;
 let projectGraphFingerprint = "";
 let projectCatalogFingerprint = "";
+let projectAssignmentBusy = false;
+let projectAssignmentError = "";
 type StartupLogLine = {
   key?: string;
   text: string;
@@ -1468,6 +1471,36 @@ const countLabel = (count: number, singular: string): string =>
 const projectSecondaryLabel = (project: DesktopProject): string =>
   project.remoteDisplay ?? project.path ?? "Local Project";
 
+const projectAssignmentLabel = (session: DesktopThreadGroup): string => {
+  if (session.projectAssignmentSource === "user_override") return "Manual";
+  if (session.projectAssignmentSource === "detected") return "Automatic";
+  return "Unassigned";
+};
+
+const renderProjectAssignmentControls = (
+  session: DesktopThreadGroup
+): string => {
+  if (!session.sessionId) {
+    return `<span class="assignment-state unassigned">Unassigned · session unavailable</span>`;
+  }
+  const targets = assignmentTargetProjects(sortedProjects());
+  const options = targets
+    .map(
+      (project) =>
+        `<option value="${escapeHtml(project.id)}" ${project.id === session.projectId ? "selected" : ""}>${escapeHtml(project.name)}</option>`
+    )
+    .join("");
+  return `
+    <form class="project-assignment-form" data-session-project-form>
+      <label><span>Personal Project</span><select data-session-project-target ${projectAssignmentBusy || targets.length === 0 ? "disabled" : ""}>${options}</select></label>
+      <button type="submit" class="secondary" ${projectAssignmentBusy || targets.length === 0 ? "disabled" : ""}>${projectAssignmentBusy ? "Saving…" : "Move"}</button>
+      ${session.projectAssignmentSource === "user_override" ? `<button type="button" class="secondary" data-reset-session-project ${projectAssignmentBusy ? "disabled" : ""}>Reset to automatic</button>` : ""}
+      <span class="assignment-state ${session.projectAssignmentSource ?? "unassigned"}">${projectAssignmentLabel(session)}</span>
+    </form>
+    ${projectAssignmentError ? `<p class="assignment-error" role="alert">${escapeHtml(projectAssignmentError)}</p>` : ""}
+  `;
+};
+
 const renderProjectCard = (project: DesktopProject): string => {
   const active = projectIsActive(project);
   return `
@@ -1573,6 +1606,7 @@ const renderConversationPane = (): string => {
       <nav class="breadcrumbs conversation-breadcrumbs" aria-label="Breadcrumb"><button type="button" data-back-to-projects>Projects</button><span>›</span><button type="button" data-back-to-project>${escapeHtml(selectedProject()?.name ?? session.projectName)}</button><span>›</span><strong>${escapeHtml(session.name || "Untitled session")}</strong></nav>
       <section class="conversation-pane">
         <div class="conversation-toolbar"><div><p class="eyebrow">Raw conversation</p><strong>${escapeHtml(session.name || "Untitled session")}</strong><small>${countLabel(session.eventCount, "memory event")} · ${escapeHtml(relativeTime(session.latestAt))}</small></div><button type="button" class="secondary" data-open-explorer-session>Open full Explorer ↗</button></div>
+        <div class="conversation-assignment">${renderProjectAssignmentControls(session)}</div>
         <iframe class="conversation-frame" title="Koed Explorer raw conversation" src="${escapeHtml(explorerSessionUrl())}"></iframe>
       </section>
     </div>
@@ -1625,7 +1659,7 @@ const renderProjectDashboard = (): string => {
 
 const dashboardRenderKey = (): string => {
   if (activeDesktopView === "session") {
-    return `session:${selectedProjectId ?? ""}:${selectedSessionId ?? ""}:${explorerSessionUrl()}`;
+    return `session:${selectedProjectId ?? ""}:${selectedSessionId ?? ""}:${explorerSessionUrl()}:${projectDataRevision}:${projectAssignmentBusy}:${projectAssignmentError}`;
   }
   if (activeDesktopView === "settings") {
     const cardState = statusCards
@@ -1636,7 +1670,7 @@ const dashboardRenderKey = (): string => {
       .join("|");
     return `settings:${status?.state ?? "starting"}:${busyAction ?? ""}:${cardState}`;
   }
-  return `${activeDesktopView}:${selectedProjectId ?? ""}:${showInactiveProjects}:${projectDataRevision}`;
+  return `${activeDesktopView}:${selectedProjectId ?? ""}:${showInactiveProjects}:${projectDataRevision}:${projectAssignmentBusy}:${projectAssignmentError}`;
 };
 
 const renderShell = () => {
@@ -2034,6 +2068,90 @@ const refreshProjectCatalog = async (): Promise<void> => {
     projectCatalog = nextProjects;
     projectCatalogFingerprint = nextFingerprint;
     projectDataRevision += 1;
+  }
+};
+
+const patchSessionProject = async (
+  apiUrl: string,
+  apiToken: string,
+  sessionId: string,
+  action: "move" | "reset",
+  target: DesktopProject | null
+): Promise<string> => {
+  if (action === "move" && !target) {
+    throw new Error("Personal Project target is required.");
+  }
+  const project = target
+    ? { id: target.id, name: target.name, path: target.path }
+    : null;
+  const response = await fetch(
+    `${apiUrl.replace(/\/$/, "")}/v1/memory/graph/sessions/${encodeURIComponent(sessionId)}/project`,
+    {
+      method: "PATCH",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${apiToken}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(
+        action === "reset"
+          ? { action }
+          : {
+              action,
+              project
+            }
+      )
+    }
+  );
+  const payload = (await response.json()) as {
+    error?: unknown;
+    session?: { project?: { id: string } | null };
+  };
+  if (!response.ok || !payload.session) {
+    throw new Error(
+      typeof payload.error === "string"
+        ? payload.error
+        : `Project assignment failed with HTTP ${response.status}`
+    );
+  }
+  return payload.session.project?.id ?? "unassigned";
+};
+
+const updateSessionProject = async (
+  action: "move" | "reset",
+  targetProjectId?: string
+): Promise<void> => {
+  const session = selectedSession();
+  if (!session?.sessionId || !status?.api.url || !explorerApiToken) return;
+  const target = targetProjectId
+    ? (assignmentTargetProjects(sortedProjects()).find(
+        (project) => project.id === targetProjectId
+      ) ?? null)
+    : null;
+  if (action === "move" && !target) {
+    projectAssignmentError = "Select a Personal Project.";
+    syncUI();
+    return;
+  }
+  projectAssignmentBusy = true;
+  projectAssignmentError = "";
+  syncUI();
+  try {
+    selectedProjectId = await patchSessionProject(
+      status.api.url,
+      explorerApiToken,
+      session.sessionId,
+      action,
+      target
+    );
+    await refreshProjectGraph();
+    projectDataRevision += 1;
+  } catch (error) {
+    projectAssignmentError =
+      error instanceof Error ? error.message : String(error);
+  } finally {
+    projectAssignmentBusy = false;
+    syncUI();
   }
 };
 
@@ -2807,16 +2925,24 @@ const registerHandlers = () => {
     if (!(form instanceof HTMLFormElement)) {
       return;
     }
-    if (!form.matches("[data-team-backend-form]")) {
+    if (form.matches("[data-session-project-form]")) {
+      event.preventDefault();
+      event.stopPropagation();
+      const select = form.querySelector<HTMLSelectElement>(
+        "[data-session-project-target]"
+      );
+      void updateSessionProject("move", select?.value);
       return;
     }
-    event.preventDefault();
-    event.stopPropagation();
-    const input = form.querySelector<HTMLInputElement>(
-      "[data-team-backend-url]"
-    );
-    teamBackendUrlInput = input?.value ?? "";
-    void runTeamBackendConnect();
+    if (form.matches("[data-team-backend-form]")) {
+      event.preventDefault();
+      event.stopPropagation();
+      const input = form.querySelector<HTMLInputElement>(
+        "[data-team-backend-url]"
+      );
+      teamBackendUrlInput = input?.value ?? "";
+      void runTeamBackendConnect();
+    }
   });
 
   app.addEventListener("input", (event) => {
@@ -2943,6 +3069,7 @@ const registerHandlers = () => {
       event.preventDefault();
       selectedProjectId = projectButton.dataset.projectId;
       selectedSessionId = null;
+      projectAssignmentError = "";
       activeDesktopView = "project";
       syncUI();
       return;
@@ -2953,8 +3080,18 @@ const registerHandlers = () => {
     if (sessionButton?.dataset.sessionId) {
       event.preventDefault();
       selectedSessionId = sessionButton.dataset.sessionId;
+      projectAssignmentError = "";
       activeDesktopView = "session";
       syncUI();
+      return;
+    }
+
+    const resetSessionProject = target.closest<HTMLButtonElement>(
+      "[data-reset-session-project]"
+    );
+    if (resetSessionProject) {
+      event.preventDefault();
+      void updateSessionProject("reset");
       return;
     }
 
