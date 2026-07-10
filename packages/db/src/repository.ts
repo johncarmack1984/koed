@@ -252,6 +252,16 @@ const mapLcmGraphNode = (row: {
   summaryCorrectedByUserId: row.summary_corrected_by_user_id ?? null
 });
 
+const redactLocalProjectMetadata = (
+  metadata: Record<string, unknown> | null
+): Record<string, unknown> => {
+  const redacted = { ...(metadata ?? {}) };
+  for (const key of ["cwd", "projectPath", "localProjectId", "projectId"]) {
+    delete redacted[key];
+  }
+  return redacted;
+};
+
 const mapLcmGraphEvent = (row: {
   id: string;
   owner_user_id?: string | null;
@@ -6167,6 +6177,9 @@ export const createMemorySourceRepository = (
       return hydratedRows.map((row) =>
         mapLcmGraphEvent({
           ...row,
+          metadata: teamWorkspaceBoundary
+            ? redactLocalProjectMetadata(row.metadata)
+            : row.metadata,
           includeContent: input.includeContent ?? false,
           includeRaw: input.includeRaw ?? false
         })

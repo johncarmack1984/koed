@@ -4996,6 +4996,12 @@ describeDb("memory repository visibility", () => {
             eventType: "captured",
             rawEventType: "user_prompt",
             content: `${input.label} fixture memory payload sentinel.`,
+            metadata: {
+              cwd: "/Users/owner/private-checkout",
+              projectPath: "/Users/owner/private-checkout",
+              localProjectId: "owner-device-local-project",
+              projectId: "owner-personal-project"
+            },
             captureMethod: "api",
             idempotencyKey: `encrypted-fixture-event-${randomUUID()}`
           }
@@ -5157,6 +5163,13 @@ describeDb("memory repository visibility", () => {
       );
       expect(JSON.stringify(memberEvents)).not.toContain(
         "RevokedEncryptedFixtureUnique"
+      );
+      expect(memberEvents[0]?.metadata).not.toHaveProperty("cwd");
+      expect(memberEvents[0]?.metadata).not.toHaveProperty("projectPath");
+      expect(memberEvents[0]?.metadata).not.toHaveProperty("localProjectId");
+      expect(memberEvents[0]?.metadata).not.toHaveProperty("projectId");
+      expect(JSON.stringify(memberEvents)).not.toContain(
+        "/Users/owner/private-checkout"
       );
       expect(decrypt).toHaveBeenCalledTimes(1);
 
