@@ -167,13 +167,28 @@ export const sessionSelectionId = (thread: DesktopThreadGroup): string =>
   thread.sessionId ?? thread.id;
 
 export const assignmentTargetProjects = (
-  projects: DesktopProject[]
+  projects: DesktopProject[],
+  currentProjectId?: string
 ): DesktopProject[] =>
   sortProjects(
     projects.filter(
       (project) =>
         project.id !== "unassigned" &&
+        project.id !== currentProjectId &&
         Boolean(project.id.trim()) &&
         Boolean(project.name.trim())
     )
   );
+
+export class LatestRequestGate {
+  private revision = 0;
+
+  begin(): number {
+    this.revision += 1;
+    return this.revision;
+  }
+
+  isCurrent(revision: number): boolean {
+    return revision === this.revision;
+  }
+}

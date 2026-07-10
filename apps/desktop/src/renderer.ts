@@ -10,6 +10,7 @@ import {
 } from "./status-model.js";
 import {
   assignmentTargetProjects,
+  LatestRequestGate,
   mergeProjectSources,
   projectIsActive,
   projectLatestAt,
@@ -121,6 +122,7 @@ let projectGraphError = "";
 let projectDataRevision = 0;
 let projectGraphFingerprint = "";
 let projectCatalogFingerprint = "";
+const projectGraphRequestGate = new LatestRequestGate();
 let projectAssignmentBusy = false;
 let projectAssignmentError = "";
 type StartupLogLine = {
@@ -1483,19 +1485,19 @@ const renderProjectAssignmentControls = (
   if (!session.sessionId) {
     return `<span class="assignment-state unassigned">Unassigned · session unavailable</span>`;
   }
-  const targets = assignmentTargetProjects(sortedProjects());
+  const targets = assignmentTargetProjects(sortedProjects(), session.projectId);
   const options = targets
     .map(
       (project) =>
-        `<option value="${escapeHtml(project.id)}" ${project.id === session.projectId ? "selected" : ""}>${escapeHtml(project.name)}</option>`
+        `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)}</option>`
     )
     .join("");
   return `
-    <form class="project-assignment-form" data-session-project-form>
-      <label><span>Personal Project</span><select data-session-project-target ${projectAssignmentBusy || targets.length === 0 ? "disabled" : ""}>${options}</select></label>
+    <form class="project-assignment-form" data-session-project-form aria-busy="${projectAssignmentBusy}">
+      <label><span>Personal Project</span><select data-session-project-target required ${projectAssignmentBusy || targets.length === 0 ? "disabled" : ""}><option value="" selected disabled>Choose Project…</option>${options}</select></label>
       <button type="submit" class="secondary" ${projectAssignmentBusy || targets.length === 0 ? "disabled" : ""}>${projectAssignmentBusy ? "Saving…" : "Move"}</button>
       ${session.projectAssignmentSource === "user_override" ? `<button type="button" class="secondary" data-reset-session-project ${projectAssignmentBusy ? "disabled" : ""}>Reset to automatic</button>` : ""}
-      <span class="assignment-state ${session.projectAssignmentSource ?? "unassigned"}">${projectAssignmentLabel(session)}</span>
+      <span class="assignment-state ${session.projectAssignmentSource ?? "unassigned"}" role="status" aria-live="polite">${projectAssignmentLabel(session)}</span>
     </form>
     ${projectAssignmentError ? `<p class="assignment-error" role="alert">${escapeHtml(projectAssignmentError)}</p>` : ""}
   `;
@@ -2007,6 +2009,7 @@ const refreshExplorerCredential = async (): Promise<void> => {
 };
 
 const refreshProjectGraph = async (): Promise<void> => {
+  const requestRevision = projectGraphRequestGate.begin();
   if (!status?.api.url || !explorerApiToken) {
     if (projectGraph.length) {
       projectGraph = [];
@@ -2035,6 +2038,7 @@ const refreshProjectGraph = async (): Promise<void> => {
           : `Project graph failed with HTTP ${response.status}`
       );
     }
+    if (!projectGraphRequestGate.isCurrent(requestRevision)) return;
     const nextProjects = Array.isArray(payload.projects)
       ? payload.projects
       : [];
@@ -2049,6 +2053,7 @@ const refreshProjectGraph = async (): Promise<void> => {
       projectDataRevision += 1;
     }
   } catch (error) {
+    if (!projectGraphRequestGate.isCurrent(requestRevision)) return;
     const message = error instanceof Error ? error.message : String(error);
     if (message !== projectGraphError) {
       projectGraphError = message;

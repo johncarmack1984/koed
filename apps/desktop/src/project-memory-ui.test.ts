@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assignmentTargetProjects,
+  LatestRequestGate,
   mergeProjectSources,
   projectIsActive,
   projectLatestAt,
@@ -122,5 +123,15 @@ describe("project memory UI view model", () => {
     expect(
       assignmentTargetProjects(projects).map((project) => project.id)
     ).toEqual(["graph-koed"]);
+    expect(assignmentTargetProjects(projects, "graph-koed")).toEqual([]);
+  });
+
+  it("rejects stale Project graph responses", () => {
+    const gate = new LatestRequestGate();
+    const firstRequest = gate.begin();
+    const secondRequest = gate.begin();
+
+    expect(gate.isCurrent(firstRequest)).toBe(false);
+    expect(gate.isCurrent(secondRequest)).toBe(true);
   });
 });
