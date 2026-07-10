@@ -14,12 +14,15 @@ export interface ProjectTeamWorkspaceLink {
   projectRoot: string;
   teamWorkspaceId: string;
   backendId: string | null;
+  localProjectId: string | null;
+  sourceProjectId: string | null;
+  projectDisplayName: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface ProjectTeamWorkspaceLinkStore {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   updatedAt: string;
   links: ProjectTeamWorkspaceLink[];
 }
@@ -87,6 +90,17 @@ const validateBackendId = (backendId: string | undefined): string | null => {
 const linkIdForProjectRoot = (projectRoot: string): string =>
   `ptw_${createHash("sha256").update(projectRoot).digest("hex").slice(0, 16)}`;
 
+const validateProjectIdentity = (
+  value: unknown,
+  prefix: "lp" | "sp"
+): string | null => {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return new RegExp(`^${prefix}_[a-f0-9]{16,64}$`, "i").test(trimmed)
+    ? trimmed
+    : null;
+};
+
 const normalizeLink = (
   value: Partial<ProjectTeamWorkspaceLink>
 ): ProjectTeamWorkspaceLink | null => {
@@ -108,6 +122,13 @@ const normalizeLink = (
     backendId:
       typeof value.backendId === "string"
         ? validateBackendId(value.backendId)
+        : null,
+    localProjectId: validateProjectIdentity(value.localProjectId, "lp"),
+    sourceProjectId: validateProjectIdentity(value.sourceProjectId, "sp"),
+    projectDisplayName:
+      typeof value.projectDisplayName === "string" &&
+      value.projectDisplayName.trim()
+        ? value.projectDisplayName.trim().slice(0, 120)
         : null,
     createdAt:
       typeof value.createdAt === "string"
@@ -133,7 +154,7 @@ const readStore = (
       deps.readFileSync(paths.projectTeamWorkspaceLinksPath, "utf8") as string
     ) as Partial<ProjectTeamWorkspaceLinkStore>;
     return {
-      schemaVersion: 1,
+      schemaVersion: parsed.schemaVersion === 2 ? 2 : 1,
       updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : now,
       links: Array.isArray(parsed.links)
         ? parsed.links
@@ -170,6 +191,9 @@ export const linkProjectTeamWorkspace = (
     projectRoot: string;
     teamWorkspaceId: string;
     backendId?: string;
+    localProjectId?: string;
+    sourceProjectId?: string;
+    projectDisplayName?: string;
   },
   depsInput: ProjectTeamWorkspaceLinkDeps = {}
 ): ProjectTeamWorkspaceLinkResult => {
@@ -185,6 +209,17 @@ export const linkProjectTeamWorkspace = (
     projectRoot,
     teamWorkspaceId,
     backendId,
+    localProjectId:
+      validateProjectIdentity(input.localProjectId, "lp") ??
+      existing?.localProjectId ??
+      null,
+    sourceProjectId:
+      validateProjectIdentity(input.sourceProjectId, "sp") ??
+      existing?.sourceProjectId ??
+      null,
+    projectDisplayName: input.projectDisplayName?.trim()
+      ? input.projectDisplayName.trim().slice(0, 120)
+      : (existing?.projectDisplayName ?? null),
     createdAt: existing?.createdAt ?? now,
     updatedAt: now
   };
@@ -194,7 +229,7 @@ export const linkProjectTeamWorkspace = (
   ].sort((left, right) => left.projectRoot.localeCompare(right.projectRoot));
   writeStore(
     paths,
-    { schemaVersion: 1, updatedAt: now, links: nextLinks },
+    { schemaVersion: 2, updatedAt: now, links: nextLinks },
     deps
   );
   return {
@@ -266,7 +301,7 @@ export const removeProjectTeamWorkspaceLink = (
   writeStore(
     paths,
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
       updatedAt: now,
       links: store.links.filter(
         (candidate) => candidate.projectRoot !== normalizedProjectRoot

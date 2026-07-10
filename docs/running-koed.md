@@ -69,11 +69,29 @@ configured. `upstream disconnect` disables local upstream route families and
 marks the local enrollment state revoked. Browser approval and upstream-side
 device credential revocation remain browser/session-mediated local-edge flows.
 
+## Project metadata discovery
+
+Headless and Desktop flows can discover local Project metadata before linking a
+Project to a Team Workspace:
+
+```bash
+node packages/koed-server/dist/cli.js project discover --cwd "$PWD" --json
+node packages/koed-server/dist/cli.js project show --cwd "$PWD" --json
+node packages/koed-server/dist/cli.js project list --json
+```
+
+Project metadata is local matching/display data, not authorization. Discovery
+stores raw local paths only under `KOED_HOME/config/projects.json`, strips
+credentials from Git remotes, and derives local/source Project identifiers for
+Project-to-Team Workspace matching. The Team Workspace id remains the stable
+Team memory authorization boundary.
+
 ## KOED_HOME layout
 
 `koed-server` keeps local state under `KOED_HOME`:
 
-- `config/` for `server.json`, `local-ports.json`, and `explorer-token.json`
+- `config/` for `server.json`, `local-ports.json`, `explorer-token.json`,
+  local Project metadata, and Project-to-Team Workspace mappings
 - `run/` for `koed-server.json`, `last-verification.json`, upstream enrollment
   orchestration state, and supervisor state
 - `logs/` for service logs, including `postgres.log`

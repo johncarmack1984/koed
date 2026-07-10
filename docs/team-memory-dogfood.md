@@ -13,10 +13,29 @@ Server. It is not polished Electron UI.
   for Captured Sessions.
 - The Project root is lookup and display metadata. The Team Workspace id is the
   stable authorization boundary.
-- Project mapping config stores no secrets. It only stores Project root, Team
-  Workspace id, optional backend id, and timestamps under
-  `KOED_HOME/config/project-team-workspaces.json`.
+- Project metadata config stores no secrets. It stores local discovery facts
+  under `KOED_HOME/config/projects.json`, including raw paths for local-only
+  display and salted path hashes for matching.
+- Project mapping config stores no secrets. It stores Project root, optional
+  local/source Project identifiers, Team Workspace id, optional backend id, and
+  timestamps under `KOED_HOME/config/project-team-workspaces.json`.
 - Team recall is opt-in. Personal Memory remains the MCP default.
+
+## Discover Project Metadata
+
+Discover the current Project before linking it. This records local repo/cwd
+metadata for matching and display only; it does not grant Team Workspace access.
+
+```bash
+node packages/koed-server/dist/cli.js project discover --cwd "$PWD" --json
+node packages/koed-server/dist/cli.js project show --cwd "$PWD" --json
+node packages/koed-server/dist/cli.js project list --json
+```
+
+Discovery records Git root, normalized remotes with credentials stripped,
+branch, HEAD commit, package name, local Project id, and source Project id where
+stable remote/package signals exist. Raw local paths remain local under
+`KOED_HOME`.
 
 ## Link A Project To A Team Workspace
 
@@ -31,7 +50,9 @@ Use `--backend-id <id>` if the local Project mapping should record which
 registered backend owns the Team Workspace. `--upstream-backend-id <id>` is
 accepted as the same value for local-edge setup flows. The backend id is not a
 secret; it tells MCP which enrolled upstream should receive Team Workspace
-recall requests.
+recall requests. Advanced/headless callers may also pass `--local-project-id`,
+`--source-project-id`, and `--project-display-name` from `project discover`
+output to make matching robust across worktrees or moved local folders.
 
 Inspect or remove mappings:
 
@@ -89,10 +110,12 @@ Project mapping auto-resolution is opt-in:
 KOED_TEAM_MEMORY_DOGFOOD=1 koed-mcp
 ```
 
-With that flag, `memory_answer` resolves the current Project root against
-`KOED_HOME/config/project-team-workspaces.json` and includes the mapped
-`team_workspace_id` on Team recall requests. If the mapping also has a backend
-id, MCP sends the request through the local `koed-server` local-edge upstream
+With that flag, `memory_answer` resolves the current Project against
+`KOED_HOME/config/projects.json` and
+`KOED_HOME/config/project-team-workspaces.json`. Resolution first uses the
+stored local/source Project identity and falls back to exact Project root for
+legacy mappings. If the mapping also has a backend id, MCP sends the mapped
+`team_workspace_id` request through the local `koed-server` local-edge upstream
 proxy. Enrollment creates two distinct scoped credentials in secure local
 storage. A Local-Edge Client Credential authorizes MCP to ask the local proxy
 for `team_workspace_read`; a separate upstream device credential authorizes the
