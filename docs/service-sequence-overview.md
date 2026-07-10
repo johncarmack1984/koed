@@ -14,9 +14,10 @@ MCP-side workers.
   memory-answer work, and runs the LCM Summary Service.
 - **API**: the Fastify backend that authenticates API Tokens, persists raw
   records, runs Projection, and serves recall endpoints.
-- **Worker**: the background process that consumes BullMQ or Postgres-backed
-  local queue jobs, performs catch-up Projection, embedding work, and LCM node
-  embedding.
+- **Worker**: background process that consumes priority-ordered BullMQ or
+  Postgres-backed local queue jobs, performs catch-up Projection, embedding
+  work, and LCM node embedding. It admits historical batches only after live
+  and interactive pressure clears.
 - **Embedding Service**: Operator-managed service in external dependency mode, or native Koed-owned runtime in bundled-local mode, that turns memory text into retrieval vectors.
 - **Database**: Postgres storage for raw conversation items, projected semantic
   rows, Memory Events, Memory Nodes, embeddings, questions, token usage,
@@ -101,7 +102,8 @@ MCP-side workers.
    Hook config so stale ports or credentials show as explicit integration
    mismatches. Readiness gates include Postgres reachability and version,
    current migrations, pgvector, local or BullMQ queue backend availability,
-   and Embedding Service model/dimension compatibility.
+   and Embedding Service model/dimension compatibility. Historical-import
+   backlog is an authenticated diagnostic counter, never a readiness gate.
 9. `koed-server setup codex --json` wraps the existing guided bootstrap path so
    Codex MCP Server, Supported Capture Hook, local API Token, app-provisioned
    Explorer credential, verification, and doctor setup can be invoked through
@@ -541,17 +543,25 @@ remains a later integration on top of this durable seat lifecycle state.
    LCM source content, and Memory Question payloads from encrypted companions
    after access checks.
 9. The API schedules processing for newly projected Memory Events through the
-   configured work queue backend. The Worker also runs a catch-up loop over
-   pending or failed raw rows.
-10. The Worker consumes queued jobs from Redis/BullMQ or `local_work_queue`,
-    embeds Memory Events by calling the Embedding Service, and then upserts
-    source embeddings.
-11. The Worker schedules compaction, creating or updating LCM Placeholder Memory
-    Nodes from Memory Events and child nodes, then queues Memory Node embedding.
+   configured work queue backend. Queue payloads hold only identifiers plus one
+   work class: interactive Recall/Memory Questions, live Capture Projection,
+   normal embedding/LCM, or historical import/backfill.
+10. The Worker first selects live raw Projection rows. Historical rows have the
+    durable `historical_import_backfill` Projection class and are selected only
+    as one bounded batch when API readiness, queue, and Embedding Service
+    probes are healthy and configured live/interactive pressure thresholds are
+    clear. It yields after each batch and reevaluates after restart.
+11. The Worker consumes queued jobs from Redis/BullMQ or `local_work_queue`.
+    Both backends use lower-number-first priority and FIFO within a class, so
+    live capture runs ahead of queued historical embedding/LCM work.
+12. The Worker embeds Memory Events by calling the Embedding Service, then
+    upserts source embeddings and schedules compaction, creating or updating
+    LCM Placeholder Memory Nodes from Memory Events and child nodes before
+    queueing Memory Node embedding.
     In paid Koed-managed cloud, placeholder summaries, body text, source item
     JSON, completed LCM summaries, and structured LCM summary JSON are stored as
     redacted Memory Node fields with encrypted companions.
-12. Pending LCM placeholders remain available as degraded evidence until local
+13. Pending LCM placeholders remain available as degraded evidence until local
     LCM summaries are submitted.
 
 Commercial/private VPS/Team deployments can run encrypted-field backfill over

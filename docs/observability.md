@@ -51,6 +51,16 @@ Operational events use namespaced `event.name` values:
 - `graph_stream.notification.parse_failed`
 - `graph_stream.listener.failed`
 - `graph_stream.listener.start_failed`
+- `worker.historical_import.admission`
+- `worker.raw_projection.catchup.completed`
+
+Historical-import events include only admission state/reason and aggregate
+pending, scanned, projected, and byte counters. `/ops/status` reports matching
+`historicalImport` counters with `diagnosticOnly: true`. Historical backlog,
+missing historical telemetry, or a paused historical batch must not change
+`/ready` or readiness state. Logs, status, and metrics must not include
+transcript content, raw payloads, source paths, Memory Question text, API
+Tokens, or local filesystem paths.
 
 Use the database `audit_events` table for durable operator/audit history such
 as token lifecycle changes, login outcomes, policy changes, and destructive

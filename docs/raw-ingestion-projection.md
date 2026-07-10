@@ -137,9 +137,34 @@ The worker runs a raw-projection catch-up loop so pending or previously failed
 raw rows are eventually projected after restart, outage, or hook deadline
 pressure. `MEMORY_RAW_PROJECTION_INTERVAL_MS`,
 `MEMORY_RAW_PROJECTION_BATCH_LIMIT`, and `MEMORY_RAW_PROJECTION_ACTOR_LIMIT`
-bound that background work. Local app-server answer and LCM workers also ask
+bound normal background work. Local app-server answer and LCM workers also ask
 the API to project the exact raw rows they just persisted before they write the
 derived answer or summary.
+
+## Work Classes And Historical Backpressure
+
+Koed assigns work to four ordered classes: interactive Recall/Memory Questions,
+live Capture Hook Projection, normal embedding/LCM work, and historical
+import/backfill. Lower numeric priority wins. Within one class, both queue
+backends preserve FIFO order. Historical rows use the canonical raw
+`source_transport=historical_import` marker and persist
+`projection_work_class=historical_import_backfill`; all other raw Projection
+rows persist `live_capture_projection`. Projection selection never infers this
+from source event time, insertion order, source path, or metadata.
+
+The worker always drains a bounded live Projection pass before considering one
+historical batch. It admits that batch only when live raw-Projection rows and
+pending interactive Memory Questions are at or below configured thresholds, the
+configured API `/ready` endpoint is healthy, queue probing succeeds, and the
+Embedding Service is healthy. Historical batches cap selected raw rows, raw
+payload bytes, runtime at Projection boundaries, and concurrency (currently one
+worker slot). A stopped worker leaves unprojected historical rows pending; its
+next pass reevaluates pressure and resumes safely. Historical Projection then
+propagates its work class to embedding and LCM queue jobs.
+
+Historical admission and progress telemetry contains only class names, row and
+byte counts, durations, and pause reasons. It must not contain transcript
+content, source paths, queries, credentials, or raw payloads.
 
 When a display item is deleted, Koed excludes the underlying raw source item
 from semantic memory immediately and invalidates affected Memory Events and
