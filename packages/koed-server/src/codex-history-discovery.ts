@@ -66,9 +66,10 @@ const validateConfiguredRoot = (value: string): string => {
     throw new Error("Configured Codex history roots must be absolute paths");
   }
   const resolved = path.resolve(value);
+  const home = path.resolve(homedir());
   if (
     resolved === path.parse(resolved).root ||
-    resolved === path.resolve(homedir())
+    isContainedPath(resolved, home)
   ) {
     throw new Error("Configured Codex history root is too broad");
   }
@@ -147,7 +148,20 @@ const walkRoot = (
     const directory = pending.pop()!;
     let entries: Dirent<string>[];
     try {
-      entries = readdirSync(directory, {
+      const info = lstatSync(directory);
+      const canonicalDirectory = realpathSync(directory);
+      if (
+        info.isSymbolicLink() ||
+        !info.isDirectory() ||
+        !isContainedPath(root.canonicalPath, canonicalDirectory)
+      ) {
+        issues.push({
+          sourceLabel: safeLabel(directory),
+          reason: "symlink_rejected"
+        });
+        continue;
+      }
+      entries = readdirSync(canonicalDirectory, {
         withFileTypes: true,
         encoding: "utf8"
       });

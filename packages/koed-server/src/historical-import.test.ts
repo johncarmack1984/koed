@@ -8,7 +8,7 @@ import {
   writeFileSync
 } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -115,6 +115,15 @@ describe("bounded Codex history discovery", () => {
     );
     mkdirSync(sessions, { recursive: true });
     symlinkSync(outside, path.join(sessions, "escape.jsonl"));
+    const outsideDirectory = path.join(directory, "outside-directory");
+    writeTranscript(
+      path.join(outsideDirectory, "nested.jsonl"),
+      transcriptLines({
+        sessionId: "nested-outside",
+        timestamps: ["2026-07-12T00:00:00Z"]
+      })
+    );
+    symlinkSync(outsideDirectory, path.join(sessions, "escaped-directory"));
     writeTranscript(
       path.join(sessions, "inside.jsonl"),
       transcriptLines({
@@ -128,10 +137,18 @@ describe("bounded Codex history discovery", () => {
     expect(
       result.candidates.map((candidate) => candidate.sourceSessionId)
     ).toEqual(["inside"]);
-    expect(result.issues).toContainEqual({
-      sourceLabel: "…/escape.jsonl",
-      reason: "symlink_rejected"
-    });
+    expect(result.issues).toEqual(
+      expect.arrayContaining([
+        {
+          sourceLabel: "…/escape.jsonl",
+          reason: "symlink_rejected"
+        },
+        {
+          sourceLabel: "…/escaped-directory",
+          reason: "symlink_rejected"
+        }
+      ])
+    );
     expect(result.roots.map((root) => root.configuredPath)).toEqual([
       path.join(codexHome, "sessions")
     ]);
@@ -156,6 +173,11 @@ describe("bounded Codex history discovery", () => {
     expect(() =>
       resolveSupportedCodexHistoryRoots({
         MEMORY_CODEX_HISTORY_ROOTS: path.parse(directory).root
+      })
+    ).toThrow("too broad");
+    expect(() =>
+      resolveSupportedCodexHistoryRoots({
+        MEMORY_CODEX_HISTORY_ROOTS: path.dirname(homedir())
       })
     ).toThrow("too broad");
   });
@@ -219,6 +241,37 @@ describe("automatic historical selection", () => {
     ]);
     expect(ranked.every((source) => source.sourceSessionId !== "old")).toBe(
       true
+    );
+  });
+
+  it("deduplicates fingerprints, rejects future activity, and caps deterministic ties", () => {
+    const tied = Array.from({ length: 60 }, (_, index) =>
+      candidate(String(index).padStart(2, "0"), "2026-07-12T00:00:00.000Z")
+    );
+    const duplicate = {
+      ...tied[0]!,
+      sourcePath: "/history/z-duplicate.jsonl"
+    };
+    const ranked = rankAutomaticHistoricalSources({
+      candidates: [
+        ...tied,
+        duplicate,
+        candidate("future", "2026-07-14T00:00:00.000Z")
+      ],
+      projectFor: () => ({ name: "Same", fingerprint: "same-project" }),
+      now: new Date("2026-07-13T00:00:00.000Z"),
+      windowDays: 30,
+      sessionCap: 50
+    });
+    expect(ranked).toHaveLength(50);
+    expect(ranked.map((source) => source.sourceSessionId)).toEqual(
+      tied.slice(0, 50).map((source) => source.sourceSessionId)
+    );
+    expect(
+      ranked.filter((source) => source.sourceSessionId === "00")
+    ).toHaveLength(1);
+    expect(ranked.some((source) => source.sourceSessionId === "future")).toBe(
+      false
     );
   });
 
@@ -304,6 +357,77 @@ describe("resumable source batches", () => {
         config: sourceConfig
       })
     ).toMatchObject({ state: "mutated" });
+  });
+
+  it("consumes blank/empty rows, preserves turn state, and waits for partial growth", async () => {
+    const directory = await tempDirectory();
+    const codexHome = path.join(directory, ".codex");
+    const filePath = path.join(codexHome, "sessions", "growing.jsonl");
+    const metadata = transcriptLines({
+      sessionId: "growing-session",
+      timestamps: ["2026-07-10T00:00:00Z"]
+    })[0]!;
+    const user = JSON.stringify({
+      timestamp: "2026-07-11T00:00:00Z",
+      type: "event_msg",
+      payload: { type: "user_message", message: "Question" }
+    });
+    const agent = JSON.stringify({
+      timestamp: "2026-07-11T00:01:00Z",
+      type: "event_msg",
+      payload: { type: "agent_message", message: "Answer" }
+    });
+    const partial = '{"timestamp":';
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    writeFileSync(filePath, `${metadata}\n\n[]\n${user}\n${agent}\n${partial}`);
+    const source = discover(codexHome).candidates[0]!;
+    const first = readHistoricalSourceBatch({
+      source,
+      checkpoint: initialCheckpoint(source.sourceSizeBytes),
+      config: { ...sourceConfig, maxBatchRows: 10, maxBatchBytes: 4096 }
+    });
+    expect(first.state).toBe("growing");
+    if (!("batch" in first)) throw new Error("expected complete prefix batch");
+    expect(first.batch.malformedRecordCount).toBe(0);
+    const turnItems = first.batch.items.filter(
+      (item) => item.rawText === "Question" || item.rawText === "Answer"
+    );
+    expect(turnItems).toHaveLength(2);
+    expect(turnItems[0]?.externalTurnId).toBeTruthy();
+    expect(turnItems[1]?.externalTurnId).toBe(turnItems[0]?.externalTurnId);
+    expect(first.batch.checkpointOffset).toBe(
+      Buffer.byteLength(`${metadata}\n\n[]\n${user}\n${agent}\n`)
+    );
+
+    const checkpoint: HistoricalSourceCheckpoint = {
+      offset: first.batch.checkpointOffset,
+      line: first.batch.checkpointLine,
+      hash: first.batch.checkpointHash,
+      observedSizeBytes: first.batch.sourceSizeBytes
+    };
+    expect(
+      readHistoricalSourceBatch({
+        source,
+        checkpoint,
+        config: { ...sourceConfig, maxBatchRows: 10, maxBatchBytes: 4096 }
+      })
+    ).toEqual({ state: "growing", reason: "source_incomplete_tail" });
+
+    appendFileSync(
+      filePath,
+      '"2026-07-12T00:00:00Z","type":"event_msg","payload":{"type":"agent_message","message":"Done"}}\n'
+    );
+    const completedTail = readHistoricalSourceBatch({
+      source,
+      checkpoint,
+      config: { ...sourceConfig, maxBatchRows: 10, maxBatchBytes: 4096 }
+    });
+    expect(completedTail).toMatchObject({ state: "ready" });
+    if (!("batch" in completedTail))
+      throw new Error("expected grown tail batch");
+    expect(completedTail.batch.items).toEqual([
+      expect.objectContaining({ rawText: "Done" })
+    ]);
   });
 
   it("distinguishes moved and deleted fingerprints", async () => {

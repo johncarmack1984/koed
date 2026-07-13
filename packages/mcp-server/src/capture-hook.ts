@@ -1410,6 +1410,7 @@ export const parseCodexTranscriptJsonlBatch = (input: {
         lineIndexOffset + consumedLines
       );
       if (parsed) records.push(...parsed);
+      else if (!terminated) break;
       else {
         malformedLines.push({
           byteOffset: absoluteStartOffset + cursor,

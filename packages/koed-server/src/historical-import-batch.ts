@@ -57,6 +57,7 @@ export type HistoricalSourceBatchResult =
       reason: string;
     }
   | { state: "completed" }
+  | { state: "growing"; reason: "source_incomplete_tail" }
   | { state: "ready" | "growing"; batch: HistoricalImportSourceBatch };
 
 const containedBy = (root: string, candidate: string): boolean => {
@@ -148,35 +149,54 @@ type ParsedLine =
     }
   | { kind: "malformed"; endOffset: number; lineIndex: number };
 
-const parsedLines = (
-  parsed: ReturnType<typeof parseCodexTranscriptJsonlBatch>
-): ParsedLine[] => {
+const parsedLines = (input: {
+  parsed: ReturnType<typeof parseCodexTranscriptJsonlBatch>;
+  buffer: Buffer;
+  absoluteStartOffset: number;
+  lineIndexOffset: number;
+}): ParsedLine[] => {
   const recordsByLine = new Map<number, CodexTranscriptJsonlRecord[]>();
-  for (const record of parsed.records) {
+  for (const record of input.parsed.records) {
     const records = recordsByLine.get(record.lineIndex) ?? [];
     records.push(record);
     recordsByLine.set(record.lineIndex, records);
   }
-  return [
-    ...[...recordsByLine.entries()].map(([lineIndex, records]) => ({
-      kind: "records" as const,
-      records,
-      lineIndex,
-      endOffset: records[0]!.endOffset
-    })),
-    ...parsed.malformedLines.map((line) => ({
-      kind: "malformed" as const,
-      endOffset: line.endOffset,
-      lineIndex: line.lineIndex
-    }))
-  ].sort((left, right) => left.lineIndex - right.lineIndex);
+  const malformedLines = new Set(
+    input.parsed.malformedLines.map((line) => line.lineIndex)
+  );
+  const lines: ParsedLine[] = [];
+  let cursor = 0;
+  let lineIndex = input.lineIndexOffset;
+  while (cursor < input.parsed.consumedBytes) {
+    const newline = input.buffer.indexOf(0x0a, cursor);
+    const end =
+      newline >= 0 && newline < input.parsed.consumedBytes
+        ? newline + 1
+        : input.parsed.consumedBytes;
+    const endOffset = input.absoluteStartOffset + end;
+    lines.push(
+      malformedLines.has(lineIndex)
+        ? { kind: "malformed", endOffset, lineIndex }
+        : {
+            kind: "records",
+            records: recordsByLine.get(lineIndex) ?? [],
+            endOffset,
+            lineIndex
+          }
+    );
+    cursor = end;
+    lineIndex += 1;
+  }
+  return lines;
 };
 
-const itemsForLine = (
+const itemsForLines = (
   source: CodexHistoryCandidate,
-  line: Extract<ParsedLine, { kind: "records" }>
+  lines: ParsedLine[]
 ): Array<Record<string, unknown>> => {
-  const values = line.records.map((record) => record.value);
+  const values = lines.flatMap((line) =>
+    line.kind === "records" ? line.records.map((record) => record.value) : []
+  );
   const context = extractTranscriptSessionMetadata(values);
   return buildCodexTranscriptConversationItems({
     records: values,
@@ -196,22 +216,28 @@ const selectLines = (input: {
   nowMs: () => number;
 }) => {
   const startedAt = input.nowMs();
-  const items: Array<Record<string, unknown>> = [];
+  let selectedLines: ParsedLine[] = [];
+  let items: Array<Record<string, unknown>> = [];
   let checkpointOffset = input.checkpoint.offset;
   let checkpointLine = input.checkpoint.line;
   let malformedRecordCount = 0;
   for (const line of input.lines) {
-    const lineItems =
-      line.kind === "records" ? itemsForLine(input.source, line) : [];
+    selectedLines.push(line);
+    const nextItems =
+      line.kind === "records" && line.records.length > 0
+        ? itemsForLines(input.source, selectedLines)
+        : items;
     if (
-      items.length > 0 &&
-      items.length + lineItems.length > input.config.maxBatchRows
-    )
+      selectedLines.length > 1 &&
+      nextItems.length > input.config.maxBatchRows
+    ) {
+      selectedLines.pop();
       break;
-    if (lineItems.length > input.config.maxBatchRows) {
+    }
+    if (nextItems.length > input.config.maxBatchRows) {
       return { error: "source_line_exceeds_row_limit" as const };
     }
-    items.push(...lineItems);
+    items = nextItems;
     if (line.kind === "malformed") malformedRecordCount += 1;
     checkpointOffset = line.endOffset;
     checkpointLine = line.lineIndex + 1;
@@ -239,17 +265,27 @@ const selectSourceWindow = (input: {
     input.size - input.checkpoint.offset
   );
   const buffer = readWindow(input.path, input.checkpoint.offset, byteCount);
+  const reachedSourceEnd =
+    input.checkpoint.offset + buffer.length === input.size;
   const parsed = parseCodexTranscriptJsonlBatch({
     buffer,
     absoluteStartOffset: input.checkpoint.offset,
     lineIndexOffset: input.checkpoint.line,
-    reachedEnd: input.checkpoint.offset + buffer.length === input.size
+    reachedEnd: reachedSourceEnd
   });
-  return selectLines({
-    ...input,
-    lines: parsedLines(parsed),
-    nowMs: input.nowMs ?? Date.now
-  });
+  return {
+    ...selectLines({
+      ...input,
+      lines: parsedLines({
+        parsed,
+        buffer,
+        absoluteStartOffset: input.checkpoint.offset,
+        lineIndexOffset: input.checkpoint.line
+      }),
+      nowMs: input.nowMs ?? Date.now
+    }),
+    incompleteAtSourceEnd: parsed.incompleteTail && reachedSourceEnd
+  };
 };
 
 const sourceBatch = (input: {
@@ -286,14 +322,16 @@ export const readHistoricalSourceBatch = (input: {
     return { state: "completed" };
   }
   const selected = selectSourceWindow({ ...input, ...validated });
-  if (
-    "error" in selected ||
-    selected.checkpointOffset === input.checkpoint.offset
-  ) {
+  if ("error" in selected) {
     return {
       state: "malformed",
-      reason: selected.error ?? "source_line_exceeds_byte_limit"
+      reason: selected.error ?? "source_line_exceeds_row_limit"
     };
+  }
+  if (selected.checkpointOffset === input.checkpoint.offset) {
+    return selected.incompleteAtSourceEnd
+      ? { state: "growing", reason: "source_incomplete_tail" }
+      : { state: "malformed", reason: "source_line_exceeds_byte_limit" };
   }
   const batch = sourceBatch({
     checkpoint: input.checkpoint,
@@ -304,7 +342,11 @@ export const readHistoricalSourceBatch = (input: {
   if (selected.checkpointOffset === validated.size) {
     return { state: "ready", batch };
   }
-  return { state: validated.growing ? "growing" : "ready", batch };
+  return {
+    state:
+      validated.growing || selected.incompleteAtSourceEnd ? "growing" : "ready",
+    batch
+  };
 };
 
 export const reconcileHistoricalSource = (

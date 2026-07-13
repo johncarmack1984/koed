@@ -17,7 +17,9 @@ const usableProject = (
   project?.name.trim()
     ? {
         name: project.name.trim(),
-        ...(project.fingerprint ? { fingerprint: project.fingerprint } : {})
+        ...(project.fingerprint?.trim()
+          ? { fingerprint: project.fingerprint.trim() }
+          : {})
       }
     : { name: "Unassigned" };
 
@@ -44,13 +46,22 @@ export const rankAutomaticHistoricalSources = (input: {
       "Automatic historical import session cap must be from 1 to 50"
     );
   }
-  const cutoff = input.now.getTime() - input.windowDays * 86_400_000;
-  const eligible = input.candidates
-    .filter((candidate) => Date.parse(candidate.sourceEventTo) >= cutoff)
-    .map((candidate) => ({
-      ...candidate,
-      detectedProject: usableProject(input.projectFor(candidate))
-    }));
+  const now = input.now.getTime();
+  const cutoff = now - input.windowDays * 86_400_000;
+  const eligibleByFingerprint = new Map<string, CodexHistoryCandidate>();
+  for (const candidate of input.candidates) {
+    const eventTime = Date.parse(candidate.sourceEventTo);
+    if (!Number.isFinite(eventTime) || eventTime < cutoff || eventTime > now)
+      continue;
+    const existing = eligibleByFingerprint.get(candidate.sourceFingerprint);
+    if (!existing || candidate.sourcePath < existing.sourcePath) {
+      eligibleByFingerprint.set(candidate.sourceFingerprint, candidate);
+    }
+  }
+  const eligible = [...eligibleByFingerprint.values()].map((candidate) => ({
+    ...candidate,
+    detectedProject: usableProject(input.projectFor(candidate))
+  }));
   const activityByProject = new Map<string, string>();
   for (const source of eligible) {
     const key =

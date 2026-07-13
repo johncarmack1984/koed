@@ -145,6 +145,30 @@ describe("codex-transcript-v1 adapter", () => {
     });
   });
 
+  it("holds an unterminated malformed tail until source growth completes it", () => {
+    const partial = Buffer.from(`${JSON.stringify(record)}\n{"timestamp":`);
+    const first = parseCodexTranscriptJsonlBatch({
+      buffer: partial,
+      reachedEnd: true
+    });
+    expect(first).toMatchObject({
+      records: [expect.any(Object)],
+      malformedLineCount: 0,
+      consumedBytes: Buffer.byteLength(`${JSON.stringify(record)}\n`),
+      incompleteTail: true
+    });
+
+    const complete = parseCodexTranscriptJsonlBatch({
+      buffer: Buffer.from('{"timestamp":"2026-07-02T00:00:00Z"}'),
+      reachedEnd: true
+    });
+    expect(complete).toMatchObject({
+      malformedLineCount: 0,
+      consumedBytes: Buffer.byteLength('{"timestamp":"2026-07-02T00:00:00Z"}'),
+      incompleteTail: false
+    });
+  });
+
   it("uses item discriminator to keep multiple logical rows at one transcript position distinct", () => {
     const items = adaptCodexTranscriptV1({
       observations: [
