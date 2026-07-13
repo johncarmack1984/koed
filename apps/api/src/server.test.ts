@@ -9268,8 +9268,15 @@ describe("account and access flows", () => {
   });
 
   it("authorizes, redacts, and rechecks policy for local historical import batches", async () => {
+    const repository = createFakeRepository();
+    repository.getLocalEmbeddingStatus = async () => ({
+      enabled: true,
+      healthy: true,
+      model: "qwen3-0.6b",
+      dimensions: 1024
+    });
     const app = await buildServer({
-      repository: createFakeRepository(),
+      repository,
       runMemoryJobsInlineForTests: true
     });
     const owner = await app.inject({
@@ -9286,6 +9293,23 @@ describe("account and access flows", () => {
     const ownerHeaders = {
       authorization: `Bearer ${jsonBody<TokenResponse>(ownerToken).token}`
     };
+    const admission = await app.inject({
+      method: "GET",
+      url: "/v1/historical-import-admission",
+      headers: ownerHeaders
+    });
+    expect(admission.statusCode).toBe(200);
+    expect(jsonBody(admission)).toEqual({
+      admission: {
+        admitted: true,
+        pressure: {
+          liveProjectionRows: 0,
+          interactiveQuestionRows: 0,
+          historicalImportRows: 0,
+          historicalImportBytes: 0
+        }
+      }
+    });
     const runResponse = await app.inject({
       method: "POST",
       url: "/v1/historical-imports",
@@ -9506,6 +9530,121 @@ describe("account and access flows", () => {
       replayed: true,
       items: [],
       source: { importedRecordCount: 1 }
+    });
+  });
+
+  it("fails coordinator admission closed under live, interactive, or health pressure", async () => {
+    const repository = createFakeRepository();
+    let backlog = {
+      liveProjectionRows: 1,
+      historicalImportRows: 0,
+      historicalImportBytes: 0,
+      interactiveQuestionRows: 0
+    };
+    repository.getConversationProjectionBacklog = async () => backlog;
+    repository.getLocalEmbeddingStatus = async () => ({
+      enabled: true,
+      healthy: true,
+      model: "qwen3-0.6b",
+      dimensions: 1024
+    });
+    const app = await buildServer({
+      repository,
+      runMemoryJobsInlineForTests: true
+    });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "history-admission@example.com",
+        password: "password123"
+      }
+    });
+    const token = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie: cookieHeader(registered) },
+      payload: { name: "Historical Admission" }
+    });
+    const headers = {
+      authorization: `Bearer ${jsonBody<TokenResponse>(token).token}`
+    };
+    const admission = () =>
+      app.inject({
+        method: "GET",
+        url: "/v1/historical-import-admission",
+        headers
+      });
+
+    const live = await admission();
+    expect(jsonBody(live)).toMatchObject({
+      admission: { admitted: false, reason: "live_projection_pressure" }
+    });
+    backlog = { ...backlog, liveProjectionRows: 0, interactiveQuestionRows: 1 };
+    expect(jsonBody(await admission())).toMatchObject({
+      admission: { admitted: false, reason: "interactive_pressure" }
+    });
+    backlog = {
+      ...backlog,
+      interactiveQuestionRows: 0,
+      historicalImportRows: 1,
+      historicalImportBytes: 100
+    };
+    expect(jsonBody(await admission())).toMatchObject({
+      admission: {
+        admitted: true,
+        pressure: { historicalImportRows: 1, historicalImportBytes: 100 }
+      }
+    });
+    repository.getLocalEmbeddingStatus = async () => ({
+      enabled: true,
+      healthy: false,
+      model: "qwen3-0.6b",
+      dimensions: 1024,
+      error: "degraded"
+    });
+    expect(jsonBody(await admission())).toMatchObject({
+      admission: { admitted: false, reason: "embedding_service_degraded" }
+    });
+    const unauthorized = await app.inject({
+      method: "GET",
+      url: "/v1/historical-import-admission"
+    });
+    await app.close();
+    expect(unauthorized.statusCode).toBe(401);
+
+    const queueRepository = createFakeRepository();
+    queueRepository.getLocalEmbeddingStatus = async () => ({
+      enabled: true,
+      healthy: true,
+      model: "qwen3-0.6b",
+      dimensions: 1024
+    });
+    const queueApp = await buildServer({ repository: queueRepository });
+    const queueUser = await queueApp.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "history-queue-admission@example.com",
+        password: "password123"
+      }
+    });
+    const queueToken = await queueApp.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie: cookieHeader(queueUser) },
+      payload: { name: "Historical Queue Admission" }
+    });
+    const queueAdmission = await queueApp.inject({
+      method: "GET",
+      url: "/v1/historical-import-admission",
+      headers: {
+        authorization: `Bearer ${jsonBody<TokenResponse>(queueToken).token}`
+      }
+    });
+    await queueApp.close();
+    expect(jsonBody(queueAdmission)).toMatchObject({
+      admission: { admitted: false, reason: "queue_degraded" }
     });
   });
 

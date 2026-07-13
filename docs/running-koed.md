@@ -232,11 +232,15 @@ Packaged Koed Desktop starts its managed local-personal `koed-server` with `runt
 
 Historical onboarding must begin only after this actual local readiness path and
 Codex/MCP/Supported Capture Hook setup are healthy. Supported-root discovery and
-resumable source-batch helpers exist, but current Desktop does not trigger them:
-KOE-219 Project metadata discovery is absent from this stack, and KOE-320 does
-not expose a coordinator-facing pressure/admission contract. The coordinator
-fails closed instead of scanning broader paths, inferring Projects from raw cwd,
-or treating historical backlog as readiness.
+resumable source-batch helpers exist, but current Desktop does not trigger them
+because KOE-219 Project metadata discovery is not connected to the historical
+coordinator on this stack. KOE-286 packaged first-run activation must also
+supply completed local readiness rather than an alternate probe. KOE-320
+pressure is available through owner-authenticated
+`GET /v1/historical-import-admission` and is rechecked on each new batch write.
+The coordinator fails closed instead of scanning broader paths, inferring
+Projects from raw cwd, probing `/ops/status`, or treating historical backlog as
+readiness.
 
 Run the bundled-local smoke workflow to verify the native control-plane path
 with an isolated temporary `KOED_HOME` and temporary host ports:

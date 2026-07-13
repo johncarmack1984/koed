@@ -486,7 +486,11 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   registerTeamRoutes(app, routeContext);
   registerLocalEdgeRoutes(app, routeContext);
   registerCaptureRoutes(app, routeContext);
-  registerHistoricalImportRoutes(app, routeContext);
+  registerHistoricalImportRoutes(app, routeContext, {
+    embeddingQueue,
+    compactionQueue,
+    assumeQueuesReady: options.runMemoryJobsInlineForTests
+  });
   registerRawConversationRoutes(app, routeContext);
   registerRecallRoutes(app, routeContext);
   registerLocalAgentSettingsRoutes(app, routeContext);

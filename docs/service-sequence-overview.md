@@ -146,13 +146,17 @@ MCP-side workers.
    and Codex component states. Batch gates fail closed for disabled/ask Capture
    Policy, non-personal visibility, Capture Pause, User skip, source failure, or
    missing/degraded backpressure admission.
-6. Automatic Desktop activation is not connected on this stack. KOE-219 Project
-   metadata discovery is absent, and KOE-320 has no owner-authenticated
-   coordinator admission API. The foundation therefore cannot truthfully
-   resolve recent Project activity or recheck KOE-320 pressure before every
-   ingestion batch. No path inference, `/ops/status` probing, Team sharing,
-   Workspace authorization, Share Grant, or alternate readiness path replaces
-   those contracts.
+6. Owner-authenticated `GET /v1/historical-import-admission` reports KOE-320
+   queue, Embedding Service, live Projection, interactive, and diagnostic
+   historical backlog counters without transcript content or local paths. Source batch writes
+   recheck this decision, while exact idempotent retries bypass new-work
+   admission and remain safe replays.
+7. Automatic Desktop activation is not connected on this stack because KOE-219
+   Project metadata discovery has no historical-coordinator integration. The
+   foundation therefore cannot truthfully resolve recent Project activity.
+   KOE-286 packaged first-run readiness must drive activation; no path inference,
+   `/ops/status` probing, Team sharing, Workspace authorization, Share Grant, or
+   alternate readiness path replaces those contracts.
 
 ## Server Deployment Boundary
 

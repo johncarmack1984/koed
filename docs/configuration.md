@@ -339,7 +339,7 @@ policy, or full URLs containing customer content.
 - `MEMORY_HISTORICAL_IMPORT_INTERACTIVE_BACKLOG_MAX`: pending interactive Memory Questions permitted before historical admission pauses. Default `0`; valid range `0`–`10000`.
 - `MEMORY_HISTORICAL_IMPORT_API_READY_URL`: required worker-visible API `/ready` URL for historical admission. Leave empty to fail closed and pause historical batches; Koed does not guess a replacement URL.
 - `MEMORY_HISTORICAL_IMPORT_API_READY_TIMEOUT_MS`: timeout for that API readiness probe. Default `1000`; valid range `100`–`10000`.
-- `MEMORY_CODEX_HISTORY_ROOTS`: optional platform-delimited list of explicit absolute Codex history-root overrides. Each entry must resolve to a real directory; filesystem roots, the home directory, missing directories, and symlink roots are rejected. The default discovery roots remain `sessions/` and `archived_sessions/` under explicit `CODEX_HOME` or the platform home `.codex` directory.
+- `MEMORY_CODEX_HISTORY_ROOTS`: optional platform-delimited list of explicit absolute Codex history-root overrides. Each entry must resolve to a real directory; filesystem roots, the home directory or its ancestors, missing directories, and symlink roots are rejected. The default discovery roots remain `sessions/` and `archived_sessions/` under explicit `CODEX_HOME` or the platform home `.codex` directory.
 - `MEMORY_HISTORICAL_IMPORT_WINDOW_DAYS`: automatic eligibility window. V1 requires exactly `30`; other values fail validation.
 - `MEMORY_HISTORICAL_IMPORT_FIRST_RUN_SESSIONS`: maximum sessions frozen into the automatic first-run set. Default `50`; valid range `1`–`50`.
 - `MEMORY_HISTORICAL_IMPORT_SOURCE_BATCH_ROWS`: maximum canonical source rows built for one coordinator ingestion batch. Default `100`; valid range `1`–`500`, keeping the KOE-322 API's 1000-item envelope safe when one transcript row produces multiple canonical items.
@@ -498,12 +498,14 @@ owner-scoped transaction lock as each batch write.
 
 `koed-server` now provides bounded supported-root discovery, metadata sampling,
 deterministic 30-day selection, resumable source reads, and fail-closed readiness
-and batch-gate helpers. Automatic Desktop activation is intentionally not wired
-on this stack: KOE-219 Project metadata discovery is not present, and KOE-320
-has no owner-authenticated coordinator admission contract for live/interactive
-backpressure. Missing either signal returns `backpressure_unavailable` or leaves
-Project resolution unavailable; callers must not infer readiness from queue
-age, source timestamps, filesystem paths, or `/ops/status` route probing.
+and batch-gate helpers. Owner-authenticated
+`GET /v1/historical-import-admission` provides coordinator-facing KOE-320
+pressure and health admission; new batch writes recheck it while historical
+backlog remains non-blocking diagnostic state. Automatic Desktop activation is
+intentionally not wired on this stack. KOE-219 Project metadata discovery exists,
+but historical coordinator integration is not present. Callers must not infer
+Project identity or readiness from queue age, source timestamps, filesystem
+paths, or `/ops/status` route probing.
 
 ## Data At Rest
 

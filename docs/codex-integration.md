@@ -47,11 +47,17 @@ growth does not widen it to older history. Source batches recheck prefix hash,
 size, runtime/Codex readiness, Capture Policy, Capture Pause, skip state, and an
 explicit historical-backpressure admission decision before writes.
 
-Current stack exposes these coordinator foundations but does not start automatic
-Desktop import. KOE-219 Project metadata discovery is absent, and KOE-320 does
-not expose a coordinator-facing backpressure admission contract. Both are
-required; fail-closed behavior is intentional rather than a fallback to path
-inference or queue probing.
+Current stack exposes these coordinator foundations and owner-authenticated
+`GET /v1/historical-import-admission`, but does not start automatic Desktop
+import. Admission fails closed when API queue probes or Embedding Service health
+are unavailable or live/interactive pressure exceeds configured KOE-320
+thresholds. Historical backlog remains diagnostic and does not itself block
+source ingestion or readiness. Batch writes recheck admission; exact idempotent
+retries remain readable replays. KOE-219 Project metadata discovery now exists,
+but no production adapter connects it to the historical coordinator, so
+automatic activation cannot rank by resolved Project activity. Fail-closed
+behavior is intentional rather than a fallback to path inference or
+operations-status probing.
 
 ## API Token
 

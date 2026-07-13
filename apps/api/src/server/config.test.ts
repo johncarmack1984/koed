@@ -34,6 +34,10 @@ describe("resolveApiServerConfig", () => {
         updateDebounceMs: 1_000,
         memoryEventUpdateDebounceMs: 100
       },
+      historicalImport: {
+        maxLiveProjectionRows: 0,
+        maxInteractiveQuestionRows: 0
+      },
       ops: {
         backupMaxAgeSeconds: 24 * 60 * 60,
         requestMetricsMaxAgeSeconds: 5 * 60,
@@ -89,6 +93,28 @@ describe("resolveApiServerConfig", () => {
       redisUrl: "redis://default:6379",
       graphCacheTtlSeconds: 30
     });
+  });
+
+  it("strictly bounds coordinator-facing historical admission thresholds", () => {
+    expect(
+      resolveApiServerConfig({
+        MEMORY_HISTORICAL_IMPORT_LIVE_BACKLOG_MAX: "2",
+        MEMORY_HISTORICAL_IMPORT_INTERACTIVE_BACKLOG_MAX: "3"
+      }).historicalImport
+    ).toEqual({
+      maxLiveProjectionRows: 2,
+      maxInteractiveQuestionRows: 3
+    });
+    expect(() =>
+      resolveApiServerConfig({
+        MEMORY_HISTORICAL_IMPORT_LIVE_BACKLOG_MAX: "10001"
+      })
+    ).toThrow("0 to 10000");
+    expect(() =>
+      resolveApiServerConfig({
+        MEMORY_HISTORICAL_IMPORT_INTERACTIVE_BACKLOG_MAX: "nope"
+      })
+    ).toThrow("0 to 10000");
   });
 
   it("accepts local queue backend override", () => {

@@ -50,6 +50,10 @@ export interface ApiServerConfig {
     updateDebounceMs: number;
     memoryEventUpdateDebounceMs: number;
   };
+  historicalImport: {
+    maxLiveProjectionRows: number;
+    maxInteractiveQuestionRows: number;
+  };
   embeddingModel?: string;
   rerankerKey?: string;
   workos: {
@@ -85,6 +89,22 @@ const positiveIntEnv = (
 ): number => {
   const parsed = Number.parseInt(environment[name] ?? "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const boundedIntEnv = (
+  environment: NodeJS.ProcessEnv,
+  name: string,
+  fallback: number,
+  minimum: number,
+  maximum: number
+): number => {
+  const raw = environment[name]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${name} must be an integer from ${minimum} to ${maximum}`);
+  }
+  return value;
 };
 
 const normalizeOrigin = (value: string): string => value.replace(/\/+$/, "");
@@ -245,6 +265,22 @@ export const resolveApiServerConfig = (
         environment,
         "MEMORY_EVENT_GRAPH_UPDATE_DEBOUNCE_MS",
         Math.min(graphUpdateDebounceMs, 100)
+      )
+    },
+    historicalImport: {
+      maxLiveProjectionRows: boundedIntEnv(
+        environment,
+        "MEMORY_HISTORICAL_IMPORT_LIVE_BACKLOG_MAX",
+        0,
+        0,
+        10_000
+      ),
+      maxInteractiveQuestionRows: boundedIntEnv(
+        environment,
+        "MEMORY_HISTORICAL_IMPORT_INTERACTIVE_BACKLOG_MAX",
+        0,
+        0,
+        10_000
       )
     },
     embeddingModel: optionalEnv(environment.EMBEDDING_MODEL),

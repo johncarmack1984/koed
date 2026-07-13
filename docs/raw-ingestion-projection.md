@@ -223,11 +223,15 @@ The `koed-server` coordinator foundation discovers only supported Codex roots,
 samples bounded metadata, freezes a 30-day/50-session automatic set, and reads
 complete JSONL rows into this adapter/API boundary with prefix-hash checkpoints.
 Its batch gate requires actual runtime/Codex setup readiness and an explicit
-KOE-320 pressure decision before each write. Automatic execution remains
-unwired while KOE-219 Project metadata and a coordinator-facing KOE-320
-admission contract are absent; missing contracts fail closed rather than
-falling back to path-derived Projects or authenticated operations-status
-probing.
+KOE-320 pressure decision before each write. Owner-authenticated
+`GET /v1/historical-import-admission` exposes that coordinator decision without
+transcript content or local paths. It fails closed for queue or Embedding Service
+health failure or live/interactive pressure; historical backlog remains
+non-blocking diagnostic state. The batch-write route rechecks admission while
+allowing exact idempotent retries. Automatic execution remains unwired: KOE-219
+Project metadata exists, but no production coordinator integration supplies
+resolved Projects. That missing integration fails closed rather than falling
+back to path-derived Projects or authenticated operations-status probing.
 
 When a display item is deleted, Koed excludes the underlying raw source item
 from semantic memory immediately and invalidates affected Memory Events and

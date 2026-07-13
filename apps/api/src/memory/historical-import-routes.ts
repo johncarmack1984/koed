@@ -4,6 +4,7 @@ import type {
   HistoricalImportSourceRecord,
   MemorySourceRepository
 } from "@koed/db";
+import type { KoedJobQueue } from "@koed/shared";
 import type { FastifyInstance } from "fastify";
 import type { ApiRouteContext } from "../server/context.js";
 import {
@@ -16,6 +17,38 @@ import {
 } from "./historical-import-schemas.js";
 
 const localProfiles = new Set(["developer", "local_personal"]);
+
+export interface HistoricalImportRouteOptions {
+  embeddingQueue: KoedJobQueue<unknown> | null;
+  compactionQueue: KoedJobQueue<unknown> | null;
+  assumeQueuesReady?: boolean;
+}
+
+export type HistoricalImportAdmission =
+  | {
+      admitted: true;
+      pressure: {
+        liveProjectionRows: number;
+        interactiveQuestionRows: number;
+        historicalImportRows: number;
+        historicalImportBytes: number;
+      };
+    }
+  | {
+      admitted: false;
+      reason:
+        | "admission_unavailable"
+        | "queue_degraded"
+        | "embedding_service_degraded"
+        | "live_projection_pressure"
+        | "interactive_pressure";
+      pressure?: {
+        liveProjectionRows: number;
+        interactiveQuestionRows: number;
+        historicalImportRows: number;
+        historicalImportBytes: number;
+      };
+    };
 
 const requireLocalImportSurface = (context: ApiRouteContext): void => {
   if (!localProfiles.has(context.config.deploymentProfile)) {
@@ -113,6 +146,85 @@ const requireImportPolicy = async (
 type HistoricalBatchInput = ReturnType<
   typeof historicalImportBatchSchema.parse
 >;
+
+const queueReady = async (
+  queue: KoedJobQueue<unknown> | null,
+  assumeReady: boolean
+): Promise<boolean> => {
+  if (!queue) return assumeReady;
+  try {
+    await queue.getJobCounts("waiting", "active");
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const historicalImportAdmission = async (
+  context: ApiRouteContext,
+  options: HistoricalImportRouteOptions
+): Promise<HistoricalImportAdmission> => {
+  const repo = context.requireRepository();
+  try {
+    const [backlog, embedding, embeddingQueueReady, compactionQueueReady] =
+      await Promise.all([
+        repo.getConversationProjectionBacklog(),
+        repo.getLocalEmbeddingStatus(),
+        queueReady(options.embeddingQueue, options.assumeQueuesReady ?? false),
+        queueReady(options.compactionQueue, options.assumeQueuesReady ?? false)
+      ]);
+    const pressure = {
+      liveProjectionRows: backlog.liveProjectionRows,
+      interactiveQuestionRows: backlog.interactiveQuestionRows,
+      historicalImportRows: backlog.historicalImportRows,
+      historicalImportBytes: backlog.historicalImportBytes
+    };
+    if (!embeddingQueueReady || !compactionQueueReady) {
+      return { admitted: false, reason: "queue_degraded", pressure };
+    }
+    if (!embedding.healthy) {
+      return {
+        admitted: false,
+        reason: "embedding_service_degraded",
+        pressure
+      };
+    }
+    if (
+      pressure.liveProjectionRows >
+      context.config.historicalImport.maxLiveProjectionRows
+    ) {
+      return { admitted: false, reason: "live_projection_pressure", pressure };
+    }
+    if (
+      pressure.interactiveQuestionRows >
+      context.config.historicalImport.maxInteractiveQuestionRows
+    ) {
+      return { admitted: false, reason: "interactive_pressure", pressure };
+    }
+    return { admitted: true, pressure };
+  } catch {
+    return { admitted: false, reason: "admission_unavailable" };
+  }
+};
+
+const requireHistoricalImportAdmission = async (
+  context: ApiRouteContext,
+  options: HistoricalImportRouteOptions
+): Promise<void> => {
+  const admission = await historicalImportAdmission(context, options);
+  if (!admission.admitted) {
+    throw Object.assign(new Error(admission.reason), { statusCode: 409 });
+  }
+};
+
+const exactBatchReplay = (
+  source: HistoricalImportSourceRecord,
+  input: HistoricalBatchInput
+): boolean =>
+  source.checkpointOffset === input.checkpointOffset &&
+  source.checkpointLine === input.checkpointLine &&
+  source.checkpointHash === input.checkpointHash &&
+  input.checkpointOffset > input.expectedCheckpointOffset;
 
 const registerCreateRunRoute = (
   app: FastifyInstance,
@@ -281,9 +393,26 @@ const ingestHistoricalBatch = (
     }
   );
 
+const registerAdmissionRoute = (
+  app: FastifyInstance,
+  context: ApiRouteContext,
+  options: HistoricalImportRouteOptions
+): void => {
+  app.get(
+    "/v1/historical-import-admission",
+    { preHandler: context.rateLimit.memoryRead },
+    async (request) => {
+      requireLocalImportSurface(context);
+      await context.auth.authenticate(request);
+      return { admission: await historicalImportAdmission(context, options) };
+    }
+  );
+};
+
 const registerBatchRoute = (
   app: FastifyInstance,
-  context: ApiRouteContext
+  context: ApiRouteContext,
+  options: HistoricalImportRouteOptions
 ): void => {
   app.post(
     "/v1/historical-import-sources/:sourceId/batches",
@@ -295,6 +424,11 @@ const registerBatchRoute = (
         request.params
       );
       const input = historicalImportBatchSchema.parse(request.body);
+      const repo = context.requireRepository();
+      const currentSource = await requireSource(repo, user.id, sourceId);
+      if (!exactBatchReplay(currentSource, input)) {
+        await requireHistoricalImportAdmission(context, options);
+      }
       const { items, source, policy, replayed } = await ingestHistoricalBatch(
         context,
         user.id,
@@ -316,7 +450,8 @@ const registerBatchRoute = (
 
 export const registerHistoricalImportRoutes = (
   app: FastifyInstance,
-  context: ApiRouteContext
+  context: ApiRouteContext,
+  options: HistoricalImportRouteOptions
 ): void => {
   registerCreateRunRoute(app, context);
   registerListRunsRoute(app, context);
@@ -324,5 +459,6 @@ export const registerHistoricalImportRoutes = (
   registerCreateSourceRoute(app, context);
   registerRunTransitionRoute(app, context);
   registerSourceTransitionRoute(app, context);
-  registerBatchRoute(app, context);
+  registerAdmissionRoute(app, context, options);
+  registerBatchRoute(app, context, options);
 };

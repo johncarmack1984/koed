@@ -371,6 +371,16 @@ export const routeIdentityContracts = [
     localEdgeDeploymentModes
   ),
   route(
+    "GET",
+    "/v1/historical-import-admission",
+    "session_or_api_token",
+    "capture",
+    "Read fail-closed coordinator admission for one bounded historical source batch.",
+    "none",
+    "implemented",
+    localEdgeDeploymentModes
+  ),
+  route(
     "POST",
     "/v1/historical-import-sources/{sourceId}/batches",
     "session_or_api_token",
