@@ -124,6 +124,36 @@ MCP-side workers.
     manages only its local personal `koed-server`; remote, Team Self-Hosted,
     and cloud targets are connect-only.
 
+## Historical Onboarding Coordinator Foundation
+
+1. `koed-server` resolves only supported Codex `sessions/` and
+   `archived_sessions/` roots under `CODEX_HOME`/platform home, plus validated
+   explicit overrides. Discovery rejects root symlinks, nested symlinks, and
+   canonical root escapes.
+2. Bounded head/tail samples produce source session ID, source event range,
+   local cwd/Project hint, size, modified time, and stable path-independent
+   fingerprint. Public presentation strips path and cwd.
+3. Selection freezes sessions active in exactly the last 30 days, capped at 50,
+   ordered by recent Project activity, latest source event, then fingerprint.
+   Missing usable Project metadata becomes local `Unassigned`.
+4. Source reads preserve complete JSONL row boundaries and return KOE-322 batch
+   payloads built through `codex-transcript-v1` with
+   `sourceTransport=historical_import`. Offset, line, source size, and SHA-256
+   prefix checkpoints support restart and distinguish growth, truncation,
+   mutation, move, deletion, unreadable input, and malformed input.
+5. Start readiness consumes actual `koed-server` API, database, Worker/queue,
+   Embedding Service, Explorer, API Token, MCP Server, Supported Capture Hook,
+   and Codex component states. Batch gates fail closed for disabled/ask Capture
+   Policy, non-personal visibility, Capture Pause, User skip, source failure, or
+   missing/degraded backpressure admission.
+6. Automatic Desktop activation is not connected on this stack. KOE-219 Project
+   metadata discovery is absent, and KOE-320 has no owner-authenticated
+   coordinator admission API. The foundation therefore cannot truthfully
+   resolve recent Project activity or recheck KOE-320 pressure before every
+   ingestion batch. No path inference, `/ops/status` probing, Team sharing,
+   Workspace authorization, Share Grant, or alternate readiness path replaces
+   those contracts.
+
 ## Server Deployment Boundary
 
 Server, private VPS, Team Self-Hosted, and Koed-managed cloud deployments are

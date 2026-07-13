@@ -339,6 +339,14 @@ policy, or full URLs containing customer content.
 - `MEMORY_HISTORICAL_IMPORT_INTERACTIVE_BACKLOG_MAX`: pending interactive Memory Questions permitted before historical admission pauses. Default `0`; valid range `0`–`10000`.
 - `MEMORY_HISTORICAL_IMPORT_API_READY_URL`: required worker-visible API `/ready` URL for historical admission. Leave empty to fail closed and pause historical batches; Koed does not guess a replacement URL.
 - `MEMORY_HISTORICAL_IMPORT_API_READY_TIMEOUT_MS`: timeout for that API readiness probe. Default `1000`; valid range `100`–`10000`.
+- `MEMORY_CODEX_HISTORY_ROOTS`: optional platform-delimited list of explicit absolute Codex history-root overrides. Each entry must resolve to a real directory; filesystem roots, the home directory, missing directories, and symlink roots are rejected. The default discovery roots remain `sessions/` and `archived_sessions/` under explicit `CODEX_HOME` or the platform home `.codex` directory.
+- `MEMORY_HISTORICAL_IMPORT_WINDOW_DAYS`: automatic eligibility window. V1 requires exactly `30`; other values fail validation.
+- `MEMORY_HISTORICAL_IMPORT_FIRST_RUN_SESSIONS`: maximum sessions frozen into the automatic first-run set. Default `50`; valid range `1`–`50`.
+- `MEMORY_HISTORICAL_IMPORT_SOURCE_BATCH_ROWS`: maximum canonical source rows built for one coordinator ingestion batch. Default `100`; valid range `1`–`500`, keeping the KOE-322 API's 1000-item envelope safe when one transcript row produces multiple canonical items.
+- `MEMORY_HISTORICAL_IMPORT_SOURCE_BATCH_BYTES`: maximum transcript bytes read for one coordinator ingestion batch. Default `1000000`; valid range `1024`–`4000000`.
+- `MEMORY_HISTORICAL_IMPORT_SOURCE_BATCH_RUNTIME_MS`: soft coordinator runtime boundary checked after each complete JSONL row. Default `15000`; valid range `100`–`60000`.
+- `MEMORY_HISTORICAL_IMPORT_DISCOVERY_FILE_LIMIT`: maximum JSONL files considered across supported roots. Default `10000`; valid range `1`–`100000`.
+- `MEMORY_HISTORICAL_IMPORT_METADATA_SAMPLE_BYTES`: head/tail bytes used for metadata-first discovery. Default `65536`; valid range `4096`–`1048576`.
 - `MEMORY_VECTOR_CANDIDATE_LIMIT`: vector retrieval candidate count.
 - `MEMORY_RAG_ROLLUP_CANDIDATE_LIMIT`, `MEMORY_RAG_LEAF_CANDIDATE_LIMIT`, `MEMORY_RAG_FRESH_EVENT_CANDIDATE_LIMIT`, `MEMORY_RAG_RAW_FALLBACK_CANDIDATE_LIMIT`, `MEMORY_RAG_LEXICAL_CANDIDATE_LIMIT`, `MEMORY_RAG_SCOPED_LEAF_CANDIDATE_LIMIT`: optional per-stage retrieval candidate limits. Leave blank to use code defaults derived from the requested result limit.
 - `MEMORY_RAG_ROLLUP_RESULT_LIMIT`: optional cap on rollup results admitted into final recall evidence.
@@ -487,6 +495,15 @@ expected checkpoint. Source growth is allowed; truncation, prefix mutation, and
 stale checkpoints fail explicitly. Exact completed retries return a read-only
 replay. Effective Capture Policy and Capture Pause are rechecked under the same
 owner-scoped transaction lock as each batch write.
+
+`koed-server` now provides bounded supported-root discovery, metadata sampling,
+deterministic 30-day selection, resumable source reads, and fail-closed readiness
+and batch-gate helpers. Automatic Desktop activation is intentionally not wired
+on this stack: KOE-219 Project metadata discovery is not present, and KOE-320
+has no owner-authenticated coordinator admission contract for live/interactive
+backpressure. Missing either signal returns `backpressure_unavailable` or leaves
+Project resolution unavailable; callers must not infer readiness from queue
+age, source timestamps, filesystem paths, or `/ops/status` route probing.
 
 ## Data At Rest
 

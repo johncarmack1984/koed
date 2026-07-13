@@ -219,6 +219,16 @@ and Captured Session records. It is not mutable Personal Project assignment,
 Team Workspace resolution, or authorization. Import creates Personal Memory
 only and cannot create Workspace Access or Share Grants.
 
+The `koed-server` coordinator foundation discovers only supported Codex roots,
+samples bounded metadata, freezes a 30-day/50-session automatic set, and reads
+complete JSONL rows into this adapter/API boundary with prefix-hash checkpoints.
+Its batch gate requires actual runtime/Codex setup readiness and an explicit
+KOE-320 pressure decision before each write. Automatic execution remains
+unwired while KOE-219 Project metadata and a coordinator-facing KOE-320
+admission contract are absent; missing contracts fail closed rather than
+falling back to path-derived Projects or authenticated operations-status
+probing.
+
 When a display item is deleted, Koed excludes the underlying raw source item
 from semantic memory immediately and invalidates affected Memory Events and
 embeddings. A durable rebuild job then waits for

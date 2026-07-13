@@ -230,6 +230,14 @@ Packaged Koed Desktop starts its managed local-personal `koed-server` with `runt
 
 `desktop:package` and `desktop:package:smoke:mac` build unsigned local smoke artifacts. `desktop:package:internal:mac` prepares unsigned macOS `dmg` and `zip` outputs for internal testing, including packaged native runtime assets when `KOED_NATIVE_RUNTIME_SOURCE_DIR` is set. New GitHub Releases upload these unsigned Desktop assets and checksums after packaged-native smoke passes. Signed/notarized release artifacts still require future Developer ID credential setup.
 
+Historical onboarding must begin only after this actual local readiness path and
+Codex/MCP/Supported Capture Hook setup are healthy. Supported-root discovery and
+resumable source-batch helpers exist, but current Desktop does not trigger them:
+KOE-219 Project metadata discovery is absent from this stack, and KOE-320 does
+not expose a coordinator-facing pressure/admission contract. The coordinator
+fails closed instead of scanning broader paths, inferring Projects from raw cwd,
+or treating historical backlog as readiness.
+
 Run the bundled-local smoke workflow to verify the native control-plane path
 with an isolated temporary `KOED_HOME` and temporary host ports:
 

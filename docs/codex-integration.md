@@ -25,6 +25,34 @@ finishes with a doctor check. Koed Desktop runs this guided client setup path
 automatically on startup when needed; `pnpm clients:bootstrap` remains the
 underlying Local Operator Script for manual recovery.
 
+## Historical Onboarding Discovery
+
+Bounded discovery considers only `sessions/` and `archived_sessions/` under
+explicit `CODEX_HOME` or the platform home `.codex` directory, plus validated
+absolute roots from `MEMORY_CODEX_HISTORY_ROOTS`. It does not recursively scan
+the home directory. Root symlinks are rejected; symlink entries and canonical
+paths escaping an accepted root are never followed.
+
+Discovery samples bounded head/tail bytes before import to obtain source session
+ID, source time range, local cwd/Project hint, file size, modified time, and a
+path-independent stable fingerprint. Raw source paths and cwd stay local;
+redacted presentation contains only basename label, source session ID,
+fingerprint, size, and timestamps. Missing usable Project metadata maps to
+`Unassigned`, never to a Team Workspace and never to automatic sharing.
+
+Automatic selection is exactly the most recent 30 days and at most 50 sessions,
+ordered by recent Project activity, then latest source event, then stable
+fingerprint. The selected set is frozen for opportunistic continuation; source
+growth does not widen it to older history. Source batches recheck prefix hash,
+size, runtime/Codex readiness, Capture Policy, Capture Pause, skip state, and an
+explicit historical-backpressure admission decision before writes.
+
+Current stack exposes these coordinator foundations but does not start automatic
+Desktop import. KOE-219 Project metadata discovery is absent, and KOE-320 does
+not expose a coordinator-facing backpressure admission contract. Both are
+required; fail-closed behavior is intentional rather than a fallback to path
+inference or queue probing.
+
 ## API Token
 
 Create a local API token and copy it immediately. Full token values are shown once.
