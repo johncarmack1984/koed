@@ -43,6 +43,10 @@ type ConversationItemRow = {
   source_event_type: string | null;
   source_sequence: number | null;
   idempotency_key: string;
+  observed_at: Date;
+  import_observed_at: Date | null;
+  source_fingerprint: string | null;
+  captured_project: Record<string, unknown>;
   created_at: Date;
 };
 
@@ -113,6 +117,10 @@ const sanitizeConversationItemForStorage = (
   const transportChunkEncoding = sanitizeForPostgresStorage(
     item.transportChunkEncoding
   );
+  const sourceFingerprint = sanitizeForPostgresStorage(item.sourceFingerprint);
+  const capturedProject = sanitizeForPostgresStorage(
+    item.capturedProject ?? {}
+  );
   const sourceHash = sanitizeForPostgresStorage(item.sourceHash);
   const idempotencyKey = sanitizeForPostgresStorage(item.idempotencyKey);
   const projectionStatus = sanitizeForPostgresStorage(item.projectionStatus);
@@ -136,6 +144,8 @@ const sanitizeConversationItemForStorage = (
     logicalSourceId,
     transportChunkText,
     transportChunkEncoding,
+    sourceFingerprint,
+    capturedProject,
     sourceHash,
     idempotencyKey,
     projectionStatus,
@@ -161,6 +171,8 @@ const sanitizeConversationItemForStorage = (
     logicalSourceId: logicalSourceId.value as string | undefined,
     transportChunkText: transportChunkText.value as string | undefined,
     transportChunkEncoding: transportChunkEncoding.value as string | undefined,
+    sourceFingerprint: sourceFingerprint.value as string | undefined,
+    capturedProject: capturedProject.value as Record<string, unknown>,
     sourceHash: sourceHash.value as string,
     idempotencyKey: idempotencyKey.value as string,
     projectionStatus: projectionStatus.value as
@@ -284,12 +296,15 @@ const canonicalConversationKind = (
 };
 
 const canonicalConversationItemIdentity = (
-  item: ConversationItemInput
+  item: ConversationItemInput,
+  ownerUserId: string
 ): {
   key: string;
   actor: string;
   kind: string;
   contentHash: string;
+  recordHash: string;
+  sourceHash: string;
 } | null => {
   if (
     item.sourceRecordType === "hook_payload" ||
@@ -305,20 +320,7 @@ const canonicalConversationItemIdentity = (
     return null;
   }
   const content = item.rawText?.replace(/\s+/g, " ").trim();
-  if (!content) {
-    return null;
-  }
-  const actor = canonicalConversationActor(item);
-  if (!actor) {
-    return null;
-  }
-  const turnIdentity =
-    item.externalTurnId ??
-    stringField(item.metadata ?? {}, "externalTurnId") ??
-    (isRecord(item.rawJson) ? stringField(item.rawJson, "turn_id") : null);
-  if (!turnIdentity) {
-    return null;
-  }
+  const actor = canonicalConversationActor(item) ?? "raw";
   const threadIdentity =
     item.externalThreadId ??
     item.externalSessionId ??
@@ -327,66 +329,107 @@ const canonicalConversationItemIdentity = (
   if (!threadIdentity) {
     return null;
   }
-  const kind = canonicalConversationKind(item, actor);
-  if (
-    kind !== "message" &&
-    kind !== "reasoning_summary" &&
-    kind !== "tool_call" &&
-    kind !== "tool_result"
-  ) {
+  const kind =
+    actor === "raw"
+      ? `raw:${item.sourceEventType ?? item.sourceRecordType}`
+      : canonicalConversationKind(item, actor);
+  const recordHash = sha256(item.rawJson);
+  const contentHash = content ? normalizedContentHash(content) : recordHash;
+  const transcriptPosition =
+    typeof item.metadata?.transcriptByteOffset === "number"
+      ? item.metadata.transcriptByteOffset
+      : (item.sourceSequence ?? item.sourceLineNumber);
+  if (transcriptPosition === undefined) {
     return null;
   }
-  const contentHash = normalizedContentHash(content);
-  if (item.sourcePath && typeof item.sourceSequence === "number") {
-    const key = `conversation-item:${sha256({
-      version: 2,
-      sourceKind: item.sourceKind,
-      sourcePath: item.sourcePath,
-      sourceSequence: item.sourceSequence,
-      actor,
-      kind,
-      contentHash
-    })}`;
-    return {
-      key,
-      actor,
-      kind,
-      contentHash
-    };
-  }
-  const key = `conversation-item:${sha256({
-    version: 1,
-    sourceKind: item.sourceKind,
-    threadIdentity,
-    turnIdentity,
-    actor,
-    kind,
-    contentHash
-  })}`;
+  const itemDiscriminator =
+    stringField(item.metadata ?? {}, "transcriptItemDiscriminator") ??
+    item.externalItemId ??
+    item.sourceEventType ??
+    item.sourceRecordType;
+  const identityPayload = {
+    version: 4,
+    ownerUserId,
+    aiClient: item.sourceKind,
+    sourceSessionId: threadIdentity,
+    transcriptPosition,
+    itemDiscriminator,
+    recordHash
+  };
+  const identityHash = sha256(identityPayload);
+  const key = `conversation-item:${identityHash}`;
   return {
     key,
     actor,
     kind,
-    contentHash
+    contentHash,
+    recordHash,
+    sourceHash: identityHash
+  };
+};
+
+const withOwnerScopedChunkIdentity = (
+  item: ConversationItemInput,
+  ownerUserId: string
+): ConversationItemInput => {
+  if (
+    !item.logicalSourceId ||
+    (item.transportChunkCount ?? 1) <= 1 ||
+    item.transportChunkIndex === undefined
+  ) {
+    return item;
+  }
+  const logicalSourceId = sha256({
+    version: 1,
+    ownerUserId,
+    logicalSourceId: item.logicalSourceId
+  });
+  const chunkHash = sha256({
+    sourceHash: logicalSourceId,
+    transportChunkIndex: item.transportChunkIndex,
+    transportChunkCount: item.transportChunkCount
+  });
+  return {
+    ...item,
+    logicalSourceId,
+    sourceHash: chunkHash,
+    idempotencyKey: chunkHash,
+    metadata: {
+      ...(item.metadata ?? {}),
+      ownerScopedLogicalSource: true
+    }
   };
 };
 
 const withCanonicalConversationIdentity = (
-  item: ConversationItemInput
+  item: ConversationItemInput,
+  ownerUserId: string
 ): ConversationItemInput => {
-  const identity = canonicalConversationItemIdentity(item);
+  const ownerScopedItem = withOwnerScopedChunkIdentity(item, ownerUserId);
+  const identity = canonicalConversationItemIdentity(
+    ownerScopedItem,
+    ownerUserId
+  );
   if (!identity) {
-    return item;
+    return ownerScopedItem;
   }
   return {
-    ...item,
+    ...ownerScopedItem,
+    sourceHash: identity.sourceHash,
     idempotencyKey: identity.key,
     metadata: {
-      ...(item.metadata ?? {}),
+      ...(ownerScopedItem.metadata ?? {}),
+      ...(ownerScopedItem.sourceTransport === "hook"
+        ? { observedViaHook: true }
+        : {}),
+      ...(ownerScopedItem.sourceTransport === "historical_import"
+        ? { observedViaHistoricalImport: true }
+        : {}),
       canonicalConversationItemKey: identity.key,
       canonicalConversationItemActor: identity.actor,
       canonicalConversationItemKind: identity.kind,
-      canonicalConversationItemContentHash: identity.contentHash
+      canonicalConversationItemContentHash: identity.contentHash,
+      canonicalConversationItemRecordHash: identity.recordHash
     }
   };
 };
@@ -408,6 +451,10 @@ const mapConversationItem = (
   sourceEventType: row.source_event_type,
   sourceSequence: row.source_sequence,
   idempotencyKey: row.idempotency_key,
+  observedAt: row.observed_at.toISOString(),
+  importObservedAt: row.import_observed_at?.toISOString() ?? null,
+  sourceFingerprint: row.source_fingerprint,
+  capturedProject: row.captured_project,
   createdAt: row.created_at.toISOString()
 });
 
@@ -554,7 +601,8 @@ export const createConversationItemRepository = (
     const records: ConversationItemRecord[] = [];
     for (const inputItem of input.items) {
       const item = withCanonicalConversationIdentity(
-        sanitizeConversationItemForStorage(inputItem)
+        sanitizeConversationItemForStorage(inputItem),
+        actor.userId
       );
       const visibility = item.visibility ?? "personal";
       const ownerUserId = actor.userId;
@@ -631,6 +679,9 @@ export const createConversationItemRepository = (
           source_line_number,
           source_sequence,
           event_time,
+          import_observed_at,
+          source_fingerprint,
+          captured_project,
           raw_json,
           raw_text,
           logical_source_id,
@@ -650,7 +701,7 @@ export const createConversationItemRepository = (
           $1, $2, $3, $4, $5, $6, $7, $8, $9,
           $10, $11, $12, $13, $14, $15, $16, $17, $18,
           $19, $20, $21, $22, $23, $24, $25, $26, $27, $28,
-          $29, $30, $31, $32
+          $29, $30, $31, $32, $33, $34, $35
         )
         on conflict (owner_user_id, idempotency_key)
           where visibility = 'personal'
@@ -674,6 +725,9 @@ export const createConversationItemRepository = (
             else conversation_items.source_adapter_version
           end,
           source_transport = case
+            when conversation_items.source_transport = 'hook'
+              or excluded.source_transport = 'hook'
+              then 'hook'
             when excluded.metadata ? 'canonicalConversationItemKey' and (
               case when excluded.source_record_type = 'hook_payload' then 0 else 1 end
             ) >= (
@@ -730,9 +784,22 @@ export const createConversationItemRepository = (
             conversation_items.source_sequence
           ),
           event_time = coalesce(
-            excluded.event_time,
-            conversation_items.event_time
+            conversation_items.event_time,
+            excluded.event_time
           ),
+          import_observed_at = coalesce(
+            conversation_items.import_observed_at,
+            excluded.import_observed_at
+          ),
+          source_fingerprint = coalesce(
+            conversation_items.source_fingerprint,
+            excluded.source_fingerprint
+          ),
+          captured_project = case
+            when conversation_items.captured_project = '{}'::jsonb
+              then excluded.captured_project
+            else conversation_items.captured_project
+          end,
           raw_json = case
             when excluded.metadata ? 'canonicalConversationItemKey' and (
               case when excluded.source_record_type = 'hook_payload' then 0 else 1 end
@@ -763,17 +830,7 @@ export const createConversationItemRepository = (
             excluded.transport_chunk_encoding,
             conversation_items.transport_chunk_encoding
           ),
-          projection_status = case
-            when conversation_items.projection_status = 'projected'
-              and excluded.metadata ? 'canonicalConversationItemKey'
-              and (
-                case when excluded.source_record_type = 'hook_payload' then 0 else 1 end
-              ) >= (
-                case when conversation_items.source_record_type = 'hook_payload' then 0 else 1 end
-              )
-            then 'pending'
-            else conversation_items.projection_status
-          end,
+          projection_status = conversation_items.projection_status,
           projection_work_class = case
             when conversation_items.projection_work_class = 'live_capture_projection'
               or excluded.projection_work_class = 'live_capture_projection'
@@ -789,24 +846,15 @@ export const createConversationItemRepository = (
             else conversation_items.projection_version
           end,
           projection_error = null,
-          projected_at = case
-            when conversation_items.projection_status = 'projected'
-              and excluded.metadata ? 'canonicalConversationItemKey'
-              and (
-                case when excluded.source_record_type = 'hook_payload' then 0 else 1 end
-              ) >= (
-                case when conversation_items.source_record_type = 'hook_payload' then 0 else 1 end
-              )
-            then null
-            else conversation_items.projected_at
-          end,
+          projected_at = conversation_items.projected_at,
           metadata = conversation_items.metadata || excluded.metadata
         returning
           id, owner_user_id, session_id, turn_id, source_kind,
           source_adapter_version, source_transport, external_session_id,
           external_thread_id, external_turn_id, external_item_id,
           source_record_type, source_event_type, source_sequence,
-          idempotency_key, created_at
+          idempotency_key, observed_at, import_observed_at,
+          source_fingerprint, captured_project, created_at
       `;
       const upsertParams = [
         ownerUserId,
@@ -827,6 +875,9 @@ export const createConversationItemRepository = (
         item.sourceLineNumber ?? null,
         item.sourceSequence ?? null,
         item.eventTime ?? null,
+        item.importObservedAt ?? null,
+        item.sourceFingerprint ?? null,
+        item.capturedProject ?? {},
         JSON.stringify(rawJsonForStorage),
         rawTextForStorage,
         item.logicalSourceId ?? null,
@@ -973,7 +1024,8 @@ export const createConversationItemRepository = (
                 source_adapter_version, source_transport, external_session_id,
                 external_thread_id, external_turn_id, external_item_id,
                 source_record_type, source_event_type, source_sequence,
-                idempotency_key, created_at
+                idempotency_key, observed_at, import_observed_at,
+                source_fingerprint, captured_project, created_at
               from conversation_items
               where idempotency_key = $1
                 and visibility = $2::visibility_scope

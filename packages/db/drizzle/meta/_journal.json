@@ -85,6 +85,13 @@
       "when": 1783952470686,
       "tag": "0011_unknown_justice",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1783953473229,
+      "tag": "0012_dazzling_chimera",
+      "breakpoints": true
     }
   ]
 }

@@ -475,6 +475,86 @@ export interface EffectiveCapturePolicy {
   policy: CapturePolicyRecord | null;
 }
 
+export type HistoricalImportState =
+  | "discovered"
+  | "eligible"
+  | "queued"
+  | "importing"
+  | "paused"
+  | "skipped"
+  | "completed"
+  | "failed";
+
+export interface HistoricalImportCounters {
+  discoveredRecordCount: number;
+  importedRecordCount: number;
+  skippedRecordCount: number;
+}
+
+export interface HistoricalImportRunRecord extends HistoricalImportCounters {
+  id: string;
+  ownerUserId: string;
+  state: HistoricalImportState;
+  sourceCount: number;
+  completedSourceCount: number;
+  failedSourceCount: number;
+  skippedSourceCount: number;
+  scannedByteCount: number;
+  retryCount: number;
+  failureReason: string | null;
+  nextRetryAt: string | null;
+  discoveredAt: string;
+  eligibleAt: string | null;
+  queuedAt: string | null;
+  importStartedAt: string | null;
+  pausedAt: string | null;
+  skippedAt: string | null;
+  completedAt: string | null;
+  failedAt: string | null;
+  lastAttemptAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HistoricalImportSourceRecord extends HistoricalImportCounters {
+  id: string;
+  runId: string;
+  ownerUserId: string;
+  state: HistoricalImportState;
+  aiClient: string;
+  sourceKind: string;
+  sourceSessionId: string;
+  sourceFingerprint: string;
+  localSourcePath: string;
+  redactedSourceLabel: string;
+  checkpointOffset: number;
+  checkpointLine: number;
+  sourceSizeBytes: number | null;
+  sourceModifiedAt: string | null;
+  sourceEventFrom: string | null;
+  sourceEventTo: string | null;
+  malformedRecordCount: number;
+  retryCount: number;
+  failureReason: string | null;
+  nextRetryAt: string | null;
+  detectedProject: Record<string, unknown>;
+  discoveredAt: string;
+  eligibleAt: string | null;
+  queuedAt: string | null;
+  importStartedAt: string | null;
+  pausedAt: string | null;
+  skippedAt: string | null;
+  completedAt: string | null;
+  failedAt: string | null;
+  lastObservedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HistoricalImportRunDetail extends HistoricalImportRunRecord {
+  sources: HistoricalImportSourceRecord[];
+}
+
 export interface UpsertCapturePolicyInput {
   targetType: CapturePolicyTarget;
   projectId?: string;
@@ -682,6 +762,11 @@ export interface CapturedSessionRecord {
   captureMethod: CaptureMethod;
   model: string | null;
   cwd: string | null;
+  sourceKind: string | null;
+  sourceAdapterVersion: string | null;
+  sourceFingerprint: string | null;
+  capturedProject: Record<string, unknown>;
+  importObservedAt: string | null;
   metadata: Record<string, unknown>;
   capturedProjectProvenance: Record<string, unknown>;
   automaticProject: PersonalProjectReference | null;
@@ -725,6 +810,9 @@ export interface ConversationItemInput {
   sourceLineNumber?: number;
   sourceSequence?: number;
   eventTime?: string;
+  importObservedAt?: string;
+  sourceFingerprint?: string;
+  capturedProject?: Record<string, unknown>;
   rawJson: unknown;
   rawText?: string;
   logicalSourceId?: string;
@@ -755,6 +843,10 @@ export interface ConversationItemRecord {
   sourceEventType: string | null;
   sourceSequence: number | null;
   idempotencyKey: string;
+  observedAt: string;
+  importObservedAt: string | null;
+  sourceFingerprint: string | null;
+  capturedProject: Record<string, unknown>;
   createdAt: string;
 }
 
@@ -1238,6 +1330,73 @@ export interface MemorySourceRepository
       maxAttempts: number;
     }
   ): Promise<LocalMemoryAgentSettingRecord>;
+  createHistoricalImportRun(
+    actor: ActorContext
+  ): Promise<HistoricalImportRunRecord>;
+  listHistoricalImportRuns(
+    actor: ActorContext,
+    input?: { limit?: number }
+  ): Promise<HistoricalImportRunRecord[]>;
+  getHistoricalImportRun(
+    actor: ActorContext,
+    runId: string
+  ): Promise<HistoricalImportRunDetail | null>;
+  createHistoricalImportSource(
+    actor: ActorContext,
+    input: {
+      runId: string;
+      aiClient: string;
+      sourceKind: string;
+      sourceSessionId: string;
+      sourceFingerprint: string;
+      localSourcePath: string;
+      sourceSizeBytes?: number;
+      sourceModifiedAt?: string;
+      sourceEventFrom?: string;
+      sourceEventTo?: string;
+      discoveredRecordCount?: number;
+      detectedProject?: Record<string, unknown>;
+    }
+  ): Promise<HistoricalImportSourceRecord | null>;
+  transitionHistoricalImportRun(
+    actor: ActorContext,
+    input: {
+      runId: string;
+      expectedState: HistoricalImportState;
+      state: HistoricalImportState;
+      failureReason?: string | null;
+      nextRetryAt?: string | null;
+    }
+  ): Promise<HistoricalImportRunRecord | null>;
+  transitionHistoricalImportSource(
+    actor: ActorContext,
+    input: {
+      sourceId: string;
+      expectedState: HistoricalImportState;
+      state: HistoricalImportState;
+      failureReason?: string | null;
+      nextRetryAt?: string | null;
+    }
+  ): Promise<HistoricalImportSourceRecord | null>;
+  advanceHistoricalImportSource(
+    actor: ActorContext,
+    input: {
+      sourceId: string;
+      expectedCheckpointOffset: number;
+      checkpointOffset: number;
+      checkpointLine: number;
+      sourceSizeBytes: number;
+      importedRecordCount: number;
+      skippedRecordCount?: number;
+      malformedRecordCount?: number;
+      sourceEventFrom?: string;
+      sourceEventTo?: string;
+    }
+  ): Promise<HistoricalImportSourceRecord | null>;
+  getHistoricalImportSource(
+    actor: ActorContext,
+    sourceId: string
+  ): Promise<HistoricalImportSourceRecord | null>;
   getEffectiveCapturePolicy(
     actor: ActorContext,
     input?: { projectId?: string; threadId?: string; sessionId?: string }

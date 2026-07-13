@@ -21,6 +21,7 @@ import {
   type SemanticBundleSealReason
 } from "./conversation-semantic-projection.js";
 import { createConversationItemRepository } from "./conversation-item-repository.js";
+import { createHistoricalImportRepository } from "./historical-import-repository.js";
 import { createCrossIdentitySyncRepository } from "./cross-identity-sync-repository.js";
 import { createDeviceCredentialRepository } from "./device-credential-repository.js";
 import {
@@ -3402,6 +3403,7 @@ export const createMemorySourceRepository = (
     ...createConversationItemRepository(pool, {
       envelopeEncryptionProvider: options.envelopeEncryptionProvider
     }),
+    ...createHistoricalImportRepository(pool),
     ...createCrossIdentitySyncRepository(pool),
     ...encryptedPayloadRepository,
     ...createLocalEmbeddingStatusRepository(),
