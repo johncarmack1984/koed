@@ -41,7 +41,7 @@ import type {
   UserRecord,
   Visibility
 } from "@koed/db";
-import { createDbPool } from "@koed/db";
+import { createDbPool, createMemorySourceRepository } from "@koed/db";
 import {
   createLocalTestKeyEnvelopeEncryptionProvider,
   decryptEncryptedJsonPackage,
@@ -8779,31 +8779,49 @@ describe("account and access flows", () => {
         });
         const token = jsonBody<TokenResponse>(createdToken).token;
         const headers = { authorization: `Bearer ${token}` };
-        const captured = await app.inject({
-          method: "POST",
-          url: "/v1/memory/conversation-items",
-          headers,
-          payload: {
+        const owner = await queryPool.query<{ id: string }>(
+          "select id from users where email = $1",
+          [jsonBody<{ user: { email: string } }>(registered).user.email]
+        );
+        const repository = createMemorySourceRepository(queryPool);
+        const session = await repository.createCapturedSession(
+          { userId: owner.rows[0]!.id },
+          {
+            externalSessionId: `historical-direct-${randomUUID()}`,
+            idempotencyKey: `historical-direct-session-${randomUUID()}`
+          }
+        );
+        const [captured] = await repository.createConversationItems(
+          { userId: owner.rows[0]!.id },
+          {
             items: [
               {
+                sessionId: session.id,
                 sourceKind: "codex",
-                sourceAdapterVersion: "codex-history-v1",
+                sourceAdapterVersion: "codex-transcript-v1",
                 sourceTransport: "historical_import",
-                sourceRecordType: "app_server_notification",
-                sourceEventType: "item/completed",
+                sourceRecordType: "event_msg",
+                sourceEventType: "user_message",
                 rawJson: {
-                  method: "item/completed",
-                  params: { item: { type: "userMessage", text: "History" } }
+                  timestamp: "2026-07-01T00:00:00.000Z",
+                  type: "event_msg",
+                  payload: { type: "user_message", message: "History" }
                 },
+                rawText: "History",
                 sourceHash: `history-${randomUUID()}`,
                 idempotencyKey: `history-${randomUUID()}`,
-                metadata: { transcriptType: "user_message" }
+                projectionStatus: "pending",
+                projectionVersion: "codex-transcript-v1",
+                metadata: {
+                  transcriptByteOffset: 0,
+                  transcriptItemDiscriminator: "primary:codex_transcript_user",
+                  transcriptType: "user_message"
+                }
               }
             ]
           }
-        });
-        const itemId = jsonBody<{ items: Array<{ id: string }> }>(captured)
-          .items[0]!.id;
+        );
+        const itemId = captured!.id;
 
         const projected = await app.inject({
           method: "POST",
