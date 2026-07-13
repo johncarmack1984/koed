@@ -928,6 +928,25 @@ const observationKindFor = (
   return "snapshot";
 };
 
+const withOwnerScopedTranscriptIdentity = (
+  item: ConversationItemInput,
+  ownerUserId: string
+): ConversationItemInput => {
+  if (
+    item.sourceAdapterVersion !== "codex-transcript-v1" ||
+    item.canonicalItemKey ||
+    item.logicalSourceId ||
+    (item.transportChunkCount ?? 1) > 1
+  ) {
+    return item;
+  }
+  return {
+    ...item,
+    sourceHash: sha256({ ownerUserId, sourceHash: item.sourceHash }),
+    idempotencyKey: sha256({ ownerUserId, idempotencyKey: item.idempotencyKey })
+  };
+};
+
 const observationKeyFor = (
   item: ConversationItemInput,
   sourceIdempotencyKey: string
@@ -1608,8 +1627,11 @@ export const createConversationItemRepository = (
   async createConversationItems(actor, input) {
     const records: ConversationItemRecord[] = [];
     for (const inputItem of input.items) {
-      const sanitizedItem = withValidatedTransportChunkIdentity(
-        sanitizeConversationItemForStorage(inputItem)
+      const sanitizedItem = withOwnerScopedTranscriptIdentity(
+        withValidatedTransportChunkIdentity(
+          sanitizeConversationItemForStorage(inputItem)
+        ),
+        actor.userId
       );
       assertManagedCanonicalAdmission(sanitizedItem);
       const sourceIdempotencyKey = sanitizedItem.idempotencyKey;
