@@ -343,7 +343,7 @@ policy, or full URLs containing customer content.
 - `MEMORY_HISTORICAL_IMPORT_WINDOW_DAYS`: automatic eligibility window. V1 requires exactly `30`; other values fail validation.
 - `MEMORY_HISTORICAL_IMPORT_FIRST_RUN_SESSIONS`: maximum sessions frozen into the automatic first-run set. Default `50`; valid range `1`–`50`.
 - `MEMORY_HISTORICAL_IMPORT_SOURCE_BATCH_ROWS`: maximum canonical source rows built for one coordinator ingestion batch. Default `100`; valid range `1`–`500`, keeping the KOE-322 API's 1000-item envelope safe when one transcript row produces multiple canonical items.
-- `MEMORY_HISTORICAL_IMPORT_SOURCE_BATCH_BYTES`: maximum transcript bytes read for one coordinator ingestion batch. Default `1000000`; valid range `1024`–`4000000`.
+- `MEMORY_HISTORICAL_IMPORT_SOURCE_BATCH_BYTES`: maximum transcript bytes read and maximum serialized canonical item bytes produced for one coordinator ingestion batch. Default `1000000`; valid range `1024`–`4000000`.
 - `MEMORY_HISTORICAL_IMPORT_SOURCE_BATCH_RUNTIME_MS`: soft coordinator runtime boundary checked after each complete JSONL row. Default `15000`; valid range `100`–`60000`.
 - `MEMORY_HISTORICAL_IMPORT_DISCOVERY_FILE_LIMIT`: maximum JSONL files considered across supported roots. Default `10000`; valid range `1`–`100000`.
 - `MEMORY_HISTORICAL_IMPORT_METADATA_SAMPLE_BYTES`: head/tail bytes used for metadata-first discovery. Default `65536`; valid range `4096`–`1048576`.

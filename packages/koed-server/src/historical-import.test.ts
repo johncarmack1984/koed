@@ -87,7 +87,7 @@ const sourceConfig = {
   windowDays: 30,
   firstRunSessionCap: 50,
   maxBatchRows: 2,
-  maxBatchBytes: 700,
+  maxBatchBytes: 4000,
   maxBatchRuntimeMs: 15_000,
   maxDiscoveryFiles: 100,
   metadataSampleBytes: 4096
@@ -178,6 +178,14 @@ describe("bounded Codex history discovery", () => {
     expect(() =>
       resolveSupportedCodexHistoryRoots({
         MEMORY_CODEX_HISTORY_ROOTS: path.dirname(homedir())
+      })
+    ).toThrow("too broad");
+    const configuredHome = path.join(directory, "configured-home");
+    mkdirSync(configuredHome);
+    expect(() =>
+      resolveSupportedCodexHistoryRoots({
+        HOME: configuredHome,
+        MEMORY_CODEX_HISTORY_ROOTS: configuredHome
       })
     ).toThrow("too broad");
   });

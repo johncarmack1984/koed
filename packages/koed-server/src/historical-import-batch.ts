@@ -227,15 +227,20 @@ const selectLines = (input: {
       line.kind === "records" && line.records.length > 0
         ? itemsForLines(input.source, selectedLines)
         : items;
+    const nextItemBytes = Buffer.byteLength(JSON.stringify(nextItems), "utf8");
     if (
       selectedLines.length > 1 &&
-      nextItems.length > input.config.maxBatchRows
+      (nextItems.length > input.config.maxBatchRows ||
+        nextItemBytes > input.config.maxBatchBytes)
     ) {
       selectedLines.pop();
       break;
     }
     if (nextItems.length > input.config.maxBatchRows) {
       return { error: "source_line_exceeds_row_limit" as const };
+    }
+    if (nextItemBytes > input.config.maxBatchBytes) {
+      return { error: "source_line_exceeds_byte_limit" as const };
     }
     items = nextItems;
     if (line.kind === "malformed") malformedRecordCount += 1;

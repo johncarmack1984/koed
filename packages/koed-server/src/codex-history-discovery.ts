@@ -61,12 +61,14 @@ const isContainedPath = (root: string, candidate: string): boolean => {
   );
 };
 
-const validateConfiguredRoot = (value: string): string => {
+const effectiveHome = (environment: NodeJS.ProcessEnv): string =>
+  path.resolve(environment.HOME ?? environment.USERPROFILE ?? homedir());
+
+const validateConfiguredRoot = (value: string, home: string): string => {
   if (!path.isAbsolute(value)) {
     throw new Error("Configured Codex history roots must be absolute paths");
   }
   const resolved = path.resolve(value);
-  const home = path.resolve(homedir());
   if (
     resolved === path.parse(resolved).root ||
     isContainedPath(resolved, home)
@@ -83,16 +85,14 @@ const configuredHistoryPaths = (environment: NodeJS.ProcessEnv): string[] => {
     .split(path.delimiter)
     .map((entry) => entry.trim())
     .filter(Boolean)
-    .map(validateConfiguredRoot);
+    .map((entry) => validateConfiguredRoot(entry, effectiveHome(environment)));
 };
 
 const codexHome = (environment: NodeJS.ProcessEnv): string => {
+  const home = effectiveHome(environment);
   const configured = environment.CODEX_HOME?.trim();
-  if (configured) return validateConfiguredRoot(configured);
-  return path.resolve(
-    environment.HOME ?? environment.USERPROFILE ?? homedir(),
-    ".codex"
-  );
+  if (configured) return validateConfiguredRoot(configured, home);
+  return path.resolve(home, ".codex");
 };
 
 const rootFromPath = (
