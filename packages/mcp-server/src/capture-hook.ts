@@ -13,6 +13,10 @@ import {
   rawConversationTransportChunkGroupId
 } from "@koed/shared";
 import {
+  adaptCodexTranscriptV1,
+  type CodexTranscriptObservation
+} from "./codex-transcript-adapter.js";
+import {
   MemoryApiError,
   MemoryApiClient,
   type McpServerConfig,
@@ -2672,6 +2676,47 @@ export const buildRawTranscriptConversationItems = (input: {
       ? { transcriptSessionId: input.effectiveContext.externalSessionId }
       : {})
   };
+
+  if (!preferProviderResponseItems) {
+    const observations: CodexTranscriptObservation[] = input.records.map(
+      (record, index) => {
+        const sourceLineNumber =
+          transcriptRecordLineIndex(record) ?? index + (input.indexOffset ?? 0);
+        return {
+          record,
+          sourceLineNumber,
+          transcriptByteOffset: transcriptRecordPosition(record),
+          explicitTurnId:
+            transcriptAssignedTurnId(record) ?? transcriptTurnId(record),
+          startsTurn: transcriptRecordStartsTurn(record),
+          completesTurn: transcriptRecordCompletesTurn(record),
+          externalItemId: rawExternalItemId(record),
+          sourceRecordType: rawRecordType(record),
+          sourceEventType: rawEventType(record),
+          eventTime: effectiveRawEventTime(record),
+          eventTimeAccuracy: rawEventTimeAccuracy(record),
+          fallbackRawText: rawText(record),
+          parsedItems: extractTranscriptItems(record, sourceLineNumber, {
+            preferEventMessages,
+            preferStableResponseItems: false,
+            context
+          })
+        };
+      }
+    );
+    return adaptCodexTranscriptV1({
+      observations,
+      sessionId: input.sessionId,
+      sourceSessionId: input.effectiveContext.externalSessionId,
+      sourceTransport: input.sourceTransport ?? "hook",
+      localSourcePath: input.transcriptPath,
+      hookEventName: input.payload.hook_event_name,
+      threadKind: input.effectiveContext.isSubagent
+        ? "subagent"
+        : "conversation",
+      parentThreadId: input.effectiveContext.parentThreadId
+    });
+  }
 
   const items: RawConversationItemRequest[] = [];
   let activeTranscriptTurnId: string | undefined;
