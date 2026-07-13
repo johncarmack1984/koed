@@ -4,6 +4,7 @@ import {
   codexTranscriptRecordHash,
   type CodexTranscriptObservation
 } from "../src/codex-transcript-adapter.js";
+import { buildCodexTranscriptConversationItems } from "../src/codex-transcript-parser.js";
 
 const record = {
   timestamp: "2026-07-01T12:00:00.000Z",
@@ -68,6 +69,38 @@ describe("codex-transcript-v1 adapter", () => {
       transcriptByteOffset: 512,
       transcriptItemDiscriminator: "primary:codex_transcript_user",
       sourceFingerprint: "a".repeat(64)
+    });
+  });
+
+  it("uses one parser and adapter path for Hook and historical observations", () => {
+    const common = {
+      records: [record],
+      sourceSessionId: "session-parser-parity",
+      threadKind: "conversation" as const
+    };
+    const hook = buildCodexTranscriptConversationItems({
+      ...common,
+      sourceTransport: "hook",
+      localSourcePath: "/Users/alice/.codex/session.jsonl",
+      hookEventName: "Stop"
+    });
+    const imported = buildCodexTranscriptConversationItems({
+      ...common,
+      sourceTransport: "historical_import",
+      localSourcePath: "/Users/alice/.codex/session.jsonl",
+      sourceFingerprint: "b".repeat(64)
+    });
+
+    expect(imported).toHaveLength(1);
+    expect(imported[0]).toMatchObject({
+      idempotencyKey: hook[0]?.idempotencyKey,
+      sourceHash: hook[0]?.sourceHash,
+      rawText: hook[0]?.rawText,
+      sourcePath: undefined,
+      metadata: {
+        transcriptItemDiscriminator: "primary:codex_transcript_user",
+        sourceFingerprint: "b".repeat(64)
+      }
     });
   });
 

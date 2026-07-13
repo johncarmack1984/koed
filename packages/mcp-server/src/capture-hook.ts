@@ -1964,6 +1964,68 @@ export const selectRawConversationItemsForHook = (input: {
   return [...transcriptItems, ...controlHookItems];
 };
 
+export interface CodexTranscriptRecordsInput {
+  records: unknown[];
+  indexOffset?: number;
+  sessionId?: string;
+  sourceSessionId?: string;
+  sourceTransport: "hook" | "historical_import";
+  localSourcePath?: string;
+  sourceFingerprint?: string;
+  hookEventName?: string;
+  threadKind: "conversation" | "subagent";
+  parentThreadId?: string;
+}
+
+const transcriptObservation = (
+  record: unknown,
+  index: number,
+  input: CodexTranscriptRecordsInput,
+  context: TranscriptContext,
+  preferEventMessages: boolean
+): CodexTranscriptObservation => {
+  const sourceLineNumber = index + (input.indexOffset ?? 0);
+  return {
+    record,
+    sourceLineNumber,
+    transcriptByteOffset: transcriptRecordPosition(record),
+    explicitTurnId: transcriptTurnId(record),
+    startsTurn: transcriptRecordStartsTurn(record),
+    completesTurn: transcriptRecordCompletesTurn(record),
+    externalItemId: rawExternalItemId(record),
+    sourceRecordType: rawRecordType(record),
+    sourceEventType: rawEventType(record),
+    eventTime: effectiveRawEventTime(record),
+    eventTimeAccuracy: rawEventTimeAccuracy(record),
+    fallbackRawText: rawText(record),
+    parsedItems: extractTranscriptItems(record, sourceLineNumber, {
+      preferEventMessages,
+      context
+    })
+  };
+};
+
+export const buildCodexTranscriptConversationItems = (
+  input: CodexTranscriptRecordsInput
+): RawConversationItemRequest[] => {
+  const transcriptContext = extractTranscriptSessionMetadata(input.records);
+  const context: TranscriptContext = {
+    ...transcriptContext,
+    threadKind: input.threadKind,
+    ...(input.sourceSessionId
+      ? { transcriptSessionId: input.sourceSessionId }
+      : {})
+  };
+  const preferEventMessages = transcriptPrefersEventMessages(input.records);
+  const observations = input.records.map((record, index) =>
+    transcriptObservation(record, index, input, context, preferEventMessages)
+  );
+  return adaptCodexTranscriptV1({
+    ...input,
+    observations
+  });
+};
+
 export const buildRawTranscriptConversationItems = (input: {
   records: unknown[];
   indexOffset?: number;
@@ -1971,43 +2033,10 @@ export const buildRawTranscriptConversationItems = (input: {
   effectiveContext: EffectiveCaptureContext;
   transcriptPath?: string;
   payload: HookPayload;
-}): RawConversationItemRequest[] => {
-  const preferEventMessages = transcriptPrefersEventMessages(input.records);
-  const transcriptContext = extractTranscriptSessionMetadata(input.records);
-  const context: TranscriptContext = {
-    ...transcriptContext,
-    threadKind: input.effectiveContext.isSubagent
-      ? "subagent"
-      : transcriptContext.threadKind,
-    ...(input.effectiveContext.externalSessionId
-      ? { transcriptSessionId: input.effectiveContext.externalSessionId }
-      : {})
-  };
-  const observations: CodexTranscriptObservation[] = input.records.map(
-    (record, index) => {
-      const sourceLineNumber = index + (input.indexOffset ?? 0);
-      return {
-        record,
-        sourceLineNumber,
-        transcriptByteOffset: transcriptRecordPosition(record),
-        explicitTurnId: transcriptTurnId(record),
-        startsTurn: transcriptRecordStartsTurn(record),
-        completesTurn: transcriptRecordCompletesTurn(record),
-        externalItemId: rawExternalItemId(record),
-        sourceRecordType: rawRecordType(record),
-        sourceEventType: rawEventType(record),
-        eventTime: effectiveRawEventTime(record),
-        eventTimeAccuracy: rawEventTimeAccuracy(record),
-        fallbackRawText: rawText(record),
-        parsedItems: extractTranscriptItems(record, sourceLineNumber, {
-          preferEventMessages,
-          context
-        })
-      };
-    }
-  );
-  return adaptCodexTranscriptV1({
-    observations,
+}): RawConversationItemRequest[] =>
+  buildCodexTranscriptConversationItems({
+    records: input.records,
+    indexOffset: input.indexOffset,
     sessionId: input.sessionId,
     sourceSessionId: input.effectiveContext.externalSessionId,
     sourceTransport: "hook",
@@ -2016,7 +2045,6 @@ export const buildRawTranscriptConversationItems = (input: {
     threadKind: input.effectiveContext.isSubagent ? "subagent" : "conversation",
     parentThreadId: input.effectiveContext.parentThreadId
   });
-};
 
 export const selectCaptureItems = (
   transcriptItems: CaptureItem[],
