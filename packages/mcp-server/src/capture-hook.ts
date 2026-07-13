@@ -1333,6 +1333,11 @@ export interface CodexTranscriptJsonlRecord {
 
 export interface CodexTranscriptJsonlBatch {
   records: CodexTranscriptJsonlRecord[];
+  malformedLines: Array<{
+    byteOffset: number;
+    endOffset: number;
+    lineIndex: number;
+  }>;
   malformedLineCount: number;
   consumedBytes: number;
   nextOffset: number;
@@ -1375,7 +1380,7 @@ export const parseCodexTranscriptJsonlBatch = (input: {
   const absoluteStartOffset = input.absoluteStartOffset ?? 0;
   const lineIndexOffset = input.lineIndexOffset ?? 0;
   const records: CodexTranscriptJsonlRecord[] = [];
-  let malformedLineCount = 0;
+  const malformedLines: CodexTranscriptJsonlBatch["malformedLines"] = [];
   let cursor = 0;
   let consumedBytes = 0;
   let consumedLines = 0;
@@ -1397,7 +1402,13 @@ export const parseCodexTranscriptJsonlBatch = (input: {
         lineIndexOffset + consumedLines
       );
       if (parsed) records.push(...parsed);
-      else malformedLineCount += 1;
+      else {
+        malformedLines.push({
+          byteOffset: absoluteStartOffset + cursor,
+          endOffset: absoluteStartOffset + end,
+          lineIndex: lineIndexOffset + consumedLines
+        });
+      }
     }
     consumedBytes = end;
     consumedLines += 1;
@@ -1406,7 +1417,8 @@ export const parseCodexTranscriptJsonlBatch = (input: {
 
   return {
     records,
-    malformedLineCount,
+    malformedLines,
+    malformedLineCount: malformedLines.length,
     consumedBytes,
     nextOffset: absoluteStartOffset + consumedBytes,
     nextLineIndex: lineIndexOffset + consumedLines,

@@ -260,6 +260,9 @@ importers:
 
   packages/koed-server:
     dependencies:
+      '@koed/mcp-server':
+        specifier: workspace:*
+        version: link:../mcp-server
       '@koed/shared':
         specifier: workspace:*
         version: link:../shared

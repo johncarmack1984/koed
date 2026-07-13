@@ -4,6 +4,21 @@ export {
   writeKoedServerConfig
 } from "./config.js";
 export { collectKoedServerDoctor, collectKoedServerStatus } from "./status.js";
+export {
+  discoverCodexHistory,
+  presentCodexHistoryCandidate,
+  resolveSupportedCodexHistoryRoots
+} from "./codex-history-discovery.js";
+export {
+  readHistoricalSourceBatch,
+  reconcileHistoricalSource
+} from "./historical-import-batch.js";
+export { resolveHistoricalImportCoordinatorConfig } from "./historical-import-config.js";
+export {
+  historicalBatchGate,
+  historicalImportStartReadiness,
+  rankAutomaticHistoricalSources
+} from "./historical-import-coordinator.js";
 export { restartKoedServer } from "./restart.js";
 export { setupCodex } from "./setup.js";
 export { startKoedServer } from "./start.js";
@@ -112,6 +127,24 @@ export type {
   UpstreamRegistryResult,
   UpstreamRoutePolicy
 } from "./upstream-registry.js";
+export type {
+  CodexHistoryCandidate,
+  CodexHistoryDiscoveryResult,
+  CodexHistoryIssue,
+  CodexHistoryRoot
+} from "./codex-history-discovery.js";
+export type {
+  HistoricalImportSourceBatch,
+  HistoricalSourceBatchResult,
+  HistoricalSourceCheckpoint,
+  HistoricalSourceReadState
+} from "./historical-import-batch.js";
+export type { HistoricalImportCoordinatorConfig } from "./historical-import-config.js";
+export type {
+  HistoricalBatchGateInput,
+  HistoricalProjectMetadata,
+  RankedHistoricalSource
+} from "./historical-import-coordinator.js";
 export type {
   KoedServerComponentState,
   KoedServerComponentStatus,
