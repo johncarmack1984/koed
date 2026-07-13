@@ -7,6 +7,10 @@ import os from "node:os";
 import path from "node:path";
 import { splitCodexIdePrompt } from "@koed/core";
 import {
+  adaptCodexTranscriptV1,
+  type CodexTranscriptObservation
+} from "./codex-transcript-adapter.js";
+import {
   MemoryApiError,
   MemoryApiClient,
   type McpServerConfig,
@@ -307,9 +311,6 @@ const attachTranscriptInferredEventTime = (
   }
   return record;
 };
-
-const safeSourceSequence = (value: number): number =>
-  Math.max(0, Math.min(value, 2_000_000_000));
 
 const positiveIntEnv = (name: string, fallback: number): number => {
   const parsed = Number.parseInt(process.env[name] ?? "", 10);
@@ -1660,17 +1661,6 @@ const transcriptRecordCompletesTurn = (record: unknown): boolean => {
   return eventType === "task_complete" || eventType === "turn/completed";
 };
 
-const semanticTurnIdForUserPrompt = (input: {
-  externalSessionId?: string;
-  transcriptPath?: string;
-  sourceSequence: number;
-}): string =>
-  `transcript-user-turn:${hash({
-    externalSessionId: input.externalSessionId,
-    transcriptPath: input.transcriptPath,
-    sourceSequence: input.sourceSequence
-  })}`;
-
 const parseRawEventTime = (value: unknown): string | undefined => {
   if (typeof value === "string" && value.trim()) {
     const parsed = new Date(value);
@@ -1889,26 +1879,6 @@ const rawText = (record: unknown): string | undefined => {
   );
 };
 
-const sourceHashForRawRecord = (input: {
-  externalSessionId?: string;
-  transcriptPath?: string;
-  index: number;
-  record: unknown;
-  itemDiscriminator?: string;
-}): string =>
-  hash({
-    externalSessionId: input.externalSessionId,
-    transcriptPath: input.transcriptPath,
-    itemDiscriminator: input.itemDiscriminator,
-    recordIdentity: rawExternalItemId(input.record) ??
-      transcriptRecordPosition(input.record) ?? {
-        eventType: rawEventType(input.record),
-        eventTime: effectiveRawEventTime(input.record),
-        rawText: rawText(input.record),
-        record: input.record
-      }
-  });
-
 const buildRawHookConversationItem = (input: {
   sessionId?: string;
   effectiveContext: EffectiveCaptureContext;
@@ -2013,115 +1983,39 @@ export const buildRawTranscriptConversationItems = (input: {
       ? { transcriptSessionId: input.effectiveContext.externalSessionId }
       : {})
   };
-
-  const items: RawConversationItemRequest[] = [];
-  let activeTranscriptTurnId: string | undefined;
-  let activeSemanticTurnId: string | undefined;
-
-  for (const [index, record] of input.records.entries()) {
-    const sourceLineNumber = index + (input.indexOffset ?? 0);
-    const transcriptByteOffset = transcriptRecordPosition(record);
-    const sourceSequenceBase = safeSourceSequence(
-      (transcriptByteOffset ?? sourceLineNumber) * 2
-    );
-    const explicitTurnId = transcriptTurnId(record);
-    if (explicitTurnId && transcriptRecordStartsTurn(record)) {
-      activeTranscriptTurnId = explicitTurnId;
-      activeSemanticTurnId = explicitTurnId;
-    }
-    const parsedItems = extractTranscriptItems(record, sourceLineNumber, {
-      preferEventMessages,
-      context
-    });
-    const hasLogicalUserPrompt = parsedItems.some(
-      (parsedItem) => parsedItem.item.actor === "user"
-    );
-    const rawItems =
-      parsedItems.length > 0
-        ? parsedItems
-        : [
-            {
-              item: null,
-              itemDiscriminator: "raw",
-              sourceOffset: 0
-            }
-          ];
-    const needsItemDiscriminator = rawItems.length > 1;
-
-    if (hasLogicalUserPrompt && !explicitTurnId && !activeTranscriptTurnId) {
-      activeSemanticTurnId = semanticTurnIdForUserPrompt({
-        externalSessionId: input.effectiveContext.externalSessionId,
-        transcriptPath: input.transcriptPath,
-        sourceSequence: sourceSequenceBase
-      });
-    }
-    const assignedTurnId =
-      explicitTurnId ?? activeTranscriptTurnId ?? activeSemanticTurnId;
-
-    for (const parsedItem of rawItems) {
-      const sourceSequence = safeSourceSequence(
-        sourceSequenceBase + parsedItem.sourceOffset
-      );
-      const sourceHash = sourceHashForRawRecord({
-        externalSessionId: input.effectiveContext.externalSessionId,
-        transcriptPath: input.transcriptPath,
-        index: sourceSequence,
+  const observations: CodexTranscriptObservation[] = input.records.map(
+    (record, index) => {
+      const sourceLineNumber = index + (input.indexOffset ?? 0);
+      return {
         record,
-        itemDiscriminator: needsItemDiscriminator
-          ? parsedItem.itemDiscriminator
-          : undefined
-      });
-      items.push({
-        sessionId: input.sessionId,
-        sourceKind: "codex",
-        sourceAdapterVersion: "codex-transcript-v1",
-        sourceTransport: "hook",
-        externalSessionId: input.effectiveContext.externalSessionId,
-        externalThreadId: input.effectiveContext.externalSessionId,
-        externalTurnId: assignedTurnId,
+        sourceLineNumber,
+        transcriptByteOffset: transcriptRecordPosition(record),
+        explicitTurnId: transcriptTurnId(record),
+        startsTurn: transcriptRecordStartsTurn(record),
+        completesTurn: transcriptRecordCompletesTurn(record),
         externalItemId: rawExternalItemId(record),
         sourceRecordType: rawRecordType(record),
         sourceEventType: rawEventType(record),
-        sourcePath: input.transcriptPath,
-        sourceLineNumber,
-        sourceSequence,
         eventTime: effectiveRawEventTime(record),
-        rawJson: record,
-        rawText: parsedItem.item?.content ?? rawText(record),
-        sourceHash,
-        idempotencyKey: sourceHash,
-        projectionStatus: "pending",
-        projectionVersion: "codex-transcript-v1",
-        metadata: {
-          ...(parsedItem.item?.metadata ?? {}),
-          ...(transcriptByteOffset === undefined
-            ? {}
-            : { transcriptByteOffset }),
-          transcriptSourceLineNumber: sourceLineNumber,
-          hookEventName: input.payload.hook_event_name,
-          sourceEventTimeAccuracy: rawEventTimeAccuracy(record),
-          ...(assignedTurnId
-            ? { transcriptAssignedTurnId: assignedTurnId }
-            : {}),
-          threadKind: input.effectiveContext.isSubagent
-            ? "subagent"
-            : "conversation",
-          parentThreadId: input.effectiveContext.parentThreadId
-        }
-      });
+        eventTimeAccuracy: rawEventTimeAccuracy(record),
+        fallbackRawText: rawText(record),
+        parsedItems: extractTranscriptItems(record, sourceLineNumber, {
+          preferEventMessages,
+          context
+        })
+      };
     }
-
-    if (
-      explicitTurnId &&
-      transcriptRecordCompletesTurn(record) &&
-      activeTranscriptTurnId === explicitTurnId
-    ) {
-      activeTranscriptTurnId = undefined;
-      activeSemanticTurnId = undefined;
-    }
-  }
-
-  return items;
+  );
+  return adaptCodexTranscriptV1({
+    observations,
+    sessionId: input.sessionId,
+    sourceSessionId: input.effectiveContext.externalSessionId,
+    sourceTransport: "hook",
+    localSourcePath: input.transcriptPath,
+    hookEventName: input.payload.hook_event_name,
+    threadKind: input.effectiveContext.isSubagent ? "subagent" : "conversation",
+    parentThreadId: input.effectiveContext.parentThreadId
+  });
 };
 
 export const selectCaptureItems = (
