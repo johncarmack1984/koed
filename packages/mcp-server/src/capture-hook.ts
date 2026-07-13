@@ -1371,6 +1371,18 @@ const jsonlLineEnd = (buffer: Buffer, start: number): number => {
   return newline < 0 ? buffer.length : newline + 1;
 };
 
+const jsonlContentEnd = (
+  buffer: Buffer,
+  cursor: number,
+  end: number,
+  terminated: boolean
+): number => {
+  const contentEnd = terminated ? end - 1 : end;
+  return contentEnd > cursor && buffer[contentEnd - 1] === 0x0d
+    ? contentEnd - 1
+    : contentEnd;
+};
+
 export const parseCodexTranscriptJsonlBatch = (input: {
   buffer: Buffer;
   absoluteStartOffset?: number;
@@ -1384,15 +1396,11 @@ export const parseCodexTranscriptJsonlBatch = (input: {
   let cursor = 0;
   let consumedBytes = 0;
   let consumedLines = 0;
-
   while (cursor < input.buffer.length) {
     const end = jsonlLineEnd(input.buffer, cursor);
     const terminated = input.buffer[end - 1] === 0x0a;
     if (!terminated && !input.reachedEnd) break;
-    let contentEnd = terminated ? end - 1 : end;
-    if (contentEnd > cursor && input.buffer[contentEnd - 1] === 0x0d) {
-      contentEnd -= 1;
-    }
+    const contentEnd = jsonlContentEnd(input.buffer, cursor, end, terminated);
     const line = input.buffer.subarray(cursor, contentEnd);
     if (line.toString("utf8").trim()) {
       const parsed = parseJsonlValue(
