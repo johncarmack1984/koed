@@ -472,6 +472,20 @@ A historical source must set `source_transport=historical_import`. The raw-row
 repository persists its historical Projection class. Never label history from
 FIFO position, timestamp age, source path, or arbitrary metadata.
 
+Historical import control/status routes are enabled only when
+`KOED_DEPLOYMENT_PROFILE` resolves to `developer` or `local_personal`. They
+accept owning User browser sessions or Personal API Tokens and grant no Team
+authority. No separate configuration enables these routes on private VPS, Team
+Self-Hosted, or Koed-managed cloud profiles.
+
+Import coordinators persist source path through local-only source registration.
+Status and batch responses expose a redacted basename label and stable SHA-256
+fingerprint, never raw path or path-like detected Project fields. Coordinators
+must send transcript records through reusable `codex-transcript-v1` adapter and
+must use returned checkpoint as next batch's expected checkpoint. Source growth
+is allowed; truncation and stale checkpoints fail explicitly. Effective Capture
+Policy and Capture Pause are rechecked by API before each batch.
+
 ## Data At Rest
 
 Postgres is the source of truth for Users, API Tokens, Capture Policies, raw

@@ -558,20 +558,33 @@ remains a later integration on top of this durable seat lifecycle state.
     segment boundaries. A Postgres advisory lease permits one historical batch
     across Worker processes. It yields after each batch and reevaluates after
     restart.
-11. The Worker consumes queued jobs from Redis/BullMQ or `local_work_queue`.
+11. Local historical import state uses authenticated
+    `/v1/historical-imports` and `/v1/historical-import-sources` routes. These
+    routes exist only on developer/local-personal edges. Durable run/source
+    records validate transitions and retain checkpoint, counters, retry/failure,
+    timestamps, source fingerprint/session ID, immutable detected Project
+    provenance, and local-only raw source path. Responses remove raw path and
+    path-like Project fields.
+12. Before source eligibility/queueing and every import batch, the API resolves
+    owning User's effective Capture Policy and Capture Pause. Disabled, ask,
+    paused, or non-personal results fail closed. Batch writes use same
+    `codex-transcript-v1` adapter and `conversation_items` path as hook capture,
+    then advance checkpoint. No Team, Workspace Access, or Share Grant mutation
+    occurs.
+13. The Worker consumes queued jobs from Redis/BullMQ or `local_work_queue`.
     Both backends use lower-number-first priority and FIFO within a class, so
     live capture runs ahead of queued historical embedding/LCM work. Schema
     upgrades assign existing local jobs normal priority. Before BullMQ workers
-    start, Koed assigns the same normal priority to legacy waiting, paused, and
+    start, Koed assigns same normal priority to legacy waiting, paused, and
     delayed jobs that have no stored priority.
-12. The Worker embeds Memory Events by calling the Embedding Service, then
+14. The Worker embeds Memory Events by calling the Embedding Service, then
     upserts source embeddings and schedules compaction, creating or updating
     LCM Placeholder Memory Nodes from Memory Events and child nodes before
     queueing Memory Node embedding.
     In paid Koed-managed cloud, placeholder summaries, body text, source item
     JSON, completed LCM summaries, and structured LCM summary JSON are stored as
     redacted Memory Node fields with encrypted companions.
-13. Pending LCM placeholders remain available as degraded evidence until local
+15. Pending LCM placeholders remain available as degraded evidence until local
     LCM summaries are submitted.
 
 Commercial/private VPS/Team deployments can run encrypted-field backfill over
