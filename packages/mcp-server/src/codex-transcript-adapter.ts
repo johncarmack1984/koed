@@ -172,6 +172,9 @@ const observationItems = (input: {
           : {}),
         threadKind: input.adapter.threadKind,
         parentThreadId: input.adapter.parentThreadId,
+        ...(input.adapter.sourceTransport === "historical_import"
+          ? { observedViaHistoricalImport: true }
+          : { observedViaHook: true }),
         ...(input.adapter.sourceFingerprint
           ? { sourceFingerprint: input.adapter.sourceFingerprint }
           : {})

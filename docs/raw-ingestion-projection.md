@@ -78,15 +78,25 @@ derivations and reprojects retained canonical items under the new policy.
 
 ## Current Codex Adapters
 
-Codex transcript hooks use `sourceAdapterVersion=codex-transcript-v1` and
-`sourceTransport=hook` or `transcript`. Each exact transcript observation
-creates or augments its canonical item before selected records are projected
-into `memory_events`. Hooks do not write semantic `memory_events` directly; the
-raw Projection endpoint is the only hook-backed path that derives chat memory. Hook
-payloads are capture signals, not semantic content sources; transcript JSONL
-timestamps define source chronology. If an otherwise readable transcript row is
-missing a timestamp, catch-up holds it at the current checkpoint until a later
-timestamped row allows deterministic interpolation.
+Codex transcript hooks, managed transcript reconciliation, and historical import
+share `sourceAdapterVersion=codex-transcript-v1`. Hook observations set
+`sourceTransport=hook`, managed reconciliation uses `transcript`, and historical
+observations set `historical_import`. Each exact transcript observation creates
+or augments a canonical raw item before selected records are projected into
+`memory_events`. None writes semantic `memory_events` directly. Hook payloads
+are capture signals, not semantic content sources; transcript JSONL timestamps
+define source chronology. If an otherwise readable row lacks a timestamp,
+catch-up holds it at the checkpoint until a later timestamped row permits
+deterministic interpolation.
+
+Detached hook/import identity is transport- and path-independent. Personal-row
+uniqueness combines owning User with AI Client/source kind, source session ID,
+transcript byte position or sequence, item discriminator, and raw record hash.
+Managed app-server/JSONL overlap uses exact provider thread, turn, stable item,
+and component identity instead. Raw local paths never participate. Hook/import
+overlap therefore reconciles one raw row; a later live observation promotes its
+durable Projection work class to live priority. Metadata retains whether hook
+and historical import both observed row.
 
 The experimental Koed-managed conversation adapter uses
 `sourceAdapterVersion=codex-app-server-conversation-v1` and
@@ -276,6 +286,27 @@ embedding and LCM queue jobs.
 Historical admission and progress telemetry contains only class names, row and
 byte counts, durations, and pause reasons. It must not contain transcript
 content, source paths, queries, credentials, or raw payloads.
+
+Durable `historical_import_runs` and `historical_import_sources` records own
+state transitions, bounded counters, retry/failure data, source ranges,
+checkpoints, and lifecycle timestamps. Source records keep raw source paths only
+inside local Postgres state. Status presents only a basename-style redacted
+label, stable fingerprint, and path-free detected Project fields. Routes are
+available only in `developer` and `local_personal` profiles and require owning
+User authentication.
+
+Import evaluates effective Capture Policy and Capture Pause before eligibility
+or queueing and again before every raw write batch. `disabled`, `ask`, active
+pause, or non-personal visibility fails closed. Successful batches advance the
+durable checkpoint only after idempotent raw persistence. Source event time
+(`event_time`), API observation (`observed_at`), historical observation
+(`import_observed_at`), Projection (`projected_at`), and embedding timestamps
+remain separate.
+
+Detected Project data is immutable capture provenance on import source, raw row,
+and Captured Session records. It is not mutable Personal Project assignment,
+Team Workspace resolution, or authorization. Import creates Personal Memory
+only and cannot create Workspace Access or Share Grants.
 
 When a display item is deleted, Koed excludes the underlying raw source item
 from semantic memory immediately and invalidates affected Memory Events and

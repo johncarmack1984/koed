@@ -572,22 +572,35 @@ remains a later integration on top of this durable seat lifecycle state.
     compaction scopes from PostgreSQL. Deterministic queue identities make this
     reconciliation idempotent, so outbox admission failure, exhausted retries,
     or restart cannot permanently strand work. Embedding reconciliation accepts
-    only complete active chunk sets for the current source version, and LCM
-    dispatch is bounded per owner.
-12. The Worker consumes queued jobs from Redis/BullMQ or `local_work_queue`.
+    only complete active chunk sets for current source version, and LCM dispatch
+    is bounded per owner.
+12. Local historical import state uses authenticated
+    `/v1/historical-imports` and `/v1/historical-import-sources` routes. These
+    routes exist only on developer/local-personal edges. Durable run/source
+    records validate transitions and retain checkpoint, counters, retry/failure,
+    timestamps, source fingerprint/session ID, immutable detected Project
+    provenance, and local-only raw source path. Responses remove raw path and
+    path-like Project fields.
+13. Before source eligibility/queueing and every import batch, API resolves
+    owning User's effective Capture Policy and Capture Pause. Disabled, ask,
+    paused, or non-personal results fail closed. Batch writes use same
+    `codex-transcript-v1` adapter and `conversation_items` path as hook capture,
+    then advance checkpoint. No Team, Workspace Access, or Share Grant mutation
+    occurs.
+14. Worker consumes queued jobs from Redis/BullMQ or `local_work_queue`.
     Both backends use lower-number-first priority and FIFO within a class, so
     live capture runs ahead of queued historical embedding/LCM work. Schema
     upgrades assign existing local jobs normal priority. Before BullMQ workers
-    start, Koed assigns the same normal priority to legacy waiting, paused, and
+    start, Koed assigns same normal priority to legacy waiting, paused, and
     delayed jobs that have no stored priority.
-13. The Worker embeds Memory Events by calling the Embedding Service and
-    atomically replaces the source's complete embedding chunk set.
-14. The Worker schedules compaction, creating or updating LCM Placeholder Memory
+15. Worker embeds Memory Events by calling Embedding Service and atomically
+    replaces source's complete embedding chunk set.
+16. Worker schedules compaction, creating or updating LCM Placeholder Memory
     Nodes from Memory Events and child nodes, then queues Memory Node embedding.
     In paid Koed-managed cloud, placeholder summaries, body text, source item
     JSON, completed LCM summaries, and structured LCM summary JSON are stored as
     redacted Memory Node fields with encrypted companions.
-15. Pending LCM placeholders remain available as degraded evidence until local
+17. Pending LCM placeholders remain available as degraded evidence until local
     LCM summaries are submitted.
 
 ### Experimental Koed-managed Codex threads
