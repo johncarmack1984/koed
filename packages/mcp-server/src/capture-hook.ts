@@ -1324,6 +1324,96 @@ const parseTranscriptLineRecords = (
   return records;
 };
 
+export interface CodexTranscriptJsonlRecord {
+  value: unknown;
+  byteOffset: number;
+  endOffset: number;
+  lineIndex: number;
+}
+
+export interface CodexTranscriptJsonlBatch {
+  records: CodexTranscriptJsonlRecord[];
+  malformedLineCount: number;
+  consumedBytes: number;
+  nextOffset: number;
+  nextLineIndex: number;
+  incompleteTail: boolean;
+}
+
+const parseJsonlValue = (
+  line: Buffer,
+  byteOffset: number,
+  endOffset: number,
+  lineIndex: number
+): CodexTranscriptJsonlRecord[] | null => {
+  try {
+    const parsed = JSON.parse(line.toString("utf8")) as unknown;
+    const values = asUnknownArray(parsed) ??
+      (isRecord(parsed) ? asUnknownArray(parsed.items) : undefined) ?? [parsed];
+    return values.map((value) => ({
+      value: attachTranscriptRecordPosition(value, byteOffset, lineIndex),
+      byteOffset,
+      endOffset,
+      lineIndex
+    }));
+  } catch {
+    return null;
+  }
+};
+
+const jsonlLineEnd = (buffer: Buffer, start: number): number => {
+  const newline = buffer.indexOf(0x0a, start);
+  return newline < 0 ? buffer.length : newline + 1;
+};
+
+export const parseCodexTranscriptJsonlBatch = (input: {
+  buffer: Buffer;
+  absoluteStartOffset?: number;
+  lineIndexOffset?: number;
+  reachedEnd: boolean;
+}): CodexTranscriptJsonlBatch => {
+  const absoluteStartOffset = input.absoluteStartOffset ?? 0;
+  const lineIndexOffset = input.lineIndexOffset ?? 0;
+  const records: CodexTranscriptJsonlRecord[] = [];
+  let malformedLineCount = 0;
+  let cursor = 0;
+  let consumedBytes = 0;
+  let consumedLines = 0;
+
+  while (cursor < input.buffer.length) {
+    const end = jsonlLineEnd(input.buffer, cursor);
+    const terminated = input.buffer[end - 1] === 0x0a;
+    if (!terminated && !input.reachedEnd) break;
+    let contentEnd = terminated ? end - 1 : end;
+    if (contentEnd > cursor && input.buffer[contentEnd - 1] === 0x0d) {
+      contentEnd -= 1;
+    }
+    const line = input.buffer.subarray(cursor, contentEnd);
+    if (line.toString("utf8").trim()) {
+      const parsed = parseJsonlValue(
+        line,
+        absoluteStartOffset + cursor,
+        absoluteStartOffset + end,
+        lineIndexOffset + consumedLines
+      );
+      if (parsed) records.push(...parsed);
+      else malformedLineCount += 1;
+    }
+    consumedBytes = end;
+    consumedLines += 1;
+    cursor = end;
+  }
+
+  return {
+    records,
+    malformedLineCount,
+    consumedBytes,
+    nextOffset: absoluteStartOffset + consumedBytes,
+    nextLineIndex: lineIndexOffset + consumedLines,
+    incompleteTail: consumedBytes < input.buffer.length
+  };
+};
+
 export const parseTranscriptRecords = (
   records: unknown[],
   indexOffset = 0

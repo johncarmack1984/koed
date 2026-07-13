@@ -4,7 +4,10 @@ import {
   codexTranscriptRecordHash,
   type CodexTranscriptObservation
 } from "../src/codex-transcript-adapter.js";
-import { buildCodexTranscriptConversationItems } from "../src/codex-transcript-parser.js";
+import {
+  buildCodexTranscriptConversationItems,
+  parseCodexTranscriptJsonlBatch
+} from "../src/codex-transcript-parser.js";
 
 const record = {
   timestamp: "2026-07-01T12:00:00.000Z",
@@ -101,6 +104,44 @@ describe("codex-transcript-v1 adapter", () => {
         transcriptItemDiscriminator: "primary:codex_transcript_user",
         sourceFingerprint: "b".repeat(64)
       }
+    });
+  });
+
+  it("parses bounded JSONL with stable byte positions and explicit malformed rows", () => {
+    const first = JSON.stringify(record);
+    const second = JSON.stringify({
+      ...record,
+      payload: { ...record.payload, message: "second" }
+    });
+    const prefix = "malformed\r\n";
+    const buffer = Buffer.from(`${prefix}${first}\r\n${second.slice(0, 10)}`);
+    const parsed = parseCodexTranscriptJsonlBatch({
+      buffer,
+      absoluteStartOffset: 100,
+      lineIndexOffset: 4,
+      reachedEnd: false
+    });
+
+    expect(parsed).toMatchObject({
+      malformedLineCount: 1,
+      nextOffset: 100 + Buffer.byteLength(`${prefix}${first}\r\n`),
+      nextLineIndex: 6,
+      incompleteTail: true
+    });
+    expect(parsed.records).toHaveLength(1);
+    expect(parsed.records[0]).toMatchObject({
+      byteOffset: 100 + Buffer.byteLength(prefix),
+      lineIndex: 5
+    });
+
+    const items = buildCodexTranscriptConversationItems({
+      records: parsed.records.map((entry) => entry.value),
+      sourceSessionId: "session-bounded-parser",
+      sourceTransport: "historical_import",
+      threadKind: "conversation"
+    });
+    expect(items[0]?.metadata).toMatchObject({
+      transcriptByteOffset: 100 + Buffer.byteLength(prefix)
     });
   });
 
