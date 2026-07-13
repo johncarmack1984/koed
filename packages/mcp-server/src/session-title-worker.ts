@@ -13,6 +13,11 @@ import {
   resolveLcmSummaryWorkerConfig,
   type LcmSummaryWorkerConfig
 } from "./lcm-summary-worker.js";
+import {
+  loadPrompt,
+  renderPromptWithMetadata,
+  type RenderedPrompt
+} from "./prompt-loader.js";
 
 export const SESSION_TITLE_PROMPT_VERSION = "session-title-codex-json-v1";
 const MAX_SESSION_TITLE_EXCERPT_CHARS = 1_200;
@@ -102,31 +107,28 @@ const sourceItemsForPrompt = (session: SessionTitleCandidate): string =>
     })
     .join("\n");
 
+const buildVersionedSessionTitlePrompt = (
+  session: SessionTitleCandidate,
+  env: NodeJS.ProcessEnv = process.env
+): RenderedPrompt =>
+  renderPromptWithMetadata(
+    "session-title",
+    {
+      session_id: session.id,
+      external_session_id: session.externalSessionId ?? "none",
+      current_title: session.currentTitle
+        ? titlePromptText(session.currentTitle) || "none"
+        : "none",
+      project: session.projectName ?? session.projectPath ?? "unknown",
+      title_event_count: session.eventCount,
+      conversation_excerpts: sourceItemsForPrompt(session)
+    },
+    { env }
+  );
+
 export const buildSessionTitlePrompt = (
   session: SessionTitleCandidate
-): string =>
-  [
-    "Generate a short navigation title for one captured chat session.",
-    "",
-    "Rules:",
-    "- Return only one JSON object.",
-    '- JSON shape: {"title":"Short specific title"}',
-    "- Title must be 3-7 words where possible.",
-    "- Prefer the user's intent, concrete subject, repo area, bug, feature, or decision.",
-    "- Do not include a UUID, session id, timestamp, generic 'chat/session/conversation', or quotation marks.",
-    "- If the evidence is thin, still choose the most specific title supported by the messages.",
-    "",
-    "Session metadata:",
-    `- session_id: ${session.id}`,
-    `- external_session_id: ${session.externalSessionId ?? "none"}`,
-    `- current_title: ${session.currentTitle ? titlePromptText(session.currentTitle) || "none" : "none"}`,
-    `- project: ${session.projectName ?? session.projectPath ?? "unknown"}`,
-    `- title_event_count: ${session.eventCount}`,
-    "",
-    "Conversation excerpts:",
-    sourceItemsForPrompt(session),
-    ""
-  ].join("\n");
+): string => buildVersionedSessionTitlePrompt(session).text;
 
 export const runCodexAppServerSessionTitle: CodexSessionTitleRunner = async (
   prompt,
@@ -142,8 +144,7 @@ export const runCodexAppServerSessionTitle: CodexSessionTitleRunner = async (
       cwd: config.cwd,
       env: config.env,
       clientName: "koed-session-title-worker",
-      baseInstructions:
-        "You are a private local Koed session title worker running in Codex app-server mode. Return only the requested JSON object.",
+      baseInstructions: loadPrompt("app-server-session-title-base").body,
       developerInstructions: koedAppServerWorkerDeveloperInstructions
     },
     timeoutMs
@@ -186,15 +187,12 @@ const generateSessionTitle = async (
   runner: CodexSessionTitleRunner
 ): Promise<SessionTitleResult> => {
   try {
-    const result = await runPromptWithRetries(
-      buildSessionTitlePrompt(session),
-      config,
-      runner
-    );
+    const prompt = buildVersionedSessionTitlePrompt(session, config.env);
+    const result = await runPromptWithRetries(prompt.text, config, runner);
     await client.submitSessionTitle(session.id, {
       title: result.title,
       titleModel: result.model,
-      titlePromptVersion: SESSION_TITLE_PROMPT_VERSION
+      titlePromptVersion: prompt.version
     });
     return {
       sessionId: session.id,

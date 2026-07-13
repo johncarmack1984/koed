@@ -17,11 +17,11 @@ import {
   persistRawConversationItems,
   projectRawConversationItems
 } from "./raw-conversation-items.js";
+import { loadPrompt, type PromptId } from "./prompt-loader.js";
 
 const CODEX_SUMMARY_PROVIDER = "codex";
 const DEFAULT_SUMMARY_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_PROMPT_TOKENS = 48_000;
-export const LCM_SUMMARY_PROMPT_VERSION = "lcm-codex-summary-json-v2";
 export const LCM_STRUCTURED_SUMMARY_SCHEMA_VERSION =
   "lcm-structured-summary-v1";
 
@@ -88,6 +88,15 @@ export type LcmSummaryPromptResult = {
   status?: "succeeded" | "failed";
   errorMessage?: string;
 };
+
+type VersionedLcmSummaryPromptResult = LcmSummaryPromptResult & {
+  promptVersion: string;
+};
+
+interface BuiltLcmSummaryPrompt {
+  text: string;
+  version: string;
+}
 
 const structuredLcmSummarySchema = z
   .object({
@@ -308,100 +317,21 @@ const lcmSummaryJsonShape = () => ({
   provenance_hints: ["node/source/turn/chunk ids that help trace claims"]
 });
 
-const secretRedactionRequirement =
-  "- Do not reproduce API tokens, credentials, passwords, private keys, bearer tokens, or secret-like literals. If a source item contains a secret-like value, preserve only the durable event, such as that a token was pasted, rotated, revoked, or redacted.";
-
-const secretRedactionOverrideRequirement =
-  "- This redaction rule overrides the instruction to preserve exact identifiers.";
-
-const orderedConflictRequirement =
-  "- When ordered source items or child summaries conflict, prefer the later item unless the later item explicitly says the issue remains unresolved.";
-
-const supersededContextRequirement =
-  "- Preserve older conflicting items only as superseded context, not as active decisions or unresolved questions.";
-
-const fieldPlacementRequirement =
-  "- Put active decisions only in decisions, unresolved or undecided items only in unresolved_questions, stable observations in facts, and durable command/tool results in tool_outcomes.";
-
-const noisyOutputRequirement =
-  "- Compress repetitive logs, lifecycle events, and checklist-style tool output; keep the durable finding or outcome instead of copying every noisy line.";
-
-export const buildLcmSummaryPrompt = (
+const buildVersionedLcmSummaryPrompt = (
   node: LcmSummaryNode,
   mode: "summary" | "partial" | "reduce" = "summary"
-): string => {
+): BuiltLcmSummaryPrompt => {
   const isRollup =
     node.kind === "rollup" ||
     node.sourceItems.some((item) => item.kind === "lcm_child");
-  const header =
+  const promptId: PromptId =
     mode === "partial"
-      ? [
-          "You are a private local LCM summarisation worker running under the user's Codex subscription.",
-          "Summarize this token-bounded shard of one larger LCM node.",
-          "",
-          "Requirements:",
-          "- Preserve durable decisions, facts, implementation details, exact identifiers, and open threads from this shard.",
-          secretRedactionRequirement,
-          secretRedactionOverrideRequirement,
-          fieldPlacementRequirement,
-          noisyOutputRequirement,
-          "- Set title to a short 3-7 word label for this memory span, without UUIDs or generic words like chat/session.",
-          "- Keep provenance hints such as node IDs, source spans, turn IDs, and chunk indexes when useful.",
-          "- Do not add anything that is not supported by this shard.",
-          "- Return only one JSON object matching the required schema; no prose outside JSON."
-        ]
+      ? "lcm-summary-partial"
       : mode === "reduce"
-        ? [
-            "You are a private local LCM summarisation worker running under the user's Codex subscription.",
-            "Combine these shard summaries into one coherent LCM summary.",
-            "",
-            "Requirements:",
-            "- Preserve durable decisions, facts, implementation details, exact identifiers, and open threads.",
-            secretRedactionRequirement,
-            secretRedactionOverrideRequirement,
-            orderedConflictRequirement,
-            supersededContextRequirement,
-            fieldPlacementRequirement,
-            noisyOutputRequirement,
-            "- Set title to a short 3-7 word label for the combined memory, without UUIDs or generic words like chat/session.",
-            "- Keep provenance hints such as node IDs, source spans, turn IDs, and chunk indexes when useful.",
-            "- Do not add anything that is not supported by the shard summaries.",
-            "- Return only one JSON object matching the required schema; no prose outside JSON."
-          ]
+        ? "lcm-summary-reduce"
         : isRollup
-          ? [
-              "You are a private local LCM summarisation worker running under the user's Codex subscription.",
-              "Roll up these child LCM summaries into a higher-level memory graph summary.",
-              "",
-              "Requirements:",
-              "- Preserve durable decisions, facts, implementation details, exact identifiers, and open threads.",
-              secretRedactionRequirement,
-              secretRedactionOverrideRequirement,
-              orderedConflictRequirement,
-              supersededContextRequirement,
-              fieldPlacementRequirement,
-              noisyOutputRequirement,
-              "- Set title to a short 3-7 word label for the rolled-up memory, without UUIDs or generic words like chat/session.",
-              "- Keep provenance hints such as node IDs, source spans, and turn IDs when useful.",
-              "- Do not add anything that is not supported by the child summaries.",
-              "- Return only one JSON object matching the required schema; no prose outside JSON."
-            ]
-          : [
-              "You are a private local LCM summarisation worker running under the user's Codex subscription.",
-              "Summarize this captured memory span for a lossless context memory graph.",
-              "",
-              "Requirements:",
-              "- Preserve concrete user requests, decisions, facts, filenames, commands, model names, tool outcomes, errors, and unresolved questions.",
-              secretRedactionRequirement,
-              secretRedactionOverrideRequirement,
-              fieldPlacementRequirement,
-              noisyOutputRequirement,
-              "- Set title to a short 3-7 word label for the conversation span, without UUIDs or generic words like chat/session.",
-              "- Mention source items in the same order they occurred when they affect meaning.",
-              "- Do not invent details. If a source item is ambiguous, say so compactly.",
-              "- Write a compact but information-dense summary for future agent retrieval.",
-              "- Return only one JSON object matching the required schema; no prose outside JSON."
-            ];
+          ? "lcm-summary-rollup"
+          : "lcm-summary-leaf";
 
   const placeholderSection =
     mode === "summary"
@@ -412,23 +342,32 @@ export const buildLcmSummaryPrompt = (
           ""
         ];
 
-  return [
-    ...header,
-    "",
-    `LCM node: ${node.id}`,
-    `Kind: ${node.kind}`,
-    `Depth: ${node.depth}`,
-    `Visibility: ${node.visibility}`,
-    `Source token estimate: ${node.sourceTokenEstimate ?? "unknown"}`,
-    "",
-    "Required JSON schema:",
-    JSON.stringify(lcmSummaryJsonShape(), null, 2),
-    "",
-    ...placeholderSection,
-    "Exact ordered source outline:",
-    ...node.sourceItems.map(itemText)
-  ].join("\n");
+  const loadedPrompt = loadPrompt(promptId);
+  return {
+    version: loadedPrompt.version,
+    text: [
+      loadedPrompt.body,
+      "",
+      `LCM node: ${node.id}`,
+      `Kind: ${node.kind}`,
+      `Depth: ${node.depth}`,
+      `Visibility: ${node.visibility}`,
+      `Source token estimate: ${node.sourceTokenEstimate ?? "unknown"}`,
+      "",
+      "Required JSON schema:",
+      JSON.stringify(lcmSummaryJsonShape(), null, 2),
+      "",
+      ...placeholderSection,
+      "Exact ordered source outline:",
+      ...node.sourceItems.map(itemText)
+    ].join("\n")
+  };
 };
+
+export const buildLcmSummaryPrompt = (
+  node: LcmSummaryNode,
+  mode: "summary" | "partial" | "reduce" = "summary"
+): string => buildVersionedLcmSummaryPrompt(node, mode).text;
 
 const promptTokens = (prompt: string, config: LcmSummaryWorkerConfig): number =>
   countTokensForModel(prompt, { model: config.model }).tokens;
@@ -489,37 +428,40 @@ const buildTokenBoundedPrompts = (
   node: LcmSummaryNode,
   config: LcmSummaryWorkerConfig,
   mode: "partial" | "reduce"
-): string[] => {
+): BuiltLcmSummaryPrompt[] => {
   const maxPromptTokens = config.maxPromptTokens;
   let itemTextTokenBudget = Math.max(256, Math.floor(maxPromptTokens * 0.45));
 
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const expandedItems = chunkSourceItems(node, config, itemTextTokenBudget);
-    const prompts: string[] = [];
+    const prompts: BuiltLcmSummaryPrompt[] = [];
     let currentItems: LcmSourceItem[] = [];
     let oversizedSinglePrompt = false;
 
     for (const item of expandedItems) {
       const candidateItems = [...currentItems, item];
-      const candidatePrompt = buildLcmSummaryPrompt(
+      const candidatePrompt = buildVersionedLcmSummaryPrompt(
         nodeWithItems(node, candidateItems),
         mode
       );
-      if (promptTokens(candidatePrompt, config) <= maxPromptTokens) {
+      if (promptTokens(candidatePrompt.text, config) <= maxPromptTokens) {
         currentItems = candidateItems;
         continue;
       }
 
       if (currentItems.length > 0) {
         prompts.push(
-          buildLcmSummaryPrompt(nodeWithItems(node, currentItems), mode)
+          buildVersionedLcmSummaryPrompt(
+            nodeWithItems(node, currentItems),
+            mode
+          )
         );
         currentItems = [item];
-        const singlePrompt = buildLcmSummaryPrompt(
+        const singlePrompt = buildVersionedLcmSummaryPrompt(
           nodeWithItems(node, currentItems),
           mode
         );
-        if (promptTokens(singlePrompt, config) > maxPromptTokens) {
+        if (promptTokens(singlePrompt.text, config) > maxPromptTokens) {
           oversizedSinglePrompt = true;
           break;
         }
@@ -533,13 +475,16 @@ const buildTokenBoundedPrompts = (
     if (!oversizedSinglePrompt) {
       if (currentItems.length > 0) {
         prompts.push(
-          buildLcmSummaryPrompt(nodeWithItems(node, currentItems), mode)
+          buildVersionedLcmSummaryPrompt(
+            nodeWithItems(node, currentItems),
+            mode
+          )
         );
       }
       if (
         prompts.length > 0 &&
         prompts.every(
-          (prompt) => promptTokens(prompt, config) <= maxPromptTokens
+          (prompt) => promptTokens(prompt.text, config) <= maxPromptTokens
         )
       ) {
         return prompts;
@@ -557,13 +502,24 @@ const buildTokenBoundedPrompts = (
 const buildSummaryPrompts = (
   node: LcmSummaryNode,
   config: LcmSummaryWorkerConfig
-): Array<{ prompt: string; mode: "summary" | "partial" | "reduce" }> => {
-  const prompt = buildLcmSummaryPrompt(node);
-  if (promptTokens(prompt, config) <= config.maxPromptTokens) {
-    return [{ prompt, mode: "summary" }];
+): Array<{
+  prompt: string;
+  promptVersion: string;
+  mode: "summary" | "partial" | "reduce";
+}> => {
+  const prompt = buildVersionedLcmSummaryPrompt(node);
+  if (promptTokens(prompt.text, config) <= config.maxPromptTokens) {
+    return [
+      {
+        prompt: prompt.text,
+        promptVersion: prompt.version,
+        mode: "summary"
+      }
+    ];
   }
   return buildTokenBoundedPrompts(node, config, "partial").map((bounded) => ({
-    prompt: bounded,
+    prompt: bounded.text,
+    promptVersion: bounded.version,
     mode: "partial"
   }));
 };
@@ -582,8 +538,7 @@ export const runCodexAppServerLcmSummary: CodexLcmSummaryRunner = (
       cwd: config.cwd,
       env: config.env,
       clientName: "koed-lcm-summary-worker",
-      baseInstructions:
-        "You are a private local Koed LCM summary worker running in Codex app-server mode. Return only the requested JSON object.",
+      baseInstructions: loadPrompt("app-server-lcm-summary-base").body,
       developerInstructions: koedAppServerWorkerDeveloperInstructions
     },
     timeoutMs
@@ -591,10 +546,11 @@ export const runCodexAppServerLcmSummary: CodexLcmSummaryRunner = (
 
 const runPromptWithRetries = async (
   prompt: string,
+  promptVersion: string,
   config: LcmSummaryWorkerConfig,
   runner: CodexLcmSummaryRunner,
-  promptResults?: LcmSummaryPromptResult[]
-): Promise<LcmSummaryPromptResult> => {
+  promptResults?: VersionedLcmSummaryPromptResult[]
+): Promise<VersionedLcmSummaryPromptResult> => {
   let lastError: unknown;
   for (let attempt = 1; attempt <= config.maxAttempts; attempt += 1) {
     try {
@@ -602,6 +558,7 @@ const runPromptWithRetries = async (
       const structuredSummary = parseStructuredLcmSummary(result.text);
       const succeeded = {
         ...result,
+        promptVersion,
         text: structuredSummary.summary_text.trim(),
         structuredSummary,
         attemptIndex: attempt,
@@ -615,6 +572,7 @@ const runPromptWithRetries = async (
         promptResults?.push({
           text: "",
           model: error.model,
+          promptVersion,
           tokenUsage: error.tokenUsage,
           threadId: error.threadId,
           turnId: error.turnId,
@@ -665,7 +623,7 @@ const rawTextFromAppServerEvent = (event: {
 const persistLcmAppServerEvents = async (
   client: MemoryApiClient,
   node: LcmSummaryNode,
-  result: LcmSummaryPromptResult,
+  result: VersionedLcmSummaryPromptResult,
   callIndex: number
 ): Promise<void> => {
   const events = result.rawEvents ?? [];
@@ -709,7 +667,8 @@ const persistLcmAppServerEvents = async (
         depth: node.depth,
         attemptIndex: result.attemptIndex,
         executionStatus: result.status ?? "succeeded",
-        errorMessage: result.errorMessage
+        errorMessage: result.errorMessage,
+        promptVersion: result.promptVersion
       }
     };
   });
@@ -756,7 +715,8 @@ const persistLcmAppServerEvents = async (
         depth: node.depth,
         attemptIndex: result.attemptIndex,
         executionStatus: result.status ?? "succeeded",
-        errorMessage: result.errorMessage
+        errorMessage: result.errorMessage,
+        promptVersion: result.promptVersion
       },
       idempotencyKey: tokenConversationItemId
         ? `token:${tokenConversationItemId}:last`
@@ -772,16 +732,16 @@ const persistLcmAppServerEvents = async (
 
 const reduceShardSummaries = async (
   node: LcmSummaryNode,
-  shardSummaries: LcmSummaryPromptResult[],
+  shardSummaries: VersionedLcmSummaryPromptResult[],
   config: LcmSummaryWorkerConfig,
   runner: CodexLcmSummaryRunner,
-  promptResults: LcmSummaryPromptResult[],
+  promptResults: VersionedLcmSummaryPromptResult[],
   stats: {
     promptTokenSum: number;
     maxPromptTokens: number;
     promptCallCount: number;
   }
-): Promise<LcmSummaryPromptResult> => {
+): Promise<VersionedLcmSummaryPromptResult> => {
   if (shardSummaries.length === 1) {
     return shardSummaries[0]!;
   }
@@ -802,15 +762,16 @@ const reduceShardSummaries = async (
     }))
   };
   const reducePrompts = buildTokenBoundedPrompts(reduceNode, config, "reduce");
-  const nextSummaries: LcmSummaryPromptResult[] = [];
+  const nextSummaries: VersionedLcmSummaryPromptResult[] = [];
 
   for (const prompt of reducePrompts) {
-    const tokens = promptTokens(prompt, config);
+    const tokens = promptTokens(prompt.text, config);
     stats.promptTokenSum += tokens;
     stats.maxPromptTokens = Math.max(stats.maxPromptTokens, tokens);
     stats.promptCallCount += 1;
     const result = await runPromptWithRetries(
-      prompt,
+      prompt.text,
+      prompt.version,
       config,
       runner,
       promptResults
@@ -858,8 +819,8 @@ const summarizeNode = async (
 
   try {
     const prompts = buildSummaryPrompts(node, config);
-    const promptResults: LcmSummaryPromptResult[] = [];
-    const shardSummaries: LcmSummaryPromptResult[] = [];
+    const promptResults: VersionedLcmSummaryPromptResult[] = [];
+    const shardSummaries: VersionedLcmSummaryPromptResult[] = [];
     for (const entry of prompts) {
       const tokens = promptTokens(entry.prompt, config);
       stats.promptTokenSum += tokens;
@@ -867,6 +828,7 @@ const summarizeNode = async (
       stats.promptCallCount += 1;
       const result = await runPromptWithRetries(
         entry.prompt,
+        entry.promptVersion,
         config,
         runner,
         promptResults
@@ -901,7 +863,7 @@ const summarizeNode = async (
     await client.submitLcmSummary(node.id, {
       summaryText,
       summaryModel: result.model,
-      summaryPromptVersion: LCM_SUMMARY_PROMPT_VERSION,
+      summaryPromptVersion: result.promptVersion,
       summaryTokenEstimate: summaryTokens.tokens,
       summaryStructuredJson: result.structuredSummary,
       summaryStructuredSchemaVersion: LCM_STRUCTURED_SUMMARY_SCHEMA_VERSION
