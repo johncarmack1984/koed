@@ -1,5 +1,6 @@
 export { registerCaptureRoutes } from "./capture-routes.js";
 export { registerGraphRoutes } from "./graph-routes.js";
+export { registerHistoricalImportRoutes } from "./historical-import-routes.js";
 export {
   canReceiveGraphStreamPayload,
   createGraphStreamService,

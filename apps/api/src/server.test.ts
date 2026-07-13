@@ -23,6 +23,8 @@ import type {
   DeviceEnrollmentChallengeRecord,
   ExternalAuthIdentityRecord,
   ExternalAuthOrganizationRecord,
+  HistoricalImportRunRecord,
+  HistoricalImportSourceRecord,
   LocalMemoryAgentSettingRecord,
   MemoryQuestionDetailRecord,
   MemoryNodeRecord,
@@ -531,6 +533,11 @@ const createFakeRepository = () => {
   }> = [];
   const capturedSessions = new Map<string, CapturedSessionRecord>();
   const capturedSessionIdsByIdempotencyKey = new Map<string, string>();
+  const historicalImportRuns = new Map<string, HistoricalImportRunRecord>();
+  const historicalImportSources = new Map<
+    string,
+    HistoricalImportSourceRecord
+  >();
   let capturedSessionCounter = 0;
   const teams = new Map<string, TeamRecord>();
   const teamInvites = new Map<
@@ -2185,6 +2192,194 @@ const createFakeRepository = () => {
         )
       };
     },
+    async createHistoricalImportRun(actor) {
+      const now = new Date().toISOString();
+      const run: HistoricalImportRunRecord = {
+        id: randomUUID(),
+        ownerUserId: actor.userId,
+        state: "discovered",
+        sourceCount: 0,
+        completedSourceCount: 0,
+        failedSourceCount: 0,
+        skippedSourceCount: 0,
+        discoveredRecordCount: 0,
+        importedRecordCount: 0,
+        skippedRecordCount: 0,
+        scannedByteCount: 0,
+        retryCount: 0,
+        failureReason: null,
+        nextRetryAt: null,
+        discoveredAt: now,
+        eligibleAt: null,
+        queuedAt: null,
+        importStartedAt: null,
+        pausedAt: null,
+        skippedAt: null,
+        completedAt: null,
+        failedAt: null,
+        lastAttemptAt: null,
+        createdAt: now,
+        updatedAt: now
+      };
+      historicalImportRuns.set(run.id, run);
+      return run;
+    },
+    async listHistoricalImportRuns(actor, input = {}) {
+      return [...historicalImportRuns.values()]
+        .filter((run) => run.ownerUserId === actor.userId)
+        .slice(0, input.limit ?? 20);
+    },
+    async getHistoricalImportRun(actor, runId) {
+      const run = historicalImportRuns.get(runId);
+      if (!run || run.ownerUserId !== actor.userId) {
+        return null;
+      }
+      return {
+        ...run,
+        sources: [...historicalImportSources.values()].filter(
+          (source) => source.runId === run.id
+        )
+      };
+    },
+    async createHistoricalImportSource(actor, input) {
+      const run = historicalImportRuns.get(input.runId);
+      if (!run || run.ownerUserId !== actor.userId) {
+        return null;
+      }
+      const existing = [...historicalImportSources.values()].find(
+        (source) =>
+          source.ownerUserId === actor.userId &&
+          source.aiClient === input.aiClient &&
+          source.sourceKind === input.sourceKind &&
+          source.sourceSessionId === input.sourceSessionId &&
+          source.sourceFingerprint === input.sourceFingerprint
+      );
+      if (existing) {
+        return existing;
+      }
+      const now = new Date().toISOString();
+      const basename = input.localSourcePath
+        .replaceAll("\\", "/")
+        .split("/")
+        .at(-1);
+      const source: HistoricalImportSourceRecord = {
+        id: randomUUID(),
+        runId: run.id,
+        ownerUserId: actor.userId,
+        state: "discovered",
+        aiClient: input.aiClient,
+        sourceKind: input.sourceKind,
+        sourceSessionId: input.sourceSessionId,
+        sourceFingerprint: input.sourceFingerprint,
+        localSourcePath: input.localSourcePath,
+        redactedSourceLabel: `…/${basename || "Codex history"}`,
+        checkpointOffset: 0,
+        checkpointLine: 0,
+        sourceSizeBytes: input.sourceSizeBytes ?? null,
+        sourceModifiedAt: input.sourceModifiedAt ?? null,
+        sourceEventFrom: input.sourceEventFrom ?? null,
+        sourceEventTo: input.sourceEventTo ?? null,
+        discoveredRecordCount: input.discoveredRecordCount ?? 0,
+        importedRecordCount: 0,
+        skippedRecordCount: 0,
+        malformedRecordCount: 0,
+        retryCount: 0,
+        failureReason: null,
+        nextRetryAt: null,
+        detectedProject: input.detectedProject ?? {},
+        discoveredAt: now,
+        eligibleAt: null,
+        queuedAt: null,
+        importStartedAt: null,
+        pausedAt: null,
+        skippedAt: null,
+        completedAt: null,
+        failedAt: null,
+        lastObservedAt: null,
+        createdAt: now,
+        updatedAt: now
+      };
+      historicalImportSources.set(source.id, source);
+      historicalImportRuns.set(run.id, {
+        ...run,
+        sourceCount: run.sourceCount + 1
+      });
+      return source;
+    },
+    async transitionHistoricalImportRun(actor, input) {
+      const run = historicalImportRuns.get(input.runId);
+      if (
+        !run ||
+        run.ownerUserId !== actor.userId ||
+        run.state !== input.expectedState
+      ) {
+        return null;
+      }
+      const updated = {
+        ...run,
+        state: input.state,
+        failureReason: input.failureReason ?? null,
+        nextRetryAt: input.nextRetryAt ?? null,
+        updatedAt: new Date().toISOString()
+      };
+      historicalImportRuns.set(run.id, updated);
+      return updated;
+    },
+    async transitionHistoricalImportSource(actor, input) {
+      const source = historicalImportSources.get(input.sourceId);
+      if (
+        !source ||
+        source.ownerUserId !== actor.userId ||
+        source.state !== input.expectedState
+      ) {
+        return null;
+      }
+      const updated = {
+        ...source,
+        state: input.state,
+        failureReason: input.failureReason ?? null,
+        nextRetryAt: input.nextRetryAt ?? null,
+        updatedAt: new Date().toISOString()
+      };
+      historicalImportSources.set(source.id, updated);
+      return updated;
+    },
+    async advanceHistoricalImportSource(actor, input) {
+      const source = historicalImportSources.get(input.sourceId);
+      if (
+        !source ||
+        source.ownerUserId !== actor.userId ||
+        source.checkpointOffset !== input.expectedCheckpointOffset
+      ) {
+        return null;
+      }
+      const now = new Date().toISOString();
+      const updated: HistoricalImportSourceRecord = {
+        ...source,
+        state: "importing",
+        checkpointOffset: input.checkpointOffset,
+        checkpointLine: input.checkpointLine,
+        sourceSizeBytes: input.sourceSizeBytes,
+        importedRecordCount:
+          source.importedRecordCount + input.importedRecordCount,
+        skippedRecordCount:
+          source.skippedRecordCount + (input.skippedRecordCount ?? 0),
+        malformedRecordCount:
+          source.malformedRecordCount + (input.malformedRecordCount ?? 0),
+        sourceEventFrom:
+          source.sourceEventFrom ?? input.sourceEventFrom ?? null,
+        sourceEventTo: input.sourceEventTo ?? source.sourceEventTo,
+        importStartedAt: source.importStartedAt ?? now,
+        lastObservedAt: now,
+        updatedAt: now
+      };
+      historicalImportSources.set(source.id, updated);
+      return updated;
+    },
+    async getHistoricalImportSource(actor, sourceId) {
+      const source = historicalImportSources.get(sourceId);
+      return source?.ownerUserId === actor.userId ? source : null;
+    },
     async createCapturedSession(actor: ActorContext, input) {
       const id = randomUUID();
       const detectedProjects =
@@ -2232,6 +2427,17 @@ const createFakeRepository = () => {
         captureMethod: existing?.captureMethod ?? input.captureMethod ?? "mcp",
         model: existing?.model ?? input.model ?? null,
         cwd: existing?.cwd ?? input.cwd ?? null,
+        sourceKind: existing?.sourceKind ?? input.sourceKind ?? "codex",
+        sourceAdapterVersion:
+          existing?.sourceAdapterVersion ?? input.sourceAdapterVersion ?? null,
+        sourceFingerprint:
+          existing?.sourceFingerprint ?? input.sourceFingerprint ?? null,
+        capturedProject:
+          existing && Object.keys(existing.capturedProject).length > 0
+            ? existing.capturedProject
+            : (input.capturedProject ?? {}),
+        importObservedAt:
+          existing?.importObservedAt ?? input.importObservedAt ?? null,
         metadata: { ...existing?.metadata, ...input.metadata },
         capturedProjectProvenance: existing?.capturedProjectProvenance ?? {
           capturedCwd: input.cwd ?? null,
@@ -2489,6 +2695,10 @@ const createFakeRepository = () => {
         sourceEventType: item.sourceEventType ?? null,
         sourceSequence: item.sourceSequence ?? index,
         idempotencyKey: item.idempotencyKey,
+        observedAt: new Date().toISOString(),
+        importObservedAt: item.importObservedAt ?? null,
+        sourceFingerprint: item.sourceFingerprint ?? null,
+        capturedProject: item.capturedProject ?? {},
         createdAt: new Date().toISOString()
       }));
     },
@@ -8989,6 +9199,270 @@ describe("account and access flows", () => {
     await app.close();
 
     expect(unsupportedPolicy.statusCode).toBe(400);
+  });
+
+  it("authorizes, redacts, and rechecks policy for local historical import batches", async () => {
+    const app = await buildServer({
+      repository: createFakeRepository(),
+      runMemoryJobsInlineForTests: true
+    });
+    const owner = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "history-owner@example.com", password: "password123" }
+    });
+    const ownerToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie: cookieHeader(owner) },
+      payload: { name: "Historical Import" }
+    });
+    const ownerHeaders = {
+      authorization: `Bearer ${jsonBody<TokenResponse>(ownerToken).token}`
+    };
+    const runResponse = await app.inject({
+      method: "POST",
+      url: "/v1/historical-imports",
+      headers: ownerHeaders
+    });
+    const runId = jsonBody<{ run: { id: string } }>(runResponse).run.id;
+    const sourceResponse = await app.inject({
+      method: "POST",
+      url: "/v1/historical-import-sources",
+      headers: ownerHeaders,
+      payload: {
+        runId,
+        aiClient: "codex",
+        sourceKind: "codex",
+        sourceSessionId: "historical-session",
+        sourceFingerprint: "a".repeat(64),
+        localSourcePath: "/Users/alice/.codex/sessions/private.jsonl",
+        sourceSizeBytes: 0,
+        detectedProject: {
+          name: "Koed",
+          path: "/Users/alice/private/koed",
+          branch: "main"
+        }
+      }
+    });
+    const sourceId = jsonBody<{ source: { id: string } }>(sourceResponse).source
+      .id;
+    const bypass = await app.inject({
+      method: "POST",
+      url: "/v1/memory/conversation-items",
+      headers: ownerHeaders,
+      payload: {
+        items: [
+          {
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-transcript-v1",
+            sourceTransport: "historical_import",
+            sourceRecordType: "event_msg",
+            rawJson: {},
+            sourceHash: "bypass",
+            idempotencyKey: "bypass",
+            metadata: {}
+          }
+        ]
+      }
+    });
+    expect(bypass.statusCode).toBe(400);
+    const status = await app.inject({
+      method: "GET",
+      url: `/v1/historical-imports/${runId}`,
+      headers: ownerHeaders
+    });
+    expect(status.body).not.toContain("/Users/alice");
+    expect(
+      jsonBody<{ run: { sources: unknown[] } }>(status).run.sources
+    ).toEqual([
+      expect.objectContaining({
+        sourceLabel: "…/private.jsonl",
+        detectedProject: { name: "Koed", branch: "main" }
+      })
+    ]);
+
+    const outsider = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "history-outsider@example.com",
+        password: "password123"
+      }
+    });
+    const outsiderRead = await app.inject({
+      method: "GET",
+      url: `/v1/historical-imports/${runId}`,
+      headers: { cookie: cookieHeader(outsider) }
+    });
+    expect(outsiderRead.statusCode).toBe(404);
+
+    for (const [expectedState, state] of [
+      ["discovered", "eligible"],
+      ["eligible", "queued"]
+    ] as const) {
+      const transitioned = await app.inject({
+        method: "PATCH",
+        url: `/v1/historical-import-sources/${sourceId}`,
+        headers: ownerHeaders,
+        payload: { expectedState, state }
+      });
+      expect(transitioned.statusCode).toBe(200);
+    }
+    await app.inject({
+      method: "PUT",
+      url: "/v1/capture-policies",
+      headers: ownerHeaders,
+      payload: {
+        targetType: "global",
+        captureState: "disabled",
+        visibility: "personal"
+      }
+    });
+    const batchPayload = {
+      expectedCheckpointOffset: 0,
+      checkpointOffset: 100,
+      checkpointLine: 1,
+      sourceSizeBytes: 100,
+      malformedRecordCount: 1,
+      items: [
+        {
+          sourceRecordType: "event_msg",
+          sourceEventType: "user_message",
+          sourceLineNumber: 0,
+          sourceSequence: 0,
+          eventTime: "2026-07-01T12:00:00.000Z",
+          rawJson: {
+            timestamp: "2026-07-01T12:00:00.000Z",
+            type: "event_msg",
+            payload: { type: "user_message", message: "Imported memory" }
+          },
+          rawText: "Imported memory",
+          sourceHash: "adapter-source-hash",
+          idempotencyKey: "adapter-idempotency-key",
+          metadata: {
+            transcriptByteOffset: 0,
+            transcriptItemDiscriminator: "primary:codex_transcript_user",
+            transcriptType: "user_message"
+          }
+        }
+      ]
+    };
+    const blocked = await app.inject({
+      method: "POST",
+      url: `/v1/historical-import-sources/${sourceId}/batches`,
+      headers: ownerHeaders,
+      payload: batchPayload
+    });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.body).toContain("Capture Policy");
+
+    await app.inject({
+      method: "PUT",
+      url: "/v1/capture-policies",
+      headers: ownerHeaders,
+      payload: {
+        targetType: "global",
+        captureState: "enabled",
+        visibility: "personal",
+        pauseUntil: null
+      }
+    });
+    const imported = await app.inject({
+      method: "POST",
+      url: `/v1/historical-import-sources/${sourceId}/batches`,
+      headers: ownerHeaders,
+      payload: batchPayload
+    });
+    const replayed = await app.inject({
+      method: "POST",
+      url: `/v1/historical-import-sources/${sourceId}/batches`,
+      headers: ownerHeaders,
+      payload: batchPayload
+    });
+    const unsafeFailure = await app.inject({
+      method: "PATCH",
+      url: `/v1/historical-import-sources/${sourceId}`,
+      headers: ownerHeaders,
+      payload: {
+        expectedState: "importing",
+        state: "failed",
+        failureReason: "/Users/alice/private.jsonl"
+      }
+    });
+    await app.close();
+
+    expect(imported.statusCode).toBe(200);
+    expect(imported.body).not.toContain("/Users/alice");
+    expect(
+      jsonBody<{
+        source: { checkpointOffset: number; malformedRecordCount: number };
+      }>(imported).source
+    ).toMatchObject({ checkpointOffset: 100, malformedRecordCount: 1 });
+    expect(replayed.statusCode).toBe(200);
+    expect(unsafeFailure.statusCode).toBe(400);
+    expect(unsafeFailure.body).not.toContain("/Users/alice");
+    expect(
+      jsonBody<{
+        replayed: boolean;
+        items: unknown[];
+        source: { importedRecordCount: number };
+      }>(replayed)
+    ).toMatchObject({
+      replayed: true,
+      items: [],
+      source: { importedRecordCount: 1 }
+    });
+  });
+
+  it("keeps historical controls and raw source paths off remote profiles", async () => {
+    process.env.KOED_DEPLOYMENT_PROFILE = "private_vps";
+    const app = await buildServer({ repository: createFakeRepository() });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "remote-import@example.com", password: "password123" }
+    });
+    const cookie = cookieHeader(registered);
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: { cookie },
+      payload: { name: "Remote token" }
+    });
+    const headers = {
+      authorization: `Bearer ${jsonBody<TokenResponse>(createdToken).token}`
+    };
+    const control = await app.inject({
+      method: "POST",
+      url: "/v1/historical-imports",
+      headers
+    });
+    const rawPath = await app.inject({
+      method: "POST",
+      url: "/v1/memory/conversation-items",
+      headers,
+      payload: {
+        items: [
+          {
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-transcript-v1",
+            sourceTransport: "hook",
+            sourceRecordType: "event_msg",
+            sourcePath: "/Users/alice/private/session.jsonl",
+            rawJson: {},
+            sourceHash: "remote-path",
+            idempotencyKey: "remote-path",
+            metadata: {}
+          }
+        ]
+      }
+    });
+    await app.close();
+
+    expect(control.statusCode).toBe(404);
+    expect(rawPath.statusCode).toBe(400);
+    expect(rawPath.body).not.toContain("/Users/alice");
   });
 
   it("treats duplicate capture source hashes as idempotent", async () => {

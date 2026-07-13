@@ -41,6 +41,7 @@ import {
   graphUpdateActionForPayload,
   registerCaptureRoutes,
   registerGraphRoutes,
+  registerHistoricalImportRoutes,
   registerLocalAgentSettingsRoutes,
   registerLcmRoutes,
   registerQuestionRoutes,
@@ -485,6 +486,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   registerTeamRoutes(app, routeContext);
   registerLocalEdgeRoutes(app, routeContext);
   registerCaptureRoutes(app, routeContext);
+  registerHistoricalImportRoutes(app, routeContext);
   registerRawConversationRoutes(app, routeContext);
   registerRecallRoutes(app, routeContext);
   registerLocalAgentSettingsRoutes(app, routeContext);

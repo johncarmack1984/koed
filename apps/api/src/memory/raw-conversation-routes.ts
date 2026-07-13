@@ -28,6 +28,22 @@ export const registerRawConversationRoutes = (
       const repo = requireRepository();
       const user = await authenticateApiToken(request);
       const input = createConversationItemsSchema.parse(request.body);
+      if (
+        input.items.some((item) => item.sourceTransport === "historical_import")
+      ) {
+        throw Object.assign(
+          new Error("Historical import requires local import batch API"),
+          { statusCode: 400 }
+        );
+      }
+      const localProfile = ["developer", "local_personal"].includes(
+        context.config.deploymentProfile
+      );
+      if (!localProfile && input.items.some((item) => item.sourcePath)) {
+        throw Object.assign(new Error("Raw source paths are local-only"), {
+          statusCode: 400
+        });
+      }
 
       const items = await repo.createConversationItems(
         { userId: user.id },
