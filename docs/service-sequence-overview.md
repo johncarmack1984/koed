@@ -561,16 +561,19 @@ remains a later integration on top of this durable seat lifecycle state.
 11. Local historical import state uses authenticated
     `/v1/historical-imports` and `/v1/historical-import-sources` routes. These
     routes exist only on developer/local-personal edges. Durable run/source
-    records validate transitions and retain checkpoint, counters, retry/failure,
-    timestamps, source fingerprint/session ID, immutable detected Project
-    provenance, and local-only raw source path. Responses remove raw path and
-    path-like Project fields.
+    records validate transitions and retain checkpoint offset/prefix hash,
+    counters, retry/failure timestamps, source fingerprint/session ID, immutable
+    detected Project provenance, and local-only raw source path. Responses and
+    canonical raw/Captured Session provenance remove raw path and path-like
+    Project fields.
 12. Before source eligibility/queueing and every import batch, the API resolves
     owning User's effective Capture Policy and Capture Pause. Disabled, ask,
-    paused, or non-personal results fail closed. Batch writes use same
-    `codex-transcript-v1` adapter and `conversation_items` path as hook capture,
-    then advance checkpoint. No Team, Workspace Access, or Share Grant mutation
-    occurs.
+    paused, or non-personal results fail closed. Policy mutation is serialized
+    against batch persistence. Batch writes use same `codex-transcript-v1`
+    adapter and `conversation_items` path as hook capture; raw persistence,
+    counters, and checkpoint advancement commit atomically. Offset/prefix-hash
+    retries distinguish exact replay from mutation or truncation. No Team,
+    Workspace Access, or Share Grant mutation occurs.
 13. The Worker consumes queued jobs from Redis/BullMQ or `local_work_queue`.
     Both backends use lower-number-first priority and FIFO within a class, so
     live capture runs ahead of queued historical embedding/LCM work. Schema

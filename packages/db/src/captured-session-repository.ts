@@ -387,8 +387,8 @@ export const createCapturedSessionRepository = (
           case when $23::text is null then null else now() end,
           $26, $27, $28
         )
-        on conflict (idempotency_key)
-        where idempotency_key is not null
+        on conflict (owner_user_id, idempotency_key)
+        where visibility = 'personal' and idempotency_key is not null
         do update set
           updated_at = now(),
           metadata =

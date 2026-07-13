@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type {
   HistoricalImportRunDetail,
   HistoricalImportRunRecord,
@@ -110,90 +109,6 @@ const requireImportPolicy = async (
   }
   return policy;
 };
-
-const hash = (value: unknown): string =>
-  createHash("sha256").update(JSON.stringify(value)).digest("hex");
-
-const canonicalHistoricalItemIdentity = (
-  source: HistoricalImportSourceRecord,
-  item: {
-    sourceSequence?: number;
-    sourceLineNumber?: number;
-    logicalSourceId?: string;
-    transportChunkIndex?: number;
-    transportChunkCount?: number;
-    externalItemId?: string;
-    sourceEventType?: string;
-    sourceRecordType: string;
-    rawJson: unknown;
-    metadata: Record<string, unknown>;
-  }
-): { sourceHash: string; idempotencyKey: string } => {
-  if (
-    item.logicalSourceId &&
-    (item.transportChunkCount ?? 1) > 1 &&
-    item.transportChunkIndex !== undefined
-  ) {
-    const chunkHash = hash({
-      sourceHash: item.logicalSourceId,
-      transportChunkIndex: item.transportChunkIndex,
-      transportChunkCount: item.transportChunkCount
-    });
-    return { sourceHash: chunkHash, idempotencyKey: chunkHash };
-  }
-  const recordHash = hash(item.rawJson);
-  const transcriptPosition =
-    typeof item.metadata.transcriptByteOffset === "number"
-      ? item.metadata.transcriptByteOffset
-      : (item.sourceSequence ?? item.sourceLineNumber);
-  if (transcriptPosition === undefined) {
-    throw Object.assign(new Error("Transcript item position is required"), {
-      statusCode: 400
-    });
-  }
-  const itemDiscriminator =
-    typeof item.metadata.transcriptItemDiscriminator === "string"
-      ? item.metadata.transcriptItemDiscriminator
-      : (item.externalItemId ?? item.sourceEventType ?? item.sourceRecordType);
-  return {
-    sourceHash: hash({ recordHash, itemDiscriminator }),
-    idempotencyKey: `conversation-item:${hash({
-      version: 3,
-      aiClient: source.sourceKind,
-      sourceSessionId: source.sourceSessionId,
-      transcriptPosition,
-      itemDiscriminator,
-      recordHash
-    })}`
-  };
-};
-
-const createImportedSession = async (
-  repo: MemorySourceRepository,
-  userId: string,
-  source: HistoricalImportSourceRecord,
-  observedAt: string
-) =>
-  repo.createCapturedSession(
-    { userId },
-    {
-      externalSessionId: source.sourceSessionId,
-      sourceRuntime: "codex",
-      captureMethod: "api",
-      idempotencyKey: `historical-import-session:${userId}:${source.sourceKind}:${source.sourceSessionId}`,
-      sourceHash: source.sourceFingerprint,
-      sourceKind: source.sourceKind,
-      sourceAdapterVersion: "codex-transcript-v1",
-      sourceFingerprint: source.sourceFingerprint,
-      capturedProject: source.detectedProject,
-      importObservedAt: observedAt,
-      metadata: {
-        sourceTransport: "historical_import",
-        historicalImportSourceId: source.id,
-        capturedProjectProvenanceStoredSeparately: true
-      }
-    }
-  );
 
 type HistoricalBatchInput = ReturnType<
   typeof historicalImportBatchSchema.parse
@@ -346,102 +261,25 @@ const registerSourceTransitionRoute = (
   );
 };
 
-const validateBatchSource = (
-  source: HistoricalImportSourceRecord,
-  input: HistoricalBatchInput
-): void => {
-  if (!["queued", "importing"].includes(source.state)) {
-    throw Object.assign(new Error("Historical import source is not writable"), {
-      statusCode: 409
-    });
-  }
-  if (source.checkpointOffset !== input.expectedCheckpointOffset) {
-    throw Object.assign(new Error("Historical import checkpoint conflict"), {
-      statusCode: 409
-    });
-  }
-  if ((source.sourceSizeBytes ?? 0) > input.sourceSizeBytes) {
-    throw Object.assign(new Error("Historical import source was truncated"), {
-      statusCode: 409
-    });
-  }
-};
-
-const importedConversationItems = (
-  source: HistoricalImportSourceRecord,
-  input: HistoricalBatchInput,
-  sessionId: string,
-  observedAt: string
-) =>
-  input.items.map((item) => ({
-    ...item,
-    ...canonicalHistoricalItemIdentity(source, item),
-    visibility: "personal" as const,
-    sessionId,
-    turnId: undefined,
-    sourceKind: source.sourceKind,
-    sourceAdapterVersion: "codex-transcript-v1",
-    sourceTransport: "historical_import",
-    externalSessionId: source.sourceSessionId,
-    sourcePath: undefined,
-    importObservedAt: observedAt,
-    sourceFingerprint: source.sourceFingerprint,
-    capturedProject: source.detectedProject,
-    projectionStatus: "pending",
-    projectionVersion: "codex-transcript-v1",
-    metadata: {
-      ...item.metadata,
-      historicalImportRunId: source.runId,
-      historicalImportSourceId: source.id,
-      sourceFingerprint: source.sourceFingerprint
-    }
-  }));
-
-const ingestHistoricalBatch = async (
+const ingestHistoricalBatch = (
   context: ApiRouteContext,
   userId: string,
   sourceId: string,
   input: HistoricalBatchInput
-) => {
-  const repo = context.requireRepository();
-  const source = await requireSource(repo, userId, sourceId);
-  if (
-    input.checkpointOffset > input.expectedCheckpointOffset &&
-    source.checkpointOffset === input.checkpointOffset
-  ) {
-    const policy = await requireImportPolicy(context, repo, userId, source);
-    return { items: [], updated: source, policy, replayed: true };
-  }
-  validateBatchSource(source, input);
-  const policy = await requireImportPolicy(context, repo, userId, source);
-  const observedAt = new Date().toISOString();
-  const session = await createImportedSession(repo, userId, source, observedAt);
-  const items = await repo.createConversationItems(
-    { userId },
-    { items: importedConversationItems(source, input, session.id, observedAt) }
-  );
-  const updated = await repo.advanceHistoricalImportSource(
+) =>
+  context.requireRepository().ingestHistoricalImportBatch(
     { userId },
     {
       sourceId,
-      expectedCheckpointOffset: input.expectedCheckpointOffset,
-      checkpointOffset: input.checkpointOffset,
-      checkpointLine: input.checkpointLine,
-      sourceSizeBytes: input.sourceSizeBytes,
-      importedRecordCount: items.length,
-      skippedRecordCount: input.skippedRecordCount,
-      malformedRecordCount: input.malformedRecordCount,
-      sourceEventFrom: input.sourceEventFrom,
-      sourceEventTo: input.sourceEventTo
+      ...input,
+      items: input.items.map((item) => ({
+        ...item,
+        sourceKind: "codex",
+        sourceAdapterVersion: "codex-transcript-v1",
+        sourceTransport: "historical_import"
+      }))
     }
   );
-  if (!updated) {
-    throw Object.assign(new Error("Historical import checkpoint conflict"), {
-      statusCode: 409
-    });
-  }
-  return { items, updated, policy, replayed: false };
-};
 
 const registerBatchRoute = (
   app: FastifyInstance,
@@ -457,7 +295,7 @@ const registerBatchRoute = (
         request.params
       );
       const input = historicalImportBatchSchema.parse(request.body);
-      const { items, updated, policy, replayed } = await ingestHistoricalBatch(
+      const { items, source, policy, replayed } = await ingestHistoricalBatch(
         context,
         user.id,
         sourceId,
@@ -468,7 +306,7 @@ const registerBatchRoute = (
           ...item,
           capturedProject: safeProjectProvenance(item.capturedProject)
         })),
-        source: presentSource(updated),
+        source: presentSource(source),
         policy,
         replayed
       };

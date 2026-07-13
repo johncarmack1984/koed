@@ -45,9 +45,11 @@ describe("historical priority migration chain", () => {
       entries: Array<{ idx: number; tag: string }>;
     };
 
-    expect(journal.entries.at(-1)).toEqual(
-      expect.objectContaining({ idx: 12, tag: "0012_dazzling_chimera" })
-    );
+    expect(journal.entries.slice(12, 15)).toEqual([
+      expect.objectContaining({ idx: 12, tag: "0012_dazzling_chimera" }),
+      expect.objectContaining({ idx: 13, tag: "0013_lazy_leader" }),
+      expect.objectContaining({ idx: 14, tag: "0014_exotic_warbound" })
+    ]);
     expect(migrationSql).toContain('CREATE TABLE "historical_import_runs"');
     expect(migrationSql).toContain('CREATE TABLE "historical_import_sources"');
     expect(migrationSql).toContain('"local_source_path" text NOT NULL');
@@ -56,5 +58,30 @@ describe("historical priority migration chain", () => {
       'ADD COLUMN "import_observed_at" timestamp with time zone'
     );
     expect(migrationSql).toContain("historical_import_sources_identity_unique");
+  });
+
+  it("owner-scopes Captured Session identities without rewriting rows", async () => {
+    const migrationSql = await readDrizzleFile("0014_exotic_warbound.sql");
+
+    expect(migrationSql).toContain(
+      'DROP INDEX "sessions_idempotency_key_unique"'
+    );
+    expect(migrationSql).toContain('"owner_user_id","idempotency_key"');
+    expect(migrationSql).toContain('"owner_user_id","source_hash"');
+    expect(migrationSql.toLowerCase()).not.toContain("update sessions");
+  });
+
+  it("adds owner-consistent source state before its composite foreign key", async () => {
+    const migrationSql = await readDrizzleFile("0013_lazy_leader.sql");
+    const uniqueConstraint = migrationSql.indexOf(
+      "historical_import_runs_id_owner_unique"
+    );
+    const foreignKey = migrationSql.indexOf(
+      "historical_import_sources_run_owner_fk"
+    );
+
+    expect(uniqueConstraint).toBeGreaterThan(-1);
+    expect(foreignKey).toBeGreaterThan(uniqueConstraint);
+    expect(migrationSql).toContain('ADD COLUMN "checkpoint_hash" text');
   });
 });

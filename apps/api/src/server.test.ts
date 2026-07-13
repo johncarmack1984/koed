@@ -2275,6 +2275,7 @@ const createFakeRepository = () => {
         redactedSourceLabel: `…/${basename || "Codex history"}`,
         checkpointOffset: 0,
         checkpointLine: 0,
+        checkpointHash: null,
         sourceSizeBytes: input.sourceSizeBytes ?? null,
         sourceModifiedAt: input.sourceModifiedAt ?? null,
         sourceEventFrom: input.sourceEventFrom ?? null,
@@ -2359,6 +2360,7 @@ const createFakeRepository = () => {
         state: "importing",
         checkpointOffset: input.checkpointOffset,
         checkpointLine: input.checkpointLine,
+        checkpointHash: input.checkpointHash,
         sourceSizeBytes: input.sourceSizeBytes,
         importedRecordCount:
           source.importedRecordCount + input.importedRecordCount,
@@ -2375,6 +2377,70 @@ const createFakeRepository = () => {
       };
       historicalImportSources.set(source.id, updated);
       return updated;
+    },
+    async ingestHistoricalImportBatch(actor, input) {
+      const source = historicalImportSources.get(input.sourceId);
+      if (!source || source.ownerUserId !== actor.userId) {
+        throw Object.assign(new Error("Historical import source not found"), {
+          statusCode: 404
+        });
+      }
+      const policy = await this.getEffectiveCapturePolicy!(actor, {
+        projectId:
+          typeof source.detectedProject.projectId === "string"
+            ? source.detectedProject.projectId
+            : undefined,
+        threadId: source.sourceSessionId
+      });
+      if (policy.captureState !== "enabled" || policy.paused) {
+        throw Object.assign(
+          new Error("Historical import blocked by effective Capture Policy"),
+          { statusCode: 409 }
+        );
+      }
+      if (
+        source.checkpointOffset === input.checkpointOffset &&
+        source.checkpointHash === input.checkpointHash
+      ) {
+        return { items: [], source, policy, replayed: true };
+      }
+      if (
+        source.checkpointOffset !== input.expectedCheckpointOffset ||
+        source.checkpointHash !== (input.expectedCheckpointHash ?? null)
+      ) {
+        throw Object.assign(
+          new Error("Historical import checkpoint conflict"),
+          { statusCode: 409 }
+        );
+      }
+      const session = await this.createCapturedSession!(actor, {
+        externalSessionId: source.sourceSessionId,
+        idempotencyKey: `historical-import-session:${actor.userId}:${source.sourceSessionId}`
+      });
+      const items = await this.createConversationItems!(actor, {
+        items: input.items.map((item) => ({
+          ...item,
+          sessionId: session.id,
+          sourceKind: source.sourceKind,
+          sourceAdapterVersion: "codex-transcript-v1",
+          sourceTransport: "historical_import",
+          externalSessionId: source.sourceSessionId,
+          sourceFingerprint: source.sourceFingerprint,
+          capturedProject: {},
+          importObservedAt: new Date().toISOString()
+        }))
+      });
+      const updated = await this.advanceHistoricalImportSource!(actor, {
+        ...input,
+        importedRecordCount: items.length
+      });
+      if (!updated) {
+        throw Object.assign(
+          new Error("Historical import checkpoint conflict"),
+          { statusCode: 409 }
+        );
+      }
+      return { items, source: updated, policy, replayed: false };
     },
     async getHistoricalImportSource(actor, sourceId) {
       const source = historicalImportSources.get(sourceId);
@@ -9301,13 +9367,20 @@ describe("account and access flows", () => {
       ["discovered", "eligible"],
       ["eligible", "queued"]
     ] as const) {
-      const transitioned = await app.inject({
+      const runTransition = await app.inject({
+        method: "PATCH",
+        url: `/v1/historical-imports/${runId}`,
+        headers: ownerHeaders,
+        payload: { expectedState, state }
+      });
+      const sourceTransition = await app.inject({
         method: "PATCH",
         url: `/v1/historical-import-sources/${sourceId}`,
         headers: ownerHeaders,
         payload: { expectedState, state }
       });
-      expect(transitioned.statusCode).toBe(200);
+      expect(runTransition.statusCode).toBe(200);
+      expect(sourceTransition.statusCode).toBe(200);
     }
     await app.inject({
       method: "PUT",
@@ -9323,6 +9396,7 @@ describe("account and access flows", () => {
       expectedCheckpointOffset: 0,
       checkpointOffset: 100,
       checkpointLine: 1,
+      checkpointHash: "c".repeat(64),
       sourceSizeBytes: 100,
       malformedRecordCount: 1,
       items: [
@@ -9368,6 +9442,18 @@ describe("account and access flows", () => {
         pauseUntil: null
       }
     });
+    const parserBypass = await app.inject({
+      method: "POST",
+      url: `/v1/historical-import-sources/${sourceId}/batches`,
+      headers: ownerHeaders,
+      payload: {
+        ...batchPayload,
+        items: batchPayload.items.map((item) => ({
+          ...item,
+          metadata: { transcriptType: "user_message" }
+        }))
+      }
+    });
     const imported = await app.inject({
       method: "POST",
       url: `/v1/historical-import-sources/${sourceId}/batches`,
@@ -9379,6 +9465,12 @@ describe("account and access flows", () => {
       url: `/v1/historical-import-sources/${sourceId}/batches`,
       headers: ownerHeaders,
       payload: batchPayload
+    });
+    const mutatedReplay = await app.inject({
+      method: "POST",
+      url: `/v1/historical-import-sources/${sourceId}/batches`,
+      headers: ownerHeaders,
+      payload: { ...batchPayload, checkpointHash: "d".repeat(64) }
     });
     const unsafeFailure = await app.inject({
       method: "PATCH",
@@ -9392,6 +9484,7 @@ describe("account and access flows", () => {
     });
     await app.close();
 
+    expect(parserBypass.statusCode).toBe(400);
     expect(imported.statusCode).toBe(200);
     expect(imported.body).not.toContain("/Users/alice");
     expect(
@@ -9400,6 +9493,7 @@ describe("account and access flows", () => {
       }>(imported).source
     ).toMatchObject({ checkpointOffset: 100, malformedRecordCount: 1 });
     expect(replayed.statusCode).toBe(200);
+    expect(mutatedReplay.statusCode).toBe(409);
     expect(unsafeFailure.statusCode).toBe(400);
     expect(unsafeFailure.body).not.toContain("/Users/alice");
     expect(

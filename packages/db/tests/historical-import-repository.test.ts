@@ -128,6 +128,7 @@ describeDb("durable historical import repository", () => {
         expectedCheckpointOffset: 0,
         checkpointOffset: 80,
         checkpointLine: 2,
+        checkpointHash: "c".repeat(64),
         sourceSizeBytes: 120,
         importedRecordCount: 2
       }
@@ -142,6 +143,7 @@ describeDb("durable historical import repository", () => {
       state: "importing",
       checkpointOffset: 80,
       checkpointLine: 2,
+      checkpointHash: "c".repeat(64),
       importedRecordCount: 2,
       sourceSizeBytes: 120,
       localSourcePath: "/Users/private/.codex/sessions/private.jsonl"
@@ -156,6 +158,231 @@ describeDb("durable historical import repository", () => {
       importedRecordCount: 2,
       scannedByteCount: 80
     });
+  });
+
+  it("owner-scopes Captured Session identities used by import and Hook overlap", async () => {
+    const repo = createMemorySourceRepository(pool);
+    const firstOwner = await repo.createUser({
+      email: `session-owner-a-${randomUUID()}@example.com`
+    });
+    const secondOwner = await repo.createUser({
+      email: `session-owner-b-${randomUUID()}@example.com`
+    });
+    const input = {
+      externalSessionId: "shared-source-session",
+      idempotencyKey: "shared-session-idempotency",
+      sourceHash: "shared-session-source-hash",
+      sourceFingerprint: "f".repeat(64)
+    };
+
+    const first = await repo.createCapturedSession(
+      { userId: firstOwner.id },
+      input
+    );
+    const second = await repo.createCapturedSession(
+      { userId: secondOwner.id },
+      input
+    );
+
+    expect(second.id).not.toBe(first.id);
+    expect(second.ownerUserId).toBe(secondOwner.id);
+    expect(
+      await repo.getCapturedSession({ userId: secondOwner.id }, first.id)
+    ).toBeNull();
+  });
+
+  it("commits policy-gated batches and checkpoints atomically under retry", async () => {
+    const repo = createMemorySourceRepository(pool);
+    const owner = await repo.createUser({
+      email: `batch-owner-${randomUUID()}@example.com`
+    });
+    const run = await repo.createHistoricalImportRun({ userId: owner.id });
+    const source = await repo.createHistoricalImportSource(
+      { userId: owner.id },
+      {
+        runId: run.id,
+        aiClient: "codex",
+        sourceKind: "codex",
+        sourceSessionId: `batch-session-${randomUUID()}`,
+        sourceFingerprint: "d".repeat(64),
+        localSourcePath: "/Users/private/.codex/sessions/batch.jsonl",
+        sourceSizeBytes: 100,
+        detectedProject: {
+          name: "Koed",
+          path: "/Users/private/koed",
+          branch: "audit"
+        }
+      }
+    );
+    for (const [expectedState, state] of [
+      ["discovered", "eligible"],
+      ["eligible", "queued"]
+    ] as const) {
+      expect(
+        await repo.transitionHistoricalImportRun(
+          { userId: owner.id },
+          { runId: run.id, expectedState, state }
+        )
+      ).not.toBeNull();
+      expect(
+        await repo.transitionHistoricalImportSource(
+          { userId: owner.id },
+          { sourceId: source!.id, expectedState, state }
+        )
+      ).not.toBeNull();
+    }
+
+    expect(
+      await repo.transitionHistoricalImportRun(
+        { userId: owner.id },
+        { runId: run.id, expectedState: "queued", state: "importing" }
+      )
+    ).not.toBeNull();
+    expect(
+      await repo.transitionHistoricalImportSource(
+        { userId: owner.id },
+        { sourceId: source!.id, expectedState: "queued", state: "importing" }
+      )
+    ).not.toBeNull();
+    expect(
+      await repo.transitionHistoricalImportRun(
+        { userId: owner.id },
+        { runId: run.id, expectedState: "importing", state: "completed" }
+      )
+    ).toBeNull();
+    expect(
+      await repo.transitionHistoricalImportSource(
+        { userId: owner.id },
+        {
+          sourceId: source!.id,
+          expectedState: "importing",
+          state: "completed"
+        }
+      )
+    ).toBeNull();
+
+    await repo.upsertCapturePolicy(
+      { userId: owner.id },
+      {
+        targetType: "global",
+        captureState: "disabled",
+        visibility: "personal"
+      }
+    );
+    const batch = {
+      sourceId: source!.id,
+      expectedCheckpointOffset: 0,
+      checkpointOffset: 100,
+      checkpointLine: 1,
+      checkpointHash: "e".repeat(64),
+      sourceSizeBytes: 100,
+      sourceEventFrom: "2026-07-01T12:00:00.000Z",
+      sourceEventTo: "2026-07-01T12:00:00.000Z",
+      items: [
+        {
+          ...transcriptItem({
+            sessionId: randomUUID(),
+            transport: "historical_import" as const
+          }),
+          sessionId: undefined
+        }
+      ]
+    };
+    await expect(
+      repo.ingestHistoricalImportBatch({ userId: owner.id }, batch)
+    ).rejects.toThrow("Capture Policy");
+    expect(
+      await repo.getHistoricalImportSource({ userId: owner.id }, source!.id)
+    ).toMatchObject({ checkpointOffset: 0, importedRecordCount: 0 });
+
+    await repo.upsertCapturePolicy(
+      { userId: owner.id },
+      {
+        targetType: "global",
+        captureState: "enabled",
+        visibility: "personal"
+      }
+    );
+    const policyWriter = await pool.connect();
+    await policyWriter.query("begin");
+    await policyWriter.query(
+      "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+      [`capture-policy:${owner.id}`]
+    );
+    await policyWriter.query(
+      `update capture_policies set capture_state = 'disabled', updated_at = now()
+       where owner_user_id = $1 and target_type = 'global'`,
+      [owner.id]
+    );
+    const policyRaceBatch = repo.ingestHistoricalImportBatch(
+      { userId: owner.id },
+      batch
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await policyWriter.query("commit");
+    policyWriter.release();
+    await expect(policyRaceBatch).rejects.toThrow("Capture Policy");
+    await repo.upsertCapturePolicy(
+      { userId: owner.id },
+      {
+        targetType: "global",
+        captureState: "enabled",
+        visibility: "personal"
+      }
+    );
+
+    const [first, retry] = await Promise.all([
+      repo.ingestHistoricalImportBatch({ userId: owner.id }, batch),
+      repo.ingestHistoricalImportBatch({ userId: owner.id }, batch)
+    ]);
+    expect([first.replayed, retry.replayed].sort()).toEqual([false, true]);
+    const stored = await pool.query<{
+      source_path: string | null;
+      captured_project: Record<string, unknown>;
+    }>(
+      `select source_path, captured_project from conversation_items
+       where owner_user_id = $1 and external_session_id = $2`,
+      [owner.id, source!.sourceSessionId]
+    );
+    expect(stored.rows).toEqual([
+      {
+        source_path: null,
+        captured_project: { name: "Koed", branch: "audit" }
+      }
+    ]);
+    const artifacts = await pool.query<{ shares: string; access: string }>(
+      `select
+        (select count(*) from team_session_share_grants where owner_user_id = $1)::text shares,
+        (select count(*) from team_workspace_access_grants where user_id = $1)::text access`,
+      [owner.id]
+    );
+    expect(artifacts.rows[0]).toEqual({ shares: "0", access: "0" });
+    expect(
+      await repo.getHistoricalImportSource({ userId: owner.id }, source!.id)
+    ).toMatchObject({
+      checkpointOffset: 100,
+      checkpointHash: "e".repeat(64),
+      importedRecordCount: 1
+    });
+    expect(
+      await repo.transitionHistoricalImportSource(
+        { userId: owner.id },
+        {
+          sourceId: source!.id,
+          expectedState: "importing",
+          state: "completed"
+        }
+      )
+    ).not.toBeNull();
+    expect(
+      await repo.transitionHistoricalImportRun(
+        { userId: owner.id },
+        { runId: run.id, expectedState: "importing", state: "completed" }
+      )
+    ).not.toBeNull();
+    await expect(
+      repo.ingestHistoricalImportBatch({ userId: owner.id }, batch)
+    ).resolves.toMatchObject({ replayed: true, items: [] });
   });
 
   it("deduplicates hook/import transport and promotes live Projection without changing captured Project provenance", async () => {
@@ -280,7 +507,7 @@ describeDb("durable historical import repository", () => {
     expect(projected.rows[0]?.count).toBe("1");
     const teamArtifacts = await pool.query<{ grants: string; access: string }>(
       `select
-        (select count(*) from team_session_share_grants where source_owner_user_id = $1)::text grants,
+        (select count(*) from team_session_share_grants where owner_user_id = $1)::text grants,
         (select count(*) from team_workspace_access_grants where user_id = $1)::text access`,
       [owner.id]
     );

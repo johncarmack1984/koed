@@ -13,6 +13,7 @@ export const historicalImportStateSchema = z.enum([
 ]);
 
 const boundedCounter = z.number().int().nonnegative().max(2_000_000_000);
+const checkpointHash = z.string().regex(/^[0-9a-f]{64}$/);
 const boundedBytes = z
   .number()
   .int()
@@ -118,53 +119,178 @@ export const historicalImportTransitionSchema = z
     }
   });
 
-const historicalConversationItemSchema = z.object({
-  sessionId: z.string().uuid().optional(),
-  turnId: z.string().uuid().optional(),
-  externalThreadId: boundedText.optional(),
-  externalTurnId: boundedText.optional(),
-  externalItemId: boundedText.optional(),
-  parentExternalItemId: boundedText.optional(),
-  sourceRecordType: boundedText,
-  sourceEventType: boundedText.optional(),
-  sourceLineNumber: boundedCounter.optional(),
-  sourceSequence: boundedCounter.optional(),
-  eventTime: z.string().datetime({ offset: true }).optional(),
-  rawJson: z.unknown(),
-  rawText: z.string().max(4_000_000).optional(),
-  logicalSourceId: boundedText.optional(),
-  transportChunkIndex: boundedCounter.optional(),
-  transportChunkCount: z.number().int().positive().max(100_000).optional(),
-  transportChunkText: z.string().max(4_000_000).optional(),
-  transportChunkEncoding: boundedText.optional(),
-  sourceHash: boundedText,
-  idempotencyKey: boundedText,
-  projectionStatus: z.literal("pending").optional(),
-  projectionVersion: z.literal("codex-transcript-v1").optional(),
-  metadata: metadataSchema
-});
+const historicalItemMetadataSchema = metadataSchema.and(
+  z
+    .object({
+      transcriptByteOffset: boundedBytes.optional(),
+      transcriptItemDiscriminator: boundedText,
+      transcriptSourceLineNumber: boundedCounter.optional()
+    })
+    .passthrough()
+);
 
-export const historicalImportBatchSchema = z
+const historicalConversationItemSchema = z
   .object({
-    expectedCheckpointOffset: boundedBytes,
-    checkpointOffset: boundedBytes,
-    checkpointLine: boundedCounter,
-    sourceSizeBytes: boundedBytes,
-    skippedRecordCount: boundedCounter.optional(),
-    malformedRecordCount: boundedCounter.optional(),
-    sourceEventFrom: z.string().datetime({ offset: true }).optional(),
-    sourceEventTo: z.string().datetime({ offset: true }).optional(),
-    items: z.array(historicalConversationItemSchema).min(1).max(1000)
+    sessionId: z.string().uuid().optional(),
+    turnId: z.string().uuid().optional(),
+    externalThreadId: boundedText.optional(),
+    externalTurnId: boundedText.optional(),
+    externalItemId: boundedText.optional(),
+    parentExternalItemId: boundedText.optional(),
+    sourceRecordType: boundedText,
+    sourceEventType: boundedText.optional(),
+    sourceLineNumber: boundedCounter.optional(),
+    sourceSequence: boundedCounter.optional(),
+    eventTime: z.string().datetime({ offset: true }).optional(),
+    rawJson: z.unknown().refine((value) => value !== undefined),
+    rawText: z.string().max(4_000_000).optional(),
+    logicalSourceId: boundedText.optional(),
+    transportChunkIndex: boundedCounter.optional(),
+    transportChunkCount: z.number().int().positive().max(100_000).optional(),
+    transportChunkText: z.string().max(4_000_000).optional(),
+    transportChunkEncoding: boundedText.optional(),
+    sourceHash: boundedText,
+    idempotencyKey: boundedText,
+    projectionStatus: z.literal("pending").optional(),
+    projectionVersion: z.literal("codex-transcript-v1").optional(),
+    metadata: historicalItemMetadataSchema
   })
   .superRefine((value, context) => {
+    const chunked = value.logicalSourceId !== undefined;
+    const chunkFields = [
+      value.transportChunkIndex,
+      value.transportChunkCount,
+      value.transportChunkText,
+      value.transportChunkEncoding
+    ];
+    if (chunked !== chunkFields.every((field) => field !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["logicalSourceId"],
+        message: "Transport chunk fields must be complete"
+      });
+    }
+    if (chunked && value.transportChunkIndex! >= value.transportChunkCount!) {
+      context.addIssue({
+        code: "custom",
+        path: ["transportChunkIndex"],
+        message: "Transport chunk index is outside chunk count"
+      });
+    }
     if (
-      value.checkpointOffset < value.expectedCheckpointOffset ||
-      value.checkpointOffset > value.sourceSizeBytes
+      !chunked &&
+      value.metadata.transcriptByteOffset === undefined &&
+      value.sourceSequence === undefined &&
+      value.sourceLineNumber === undefined
     ) {
       context.addIssue({
         code: "custom",
-        path: ["checkpointOffset"],
-        message: "Checkpoint must advance within current source size"
+        path: ["metadata", "transcriptByteOffset"],
+        message: "Transcript item position is required"
       });
     }
+  });
+
+const historicalItemPosition = (
+  item: z.infer<typeof historicalConversationItemSchema>
+): number =>
+  item.metadata.transcriptByteOffset ??
+  item.sourceSequence ??
+  item.sourceLineNumber ??
+  0;
+
+const historicalImportBatchBaseSchema = z.object({
+  expectedCheckpointOffset: boundedBytes,
+  expectedCheckpointHash: checkpointHash.nullable().optional(),
+  checkpointOffset: boundedBytes,
+  checkpointLine: boundedCounter,
+  checkpointHash,
+  sourceSizeBytes: boundedBytes,
+  skippedRecordCount: boundedCounter.optional(),
+  malformedRecordCount: boundedCounter.optional(),
+  sourceEventFrom: z.string().datetime({ offset: true }).optional(),
+  sourceEventTo: z.string().datetime({ offset: true }).optional(),
+  items: z.array(historicalConversationItemSchema).max(1000)
+});
+
+type HistoricalImportBatch = z.infer<typeof historicalImportBatchBaseSchema>;
+
+const validateBatchItems = (
+  value: HistoricalImportBatch,
+  context: z.RefinementCtx
+): void => {
+  if (Buffer.byteLength(JSON.stringify(value.items), "utf8") > 4_000_000) {
+    context.addIssue({
+      code: "custom",
+      path: ["items"],
+      message: "Historical import batch exceeds byte limit"
+    });
+  }
+  for (let index = 1; index < value.items.length; index += 1) {
+    if (
+      historicalItemPosition(value.items[index]!) <
+      historicalItemPosition(value.items[index - 1]!)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["items", index],
+        message: "Transcript items must use source order"
+      });
+      return;
+    }
+  }
+};
+
+const validateBatchCheckpoint = (
+  value: HistoricalImportBatch,
+  context: z.RefinementCtx
+): void => {
+  if (
+    value.checkpointOffset <= value.expectedCheckpointOffset ||
+    value.checkpointOffset > value.sourceSizeBytes
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["checkpointOffset"],
+      message: "Checkpoint must advance within current source size"
+    });
+  }
+  const initialHashInvalid =
+    value.expectedCheckpointOffset === 0 &&
+    value.expectedCheckpointHash != null;
+  const resumeHashMissing =
+    value.expectedCheckpointOffset > 0 && !value.expectedCheckpointHash;
+  if (initialHashInvalid || resumeHashMissing) {
+    context.addIssue({
+      code: "custom",
+      path: ["expectedCheckpointHash"],
+      message: initialHashInvalid
+        ? "Initial checkpoint must not have a hash"
+        : "Resume checkpoint hash is required"
+    });
+  }
+};
+
+const validateBatchEventRange = (
+  value: HistoricalImportBatch,
+  context: z.RefinementCtx
+): void => {
+  if (
+    value.sourceEventFrom &&
+    value.sourceEventTo &&
+    Date.parse(value.sourceEventFrom) > Date.parse(value.sourceEventTo)
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["sourceEventTo"],
+      message: "Source event range is invalid"
+    });
+  }
+};
+
+export const historicalImportBatchSchema =
+  historicalImportBatchBaseSchema.superRefine((value, context) => {
+    validateBatchItems(value, context);
+    validateBatchCheckpoint(value, context);
+    validateBatchEventRange(value, context);
   });

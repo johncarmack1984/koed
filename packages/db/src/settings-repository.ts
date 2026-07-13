@@ -242,10 +242,16 @@ export const createSettingsRepository = (db: KoedDb) => ({
     const policies = rows.map(mapCapturePolicyRecord);
     const global = policies.find((policy) => policy.targetType === "global");
     const effective = policies[0] ?? null;
-    const pauseUntil = effective?.pauseUntil ?? global?.pauseUntil ?? null;
-    const paused = pauseUntil
-      ? new Date(pauseUntil).getTime() > Date.now()
-      : false;
+    const activePause = policies.find(
+      (policy) =>
+        policy.pauseUntil && new Date(policy.pauseUntil).getTime() > Date.now()
+    );
+    const pauseUntil =
+      activePause?.pauseUntil ??
+      effective?.pauseUntil ??
+      global?.pauseUntil ??
+      null;
+    const paused = Boolean(activePause);
 
     return {
       captureState: paused
@@ -303,6 +309,9 @@ export const createSettingsRepository = (db: KoedDb) => ({
           : null;
 
     return db.transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`capture-policy:${actor.userId}`}, 0))`
+      );
       const result = await tx.execute<{
         id: string;
         owner_user_id: string;
@@ -381,6 +390,9 @@ export const createSettingsRepository = (db: KoedDb) => ({
     policyId: string
   ): Promise<boolean> {
     return db.transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`capture-policy:${actor.userId}`}, 0))`
+      );
       const rows = await tx
         .delete(capturePolicies)
         .where(

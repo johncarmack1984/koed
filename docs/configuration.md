@@ -482,9 +482,11 @@ Import coordinators persist source path through local-only source registration.
 Status and batch responses expose a redacted basename label and stable SHA-256
 fingerprint, never raw path or path-like detected Project fields. Coordinators
 must send transcript records through reusable `codex-transcript-v1` adapter and
-must use returned checkpoint as next batch's expected checkpoint. Source growth
-is allowed; truncation and stale checkpoints fail explicitly. Effective Capture
-Policy and Capture Pause are rechecked by API before each batch.
+must use returned offset and SHA-256 checkpoint-prefix hash as next batch's
+expected checkpoint. Source growth is allowed; truncation, prefix mutation, and
+stale checkpoints fail explicitly. Exact completed retries return a read-only
+replay. Effective Capture Policy and Capture Pause are rechecked under the same
+owner-scoped transaction lock as each batch write.
 
 ## Data At Rest
 

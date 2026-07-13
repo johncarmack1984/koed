@@ -342,11 +342,13 @@ const canonicalConversationItemIdentity = (
   if (transcriptPosition === undefined) {
     return null;
   }
-  const itemDiscriminator =
-    stringField(item.metadata ?? {}, "transcriptItemDiscriminator") ??
-    item.externalItemId ??
-    item.sourceEventType ??
-    item.sourceRecordType;
+  const itemDiscriminator = stringField(
+    item.metadata ?? {},
+    "transcriptItemDiscriminator"
+  );
+  if (!itemDiscriminator) {
+    return null;
+  }
   const identityPayload = {
     version: 4,
     ownerUserId,
@@ -368,69 +370,41 @@ const canonicalConversationItemIdentity = (
   };
 };
 
-const withOwnerScopedChunkIdentity = (
-  item: ConversationItemInput,
-  ownerUserId: string
-): ConversationItemInput => {
-  if (
-    !item.logicalSourceId ||
-    (item.transportChunkCount ?? 1) <= 1 ||
-    item.transportChunkIndex === undefined
-  ) {
-    return item;
-  }
-  const logicalSourceId = sha256({
-    version: 1,
-    ownerUserId,
-    logicalSourceId: item.logicalSourceId
-  });
-  const chunkHash = sha256({
-    sourceHash: logicalSourceId,
-    transportChunkIndex: item.transportChunkIndex,
-    transportChunkCount: item.transportChunkCount
-  });
-  return {
-    ...item,
-    logicalSourceId,
-    sourceHash: chunkHash,
-    idempotencyKey: chunkHash,
-    metadata: {
-      ...(item.metadata ?? {}),
-      ownerScopedLogicalSource: true
-    }
-  };
-};
-
 const withCanonicalConversationIdentity = (
   item: ConversationItemInput,
   ownerUserId: string
 ): ConversationItemInput => {
-  const ownerScopedItem = withOwnerScopedChunkIdentity(item, ownerUserId);
-  const identity = canonicalConversationItemIdentity(
-    ownerScopedItem,
-    ownerUserId
-  );
+  const identity = canonicalConversationItemIdentity(item, ownerUserId);
   if (!identity) {
-    return ownerScopedItem;
+    return item;
   }
+  const transportMetadata = {
+    ...(item.sourceTransport === "hook" ? { observedViaHook: true } : {}),
+    ...(item.sourceTransport === "historical_import"
+      ? { observedViaHistoricalImport: true }
+      : {})
+  };
   return {
-    ...ownerScopedItem,
+    ...item,
     sourceHash: identity.sourceHash,
     idempotencyKey: identity.key,
-    metadata: {
-      ...(ownerScopedItem.metadata ?? {}),
-      ...(ownerScopedItem.sourceTransport === "hook"
-        ? { observedViaHook: true }
-        : {}),
-      ...(ownerScopedItem.sourceTransport === "historical_import"
-        ? { observedViaHistoricalImport: true }
-        : {}),
-      canonicalConversationItemKey: identity.key,
-      canonicalConversationItemActor: identity.actor,
-      canonicalConversationItemKind: identity.kind,
-      canonicalConversationItemContentHash: identity.contentHash,
-      canonicalConversationItemRecordHash: identity.recordHash
-    }
+    metadata:
+      identity.actor === "raw"
+        ? {
+            ...(item.metadata ?? {}),
+            ...transportMetadata,
+            canonicalSourceRecordKey: identity.key,
+            canonicalSourceRecordHash: identity.recordHash
+          }
+        : {
+            ...(item.metadata ?? {}),
+            ...transportMetadata,
+            canonicalConversationItemKey: identity.key,
+            canonicalConversationItemActor: identity.actor,
+            canonicalConversationItemKind: identity.kind,
+            canonicalConversationItemContentHash: identity.contentHash,
+            canonicalConversationItemRecordHash: identity.recordHash
+          }
   };
 };
 
