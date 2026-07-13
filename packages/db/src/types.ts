@@ -572,6 +572,7 @@ export interface HistoricalImportSourceRecord extends HistoricalImportCounters {
   redactedSourceLabel: string;
   checkpointOffset: number;
   checkpointLine: number;
+  checkpointHash: string | null;
   sourceSizeBytes: number | null;
   sourceModifiedAt: string | null;
   sourceEventFrom: string | null;
@@ -596,6 +597,28 @@ export interface HistoricalImportSourceRecord extends HistoricalImportCounters {
 
 export interface HistoricalImportRunDetail extends HistoricalImportRunRecord {
   sources: HistoricalImportSourceRecord[];
+}
+
+export interface HistoricalImportBatchWriteInput {
+  sourceId: string;
+  expectedCheckpointOffset: number;
+  expectedCheckpointHash?: string | null;
+  checkpointOffset: number;
+  checkpointLine: number;
+  checkpointHash: string;
+  sourceSizeBytes: number;
+  skippedRecordCount?: number;
+  malformedRecordCount?: number;
+  sourceEventFrom?: string;
+  sourceEventTo?: string;
+  items: ConversationItemInput[];
+}
+
+export interface HistoricalImportBatchWriteResult {
+  items: ConversationItemRecord[];
+  source: HistoricalImportSourceRecord;
+  policy: EffectiveCapturePolicy;
+  replayed: boolean;
 }
 
 export interface UpsertCapturePolicyInput {
@@ -1744,8 +1767,10 @@ export interface MemorySourceRepository
     input: {
       sourceId: string;
       expectedCheckpointOffset: number;
+      expectedCheckpointHash?: string | null;
       checkpointOffset: number;
       checkpointLine: number;
+      checkpointHash: string;
       sourceSizeBytes: number;
       importedRecordCount: number;
       skippedRecordCount?: number;
@@ -1754,6 +1779,10 @@ export interface MemorySourceRepository
       sourceEventTo?: string;
     }
   ): Promise<HistoricalImportSourceRecord | null>;
+  ingestHistoricalImportBatch(
+    actor: ActorContext,
+    input: HistoricalImportBatchWriteInput
+  ): Promise<HistoricalImportBatchWriteResult>;
   getHistoricalImportSource(
     actor: ActorContext,
     sourceId: string

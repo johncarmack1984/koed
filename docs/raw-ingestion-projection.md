@@ -289,16 +289,22 @@ content, source paths, queries, credentials, or raw payloads.
 
 Durable `historical_import_runs` and `historical_import_sources` records own
 state transitions, bounded counters, retry/failure data, source ranges,
-checkpoints, and lifecycle timestamps. Source records keep raw source paths only
-inside local Postgres state. Status presents only a basename-style redacted
-label, stable fingerprint, and path-free detected Project fields. Routes are
+checkpoints, checkpoint-prefix hashes, and lifecycle timestamps. Source records
+keep raw source paths and path-like detected Project fields only inside local
+Postgres state. Status and canonical raw/Captured Session provenance use only a
+basename-style redacted label, stable fingerprint, and path-free detected
+Project fields. Routes are
 available only in `developer` and `local_personal` profiles and require owning
 User authentication.
 
 Import evaluates effective Capture Policy and Capture Pause before eligibility
 or queueing and again before every raw write batch. `disabled`, `ask`, active
-pause, or non-personal visibility fails closed. Successful batches advance the
-durable checkpoint only after idempotent raw persistence. Source event time
+pause, or non-personal visibility fails closed. Capture Policy mutation and
+batch persistence share an owner-scoped transaction lock, preventing a policy
+change from interleaving between evaluation and writes. Raw persistence,
+run/source counters, and checkpoint advancement commit in one transaction.
+Retries compare offset and checkpoint-prefix hash; exact completed retries are
+read-only replays, while stale, mutated, or truncated checkpoints fail. Source event time
 (`event_time`), API observation (`observed_at`), historical observation
 (`import_observed_at`), Projection (`projected_at`), and embedding timestamps
 remain separate.

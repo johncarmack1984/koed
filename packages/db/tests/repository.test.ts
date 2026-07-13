@@ -12276,6 +12276,8 @@ describeDb("memory repository visibility", () => {
             projectionStatus: "pending",
             metadata: {
               projectName: "Live Prompt Dedupe Project",
+              transcriptByteOffset: 6,
+              transcriptItemDiscriminator: "primary:codex_transcript_user",
               transcriptType: "user_message"
             }
           }
@@ -12644,6 +12646,8 @@ describeDb("memory repository visibility", () => {
             projectionStatus: "pending",
             metadata: {
               projectName: "Live Agent Dedupe Project",
+              transcriptByteOffset: 11,
+              transcriptItemDiscriminator: "primary:codex_transcript_agent",
               transcriptType: "agent_message"
             }
           },
@@ -16739,6 +16743,17 @@ describeDb("memory repository visibility", () => {
       }
     );
     expect(pausedGlobal.id).toBe(global.id);
+    await repo.upsertCapturePolicy(
+      { userId: alice.id },
+      {
+        targetType: "project",
+        projectId: "repo-a",
+        projectName: "Repo A",
+        captureState: "enabled",
+        visibility: "personal",
+        pauseUntil: new Date(Date.now() - 60_000)
+      }
+    );
 
     expect(
       await repo.getEffectiveCapturePolicy(
@@ -16772,6 +16787,7 @@ describeDb("memory repository visibility", () => {
     const auditEvents = await repo.listAuditEvents({ userId: alice.id });
     expect(auditEvents.map((event) => event.action).sort()).toEqual([
       "capture_policy.deleted",
+      "capture_policy.upserted",
       "capture_policy.upserted",
       "capture_policy.upserted",
       "capture_policy.upserted",
@@ -20163,10 +20179,17 @@ describeDb("memory repository visibility", () => {
       sourceKind: "codex",
       externalThreadId: session.externalSessionId ?? undefined,
       externalTurnId: "projection-class-turn",
+      sourceSequence: 256,
       rawText: "Same record observed by import and live capture.",
-      metadata: { transcriptType: "user_message" }
+      sourceHash: `projection-class-source-${randomUUID()}`,
+      idempotencyKey: `projection-class-item-${randomUUID()}`,
+      metadata: {
+        transcriptByteOffset: 128,
+        transcriptItemDiscriminator: "primary:codex_transcript_user",
+        transcriptType: "user_message"
+      }
     };
-    const historicalItem = (suffix: string) => ({
+    const historicalItem = () => ({
       ...shared,
       sourceAdapterVersion: "codex-transcript-v1",
       sourceTransport: "historical_import",
@@ -20178,13 +20201,11 @@ describeDb("memory repository visibility", () => {
           type: "user_message",
           message: "Same record observed by import and live capture."
         }
-      },
-      sourceHash: `historical-${suffix}-${randomUUID()}`,
-      idempotencyKey: `historical-${suffix}-${randomUUID()}`
+      }
     });
     const [created] = await repo.createConversationItems(
       { userId: alice.id },
-      { items: [historicalItem("first")] }
+      { items: [historicalItem()] }
     );
     const projectionClass = async () =>
       (
@@ -20211,9 +20232,7 @@ describeDb("memory repository visibility", () => {
                 type: "user_message",
                 message: "Same record observed by import and live capture."
               }
-            },
-            sourceHash: `live-${randomUUID()}`,
-            idempotencyKey: `live-${randomUUID()}`
+            }
           }
         ]
       }
@@ -20222,7 +20241,7 @@ describeDb("memory repository visibility", () => {
 
     await repo.createConversationItems(
       { userId: alice.id },
-      { items: [historicalItem("later")] }
+      { items: [historicalItem()] }
     );
     await expect(projectionClass()).resolves.toBe("live_capture_projection");
   });

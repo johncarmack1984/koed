@@ -35,4 +35,38 @@ describe("historical priority migration chain", () => {
       `SET "priority" = 10 WHERE "priority" = 0 AND "status" IN ('pending', 'active')`
     );
   });
+
+  it("adds durable historical import state after priority migrations", async () => {
+    const [journalText, migrationSql] = await Promise.all([
+      readDrizzleFile("meta/_journal.json"),
+      readDrizzleFile("0015_curly_the_order.sql")
+    ]);
+    const journal = JSON.parse(journalText) as {
+      entries: Array<{ idx: number; tag: string }>;
+    };
+
+    expect(journal.entries[15]).toEqual(
+      expect.objectContaining({ idx: 15, tag: "0015_curly_the_order" })
+    );
+    expect(migrationSql).toContain('CREATE TABLE "historical_import_runs"');
+    expect(migrationSql).toContain('CREATE TABLE "historical_import_sources"');
+    expect(migrationSql).toContain('"local_source_path" text NOT NULL');
+    expect(migrationSql).toContain(
+      'ADD COLUMN "import_observed_at" timestamp with time zone'
+    );
+  });
+
+  it("adds checkpoint integrity before owner-consistent source foreign key", async () => {
+    const migrationSql = await readDrizzleFile("0016_wandering_gauntlet.sql");
+    const uniqueConstraint = migrationSql.indexOf(
+      "historical_import_runs_id_owner_unique"
+    );
+    const foreignKey = migrationSql.indexOf(
+      "historical_import_sources_run_owner_fk"
+    );
+
+    expect(uniqueConstraint).toBeGreaterThan(-1);
+    expect(foreignKey).toBeGreaterThan(uniqueConstraint);
+    expect(migrationSql).toContain('ADD COLUMN "checkpoint_hash" text');
+  });
 });

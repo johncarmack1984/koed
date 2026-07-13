@@ -38,6 +38,7 @@ export interface ConversationItemRepository {
 
 export interface ConversationItemRepositoryOptions {
   envelopeEncryptionProvider?: EnvelopeEncryptionProvider;
+  transactionClient?: pg.PoolClient;
   resolveCapturePolicy?: (
     actor: ActorContext,
     input: { projectId?: string; threadId?: string; sessionId?: string }
@@ -928,25 +929,6 @@ const observationKindFor = (
   return "snapshot";
 };
 
-const withOwnerScopedTranscriptIdentity = (
-  item: ConversationItemInput,
-  ownerUserId: string
-): ConversationItemInput => {
-  if (
-    item.sourceAdapterVersion !== "codex-transcript-v1" ||
-    item.canonicalItemKey ||
-    item.logicalSourceId ||
-    (item.transportChunkCount ?? 1) > 1
-  ) {
-    return item;
-  }
-  return {
-    ...item,
-    sourceHash: sha256({ ownerUserId, sourceHash: item.sourceHash }),
-    idempotencyKey: sha256({ ownerUserId, idempotencyKey: item.idempotencyKey })
-  };
-};
-
 const observationKeyFor = (
   item: ConversationItemInput,
   sourceIdempotencyKey: string
@@ -1627,11 +1609,8 @@ export const createConversationItemRepository = (
   async createConversationItems(actor, input) {
     const records: ConversationItemRecord[] = [];
     for (const inputItem of input.items) {
-      const sanitizedItem = withOwnerScopedTranscriptIdentity(
-        withValidatedTransportChunkIdentity(
-          sanitizeConversationItemForStorage(inputItem)
-        ),
-        actor.userId
+      const sanitizedItem = withValidatedTransportChunkIdentity(
+        sanitizeConversationItemForStorage(inputItem)
       );
       assertManagedCanonicalAdmission(sanitizedItem);
       const sourceIdempotencyKey = sanitizedItem.idempotencyKey;
@@ -1667,9 +1646,14 @@ export const createConversationItemRepository = (
         suppressPlaintextRaw && hasEncryptableText(item.sourcePath)
           ? ENCRYPTED_CONVERSATION_ITEM_TEXT
           : (item.sourcePath ?? null);
-      const client = await pool.connect();
+      const ownsTransaction = !options.transactionClient;
+      const client = options.transactionClient ?? (await pool.connect());
+      const commit = () =>
+        ownsTransaction ? client.query("commit") : Promise.resolve();
       try {
-        await client.query("begin");
+        if (ownsTransaction) {
+          await client.query("begin");
+        }
         await client.query(
           "select pg_advisory_xact_lock(hashtextextended($1, 0))",
           [`capture-policy:${ownerUserId}`]
@@ -1744,7 +1728,7 @@ export const createConversationItemRepository = (
                 { statusCode: 409, code: "observation_integrity_conflict" }
               );
             }
-            await client.query("commit");
+            await commit();
             continue;
           }
           if (
@@ -1766,8 +1750,9 @@ export const createConversationItemRepository = (
                 external_thread_id, external_turn_id, external_item_id,
                 canonical_stable_item_id, source_record_type,
                 source_event_type, source_sequence, idempotency_key,
-                canonical_item_key,
-                canonical_source_priority, created_at
+                canonical_item_key, canonical_source_priority, observed_at,
+                import_observed_at, source_fingerprint, captured_project,
+                created_at
               from conversation_items
               where id = $1
                 and owner_user_id = $2
@@ -1785,7 +1770,7 @@ export const createConversationItemRepository = (
               { statusCode: 409, code: "observation_parent_missing" }
             );
           }
-          await client.query("commit");
+          await commit();
           records.push(mapConversationItem(replayedRow));
           continue;
         }
@@ -1897,7 +1882,7 @@ export const createConversationItemRepository = (
             envelopeEncryptionProvider: options.envelopeEncryptionProvider,
             payloadHash
           });
-          await client.query("commit");
+          await commit();
           continue;
         }
 
@@ -2471,13 +2456,17 @@ export const createConversationItemRepository = (
             [legacyParentIdToRetire, ownerUserId]
           );
         }
-        await client.query("commit");
+        await commit();
         records.push(mapConversationItem(row));
       } catch (error) {
-        await client.query("rollback");
+        if (ownsTransaction) {
+          await client.query("rollback");
+        }
         throw error;
       } finally {
-        client.release();
+        if (ownsTransaction) {
+          client.release();
+        }
       }
     }
     return records;

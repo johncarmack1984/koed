@@ -113,6 +113,13 @@
       "when": 1784016203469,
       "tag": "0015_curly_the_order",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1784016763538,
+      "tag": "0016_wandering_gauntlet",
+      "breakpoints": true
     }
   ]
 }

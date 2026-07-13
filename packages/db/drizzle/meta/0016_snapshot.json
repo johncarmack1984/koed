@@ -1,6 +1,6 @@
 {
-  "id": "1ac9d684-90a4-4bd1-8916-3d4bf5d681ea",
-  "prevId": "aaf9a50e-5008-433e-90b4-a1da474a348e",
+  "id": "282c90ad-270a-44ce-9d77-2217bda52088",
+  "prevId": "6783efe6-a065-4772-b3d4-396e34995a79",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1060,6 +1060,25 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "import_observed_at": {
+          "name": "import_observed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_fingerprint": {
+          "name": "source_fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "captured_project": {
+          "name": "captured_project",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
         },
         "raw_json": {
           "name": "raw_json",
@@ -4542,6 +4561,569 @@
         "external_auth_organizations_provider_org_id_not_empty_check": {
           "name": "external_auth_organizations_provider_org_id_not_empty_check",
           "value": "length(trim(\"external_auth_organizations\".\"provider_organization_id\")) > 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.historical_import_runs": {
+      "name": "historical_import_runs",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "state": {
+          "name": "state",
+          "type": "historical_import_state",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'discovered'"
+        },
+        "source_count": {
+          "name": "source_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "completed_source_count": {
+          "name": "completed_source_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "failed_source_count": {
+          "name": "failed_source_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "skipped_source_count": {
+          "name": "skipped_source_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "discovered_record_count": {
+          "name": "discovered_record_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "imported_record_count": {
+          "name": "imported_record_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "skipped_record_count": {
+          "name": "skipped_record_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "scanned_byte_count": {
+          "name": "scanned_byte_count",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "retry_count": {
+          "name": "retry_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "failure_reason": {
+          "name": "failure_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "next_retry_at": {
+          "name": "next_retry_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "discovered_at": {
+          "name": "discovered_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "eligible_at": {
+          "name": "eligible_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "queued_at": {
+          "name": "queued_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "import_started_at": {
+          "name": "import_started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "paused_at": {
+          "name": "paused_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "skipped_at": {
+          "name": "skipped_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "failed_at": {
+          "name": "failed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_attempt_at": {
+          "name": "last_attempt_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "historical_import_runs_owner_updated_idx": {
+          "name": "historical_import_runs_owner_updated_idx",
+          "columns": [
+            {
+              "expression": "owner_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "updated_at",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "historical_import_runs_owner_user_id_users_id_fk": {
+          "name": "historical_import_runs_owner_user_id_users_id_fk",
+          "tableFrom": "historical_import_runs",
+          "tableTo": "users",
+          "columnsFrom": ["owner_user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "historical_import_runs_id_owner_unique": {
+          "name": "historical_import_runs_id_owner_unique",
+          "nullsNotDistinct": false,
+          "columns": ["id", "owner_user_id"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "historical_import_runs_counters_check": {
+          "name": "historical_import_runs_counters_check",
+          "value": "\"historical_import_runs\".\"source_count\" >= 0 and \"historical_import_runs\".\"completed_source_count\" >= 0 and \"historical_import_runs\".\"failed_source_count\" >= 0 and \"historical_import_runs\".\"skipped_source_count\" >= 0 and \"historical_import_runs\".\"discovered_record_count\" >= 0 and \"historical_import_runs\".\"imported_record_count\" >= 0 and \"historical_import_runs\".\"skipped_record_count\" >= 0 and \"historical_import_runs\".\"scanned_byte_count\" >= 0 and \"historical_import_runs\".\"retry_count\" between 0 and 1000"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.historical_import_sources": {
+      "name": "historical_import_sources",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "state": {
+          "name": "state",
+          "type": "historical_import_state",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'discovered'"
+        },
+        "ai_client": {
+          "name": "ai_client",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_kind": {
+          "name": "source_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_session_id": {
+          "name": "source_session_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_fingerprint": {
+          "name": "source_fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "local_source_path": {
+          "name": "local_source_path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "redacted_source_label": {
+          "name": "redacted_source_label",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "checkpoint_offset": {
+          "name": "checkpoint_offset",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "checkpoint_line": {
+          "name": "checkpoint_line",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "checkpoint_hash": {
+          "name": "checkpoint_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_size_bytes": {
+          "name": "source_size_bytes",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_modified_at": {
+          "name": "source_modified_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_event_from": {
+          "name": "source_event_from",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_event_to": {
+          "name": "source_event_to",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "discovered_record_count": {
+          "name": "discovered_record_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "imported_record_count": {
+          "name": "imported_record_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "skipped_record_count": {
+          "name": "skipped_record_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "malformed_record_count": {
+          "name": "malformed_record_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "retry_count": {
+          "name": "retry_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "failure_reason": {
+          "name": "failure_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "next_retry_at": {
+          "name": "next_retry_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "detected_project": {
+          "name": "detected_project",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "discovered_at": {
+          "name": "discovered_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "eligible_at": {
+          "name": "eligible_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "queued_at": {
+          "name": "queued_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "import_started_at": {
+          "name": "import_started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "paused_at": {
+          "name": "paused_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "skipped_at": {
+          "name": "skipped_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "failed_at": {
+          "name": "failed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_observed_at": {
+          "name": "last_observed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "historical_import_sources_identity_unique": {
+          "name": "historical_import_sources_identity_unique",
+          "columns": [
+            {
+              "expression": "owner_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "ai_client",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "source_kind",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "source_session_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "source_fingerprint",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "historical_import_sources_run_state_idx": {
+          "name": "historical_import_sources_run_state_idx",
+          "columns": [
+            {
+              "expression": "run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "state",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "updated_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "historical_import_sources_owner_user_id_users_id_fk": {
+          "name": "historical_import_sources_owner_user_id_users_id_fk",
+          "tableFrom": "historical_import_sources",
+          "tableTo": "users",
+          "columnsFrom": ["owner_user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "historical_import_sources_run_owner_fk": {
+          "name": "historical_import_sources_run_owner_fk",
+          "tableFrom": "historical_import_sources",
+          "tableTo": "historical_import_runs",
+          "columnsFrom": ["run_id", "owner_user_id"],
+          "columnsTo": ["id", "owner_user_id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "historical_import_sources_fingerprint_check": {
+          "name": "historical_import_sources_fingerprint_check",
+          "value": "\"historical_import_sources\".\"source_fingerprint\" ~ '^[0-9a-f]{64}$'"
+        },
+        "historical_import_sources_counters_check": {
+          "name": "historical_import_sources_counters_check",
+          "value": "\"historical_import_sources\".\"checkpoint_offset\" >= 0 and \"historical_import_sources\".\"checkpoint_line\" >= 0 and (\"historical_import_sources\".\"checkpoint_hash\" is null or \"historical_import_sources\".\"checkpoint_hash\" ~ '^[0-9a-f]{64}$') and (\"historical_import_sources\".\"source_size_bytes\" is null or \"historical_import_sources\".\"source_size_bytes\" >= 0) and \"historical_import_sources\".\"discovered_record_count\" >= 0 and \"historical_import_sources\".\"imported_record_count\" >= 0 and \"historical_import_sources\".\"skipped_record_count\" >= 0 and \"historical_import_sources\".\"malformed_record_count\" >= 0 and \"historical_import_sources\".\"retry_count\" between 0 and 1000"
+        },
+        "historical_import_sources_event_range_check": {
+          "name": "historical_import_sources_event_range_check",
+          "value": "\"historical_import_sources\".\"source_event_from\" is null or \"historical_import_sources\".\"source_event_to\" is null or \"historical_import_sources\".\"source_event_from\" <= \"historical_import_sources\".\"source_event_to\""
         }
       },
       "isRLSEnabled": false
@@ -8327,6 +8909,25 @@
         "source_adapter_version": {
           "name": "source_adapter_version",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_fingerprint": {
+          "name": "source_fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "captured_project": {
+          "name": "captured_project",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "import_observed_at": {
+          "name": "import_observed_at",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
@@ -12241,6 +12842,20 @@
       "name": "external_auth_provider",
       "schema": "public",
       "values": ["workos_authkit"]
+    },
+    "public.historical_import_state": {
+      "name": "historical_import_state",
+      "schema": "public",
+      "values": [
+        "discovered",
+        "eligible",
+        "queued",
+        "importing",
+        "paused",
+        "skipped",
+        "completed",
+        "failed"
+      ]
     },
     "public.memory_event_type": {
       "name": "memory_event_type",

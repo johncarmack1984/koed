@@ -1951,6 +1951,10 @@ export const historicalImportRuns = pgTable(
       table.ownerUserId,
       table.updatedAt.desc()
     ),
+    unique("historical_import_runs_id_owner_unique").on(
+      table.id,
+      table.ownerUserId
+    ),
     check(
       "historical_import_runs_counters_check",
       sql`${table.sourceCount} >= 0 and ${table.completedSourceCount} >= 0 and ${table.failedSourceCount} >= 0 and ${table.skippedSourceCount} >= 0 and ${table.discoveredRecordCount} >= 0 and ${table.importedRecordCount} >= 0 and ${table.skippedRecordCount} >= 0 and ${table.scannedByteCount} >= 0 and ${table.retryCount} between 0 and 1000`
@@ -1962,9 +1966,7 @@ export const historicalImportSources = pgTable(
   "historical_import_sources",
   {
     id: id(),
-    runId: uuid("run_id")
-      .notNull()
-      .references(() => historicalImportRuns.id, { onDelete: "cascade" }),
+    runId: uuid("run_id").notNull(),
     ownerUserId: uuid("owner_user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
@@ -1979,6 +1981,7 @@ export const historicalImportSources = pgTable(
       .notNull()
       .default(0),
     checkpointLine: integer("checkpoint_line").notNull().default(0),
+    checkpointHash: text("checkpoint_hash"),
     sourceSizeBytes: bigint("source_size_bytes", { mode: "number" }),
     sourceModifiedAt: timestamp("source_modified_at", { withTimezone: true }),
     sourceEventFrom: timestamp("source_event_from", { withTimezone: true }),
@@ -2013,6 +2016,14 @@ export const historicalImportSources = pgTable(
     updatedAt: updatedNow()
   },
   (table) => [
+    foreignKey({
+      columns: [table.runId, table.ownerUserId],
+      foreignColumns: [
+        historicalImportRuns.id,
+        historicalImportRuns.ownerUserId
+      ],
+      name: "historical_import_sources_run_owner_fk"
+    }).onDelete("cascade"),
     uniqueIndex("historical_import_sources_identity_unique").on(
       table.ownerUserId,
       table.aiClient,
@@ -2031,7 +2042,7 @@ export const historicalImportSources = pgTable(
     ),
     check(
       "historical_import_sources_counters_check",
-      sql`${table.checkpointOffset} >= 0 and ${table.checkpointLine} >= 0 and (${table.sourceSizeBytes} is null or ${table.sourceSizeBytes} >= 0) and ${table.discoveredRecordCount} >= 0 and ${table.importedRecordCount} >= 0 and ${table.skippedRecordCount} >= 0 and ${table.malformedRecordCount} >= 0 and ${table.retryCount} between 0 and 1000`
+      sql`${table.checkpointOffset} >= 0 and ${table.checkpointLine} >= 0 and (${table.checkpointHash} is null or ${table.checkpointHash} ~ '^[0-9a-f]{64}$') and (${table.sourceSizeBytes} is null or ${table.sourceSizeBytes} >= 0) and ${table.discoveredRecordCount} >= 0 and ${table.importedRecordCount} >= 0 and ${table.skippedRecordCount} >= 0 and ${table.malformedRecordCount} >= 0 and ${table.retryCount} between 0 and 1000`
     ),
     check(
       "historical_import_sources_event_range_check",
