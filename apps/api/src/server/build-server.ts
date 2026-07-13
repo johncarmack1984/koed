@@ -50,10 +50,12 @@ import {
 } from "../memory/index.js";
 import {
   createEnvelopeEncryptionProviderFromEnvironment,
+  embeddingDispatchKey,
   readUpstreamCredentialAuthorization,
   type EnvelopeEncryptionProvider,
   lcmCompactQueueName,
-  memoryEmbedQueueName
+  memoryEmbedQueueName,
+  resolveSupportedEmbeddingModelConfig
 } from "@koed/shared";
 import { registerTeamRoutes } from "../team/index.js";
 import { resolveApiServerConfig } from "./config.js";
@@ -251,12 +253,6 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   let graphStreamService: { registerRoutes(): void; close(): void } | null =
     null;
   const hashSecret = createHashSecret(config.apiTokenPepper);
-  const rateLimitHandlers = createRateLimitHandlers(
-    rateLimitStore,
-    hashSecret,
-    config.rateLimit.policies
-  );
-
   app.addHook("onClose", async () => {
     graphStreamService?.close();
     await Promise.all([
@@ -330,6 +326,20 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
         authenticatedRequestLogContext(authContext.kind, authContext.userId)
       )
   });
+  const rateLimitHandlers = createRateLimitHandlers(
+    rateLimitStore,
+    hashSecret,
+    config.rateLimit.policies,
+    {
+      resolveAuthenticatedUserId: async (request) =>
+        getRequestLogContext(request).actor?.user_id ??
+        (await authHelpers.resolveApiTokenUser(request))?.id ??
+        (await authHelpers.resolveDeviceCredentialContext(request))?.user.id
+    }
+  );
+  const embeddingModelConfig = resolveSupportedEmbeddingModelConfig(
+    config.embeddingModel
+  );
   const {
     runCompactionInline,
     enqueueEmbedding,
@@ -338,6 +348,10 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   } = createMemoryJobScheduler({
     embeddingQueue,
     compactionQueue,
+    embeddingDispatchKey: embeddingDispatchKey(
+      embeddingModelConfig.key,
+      embeddingModelConfig.dimensions
+    ),
     runMemoryJobsInlineForTests: options.runMemoryJobsInlineForTests,
     log: app.log
   });
