@@ -2,6 +2,8 @@ import {
   appendFileSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
+  renameSync,
   statSync,
   symlinkSync,
   truncateSync,
@@ -190,6 +192,39 @@ describe("bounded Codex history discovery", () => {
     ).toThrow("too broad");
   });
 
+  it("keeps fingerprints stable across source growth and moves", async () => {
+    const directory = await tempDirectory();
+    const codexHome = path.join(directory, ".codex");
+    const firstPath = path.join(codexHome, "sessions", "first.jsonl");
+    writeTranscript(
+      firstPath,
+      transcriptLines({
+        sessionId: "stable-source",
+        timestamps: ["2026-07-10T00:00:00Z", "2026-07-11T00:00:00Z"]
+      })
+    );
+    const initial = discover(codexHome).candidates[0]!;
+    appendFileSync(
+      firstPath,
+      `${
+        transcriptLines({
+          sessionId: "stable-source",
+          timestamps: ["2026-07-12T00:00:00Z", "2026-07-12T01:00:00Z"]
+        })[1]
+      }\n`
+    );
+    const grown = discover(codexHome).candidates[0]!;
+    const movedPath = path.join(codexHome, "archived_sessions", "moved.jsonl");
+    mkdirSync(path.dirname(movedPath), { recursive: true });
+    renameSync(firstPath, movedPath);
+    const moved = discover(codexHome).candidates[0]!;
+
+    expect(grown.sourceSizeBytes).toBeGreaterThan(initial.sourceSizeBytes);
+    expect(grown.sourceFingerprint).toBe(initial.sourceFingerprint);
+    expect(moved.sourceFingerprint).toBe(initial.sourceFingerprint);
+    expect(moved.sourcePath).toBe(realpathSync(movedPath));
+  });
+
   it("reports malformed metadata and enforces discovery bounds", async () => {
     const directory = await tempDirectory();
     const codexHome = path.join(directory, ".codex");
@@ -281,6 +316,20 @@ describe("automatic historical selection", () => {
     expect(ranked.some((source) => source.sourceSessionId === "future")).toBe(
       false
     );
+  });
+
+  it("includes exact 30-day cutoff and excludes one millisecond older", () => {
+    const ranked = rankAutomaticHistoricalSources({
+      candidates: [
+        candidate("cutoff", "2026-06-13T00:00:00.000Z"),
+        candidate("older", "2026-06-12T23:59:59.999Z")
+      ],
+      projectFor: () => null,
+      now: new Date("2026-07-13T00:00:00.000Z"),
+      windowDays: 30,
+      sessionCap: 50
+    });
+    expect(ranked.map((source) => source.sourceSessionId)).toEqual(["cutoff"]);
   });
 
   it("keeps missing Project metadata as Unassigned", () => {
