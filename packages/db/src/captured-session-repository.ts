@@ -24,6 +24,11 @@ export interface CapturedSessionRepository {
       codexTranscriptPath?: string;
       idempotencyKey?: string;
       sourceHash?: string;
+      sourceKind?: string;
+      sourceAdapterVersion?: string;
+      sourceFingerprint?: string;
+      capturedProject?: Record<string, unknown>;
+      importObservedAt?: string;
       metadata?: Record<string, unknown>;
       detectedProjects?: PersonalProjectReference[];
     }
@@ -71,6 +76,11 @@ type CapturedSessionRow = {
   capture_method: CaptureMethod;
   model: string | null;
   cwd: string | null;
+  source_kind: string | null;
+  source_adapter_version: string | null;
+  source_fingerprint: string | null;
+  captured_project: Record<string, unknown>;
+  import_observed_at: Date | null;
   metadata: Record<string, unknown> | null;
   captured_project_provenance: Record<string, unknown> | null;
   automatic_project_id: string | null;
@@ -130,6 +140,11 @@ const mapCapturedSession = (row: CapturedSessionRow): CapturedSessionRecord => {
     captureMethod: row.capture_method,
     model: row.model,
     cwd: row.cwd,
+    sourceKind: row.source_kind,
+    sourceAdapterVersion: row.source_adapter_version,
+    sourceFingerprint: row.source_fingerprint,
+    capturedProject: row.captured_project,
+    importObservedAt: row.import_observed_at?.toISOString() ?? null,
     metadata: row.metadata ?? {},
     capturedProjectProvenance: row.captured_project_provenance ?? {},
     automaticProject,
@@ -257,7 +272,9 @@ const hasDetectedProjectInput = (input: {
 
 const capturedSessionColumns = `
   id, owner_user_id, visibility, external_session_id, workspace_id,
-  source_runtime, capture_method, model, cwd, metadata,
+  source_runtime, capture_method, model, cwd,
+  source_kind, source_adapter_version, source_fingerprint,
+  captured_project, import_observed_at, metadata,
   captured_project_provenance,
   automatic_project_id, automatic_project_name, automatic_project_path,
   automatic_project_detected_at,
@@ -344,7 +361,10 @@ export const createCapturedSessionRepository = (
           automatic_project_id,
           automatic_project_name,
           automatic_project_path,
-          automatic_project_detected_at
+          automatic_project_detected_at,
+          source_fingerprint,
+          captured_project,
+          import_observed_at
         )
         values (
           $1, $2, 'personal', $3, $4, $5, $6, $7, $8, $9, $10, $11,
@@ -364,7 +384,8 @@ export const createCapturedSessionRepository = (
           ),
           $17, $18, $19, $20, $21,
           $22, $23, $24, $25,
-          case when $23::text is null then null else now() end
+          case when $23::text is null then null else now() end,
+          $26, $27, $28
         )
         on conflict (owner_user_id, visibility, idempotency_key)
         where idempotency_key is not null
@@ -384,20 +405,26 @@ export const createCapturedSessionRepository = (
             end,
           parent_session_id = coalesce(sessions.parent_session_id, excluded.parent_session_id),
           source_metadata = sessions.source_metadata || excluded.source_metadata,
+          source_fingerprint = coalesce(sessions.source_fingerprint, excluded.source_fingerprint),
+          captured_project = case
+            when sessions.captured_project = '{}'::jsonb then excluded.captured_project
+            else sessions.captured_project
+          end,
+          import_observed_at = coalesce(sessions.import_observed_at, excluded.import_observed_at),
           automatic_project_id = case
-            when $26::boolean then excluded.automatic_project_id
+            when $29::boolean then excluded.automatic_project_id
             else sessions.automatic_project_id
           end,
           automatic_project_name = case
-            when $26::boolean then excluded.automatic_project_name
+            when $29::boolean then excluded.automatic_project_name
             else sessions.automatic_project_name
           end,
           automatic_project_path = case
-            when $26::boolean then excluded.automatic_project_path
+            when $29::boolean then excluded.automatic_project_path
             else sessions.automatic_project_path
           end,
           automatic_project_detected_at = case
-            when $26::boolean then excluded.automatic_project_detected_at
+            when $29::boolean then excluded.automatic_project_detected_at
             else sessions.automatic_project_detected_at
           end
         where sessions.owner_user_id = excluded.owner_user_id
@@ -418,10 +445,11 @@ export const createCapturedSessionRepository = (
         input.model ?? null,
         input.cwd ?? null,
         metadata,
-        "codex",
-        input.sourceRuntime === "codex-cli"
-          ? "codex-cli-hook-v1"
-          : "codex-app-server-v1",
+        input.sourceKind ?? "codex",
+        input.sourceAdapterVersion ??
+          (input.sourceRuntime === "codex-cli"
+            ? "codex-cli-hook-v1"
+            : "codex-app-server-v1"),
         input.externalSessionId ?? null,
         typeof metadata.forked_from_id === "string"
           ? metadata.forked_from_id
@@ -452,6 +480,9 @@ export const createCapturedSessionRepository = (
         automaticProject?.id ?? null,
         automaticProject?.name ?? null,
         automaticProject?.path ?? null,
+        input.sourceFingerprint ?? null,
+        input.capturedProject ?? {},
+        input.importObservedAt ?? null,
         detectedProjectInputProvided
       ]
     );

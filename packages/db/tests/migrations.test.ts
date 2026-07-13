@@ -22,7 +22,7 @@ describe("historical priority migration chain", () => {
       entries: Array<{ idx: number; tag: string }>;
     };
 
-    expect(journal.entries.slice(-3)).toEqual([
+    expect(journal.entries.slice(12, 15)).toEqual([
       expect.objectContaining({ idx: 12, tag: "0012_cuddly_luke_cage" }),
       expect.objectContaining({ idx: 13, tag: "0013_brave_black_widow" }),
       expect.objectContaining({ idx: 14, tag: "0014_warm_doorman" })

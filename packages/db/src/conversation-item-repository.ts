@@ -74,6 +74,10 @@ type ConversationItemRow = {
   idempotency_key: string;
   canonical_item_key: string;
   canonical_source_priority: number;
+  observed_at: Date;
+  import_observed_at: Date | null;
+  source_fingerprint: string | null;
+  captured_project: Record<string, unknown>;
   created_at: Date;
 };
 
@@ -81,7 +85,6 @@ type LegacyConversationItemReplayRow = ConversationItemRow & {
   source_path: string | null;
   source_line_number: number | null;
   event_time: Date | null;
-  observed_at: Date;
   raw_json: unknown;
   raw_text: string | null;
   logical_source_id: string | null;
@@ -370,6 +373,10 @@ const sanitizeConversationItemForStorage = (
   const transportChunkEncoding = sanitizeForPostgresStorage(
     item.transportChunkEncoding
   );
+  const sourceFingerprint = sanitizeForPostgresStorage(item.sourceFingerprint);
+  const capturedProject = sanitizeForPostgresStorage(
+    item.capturedProject ?? {}
+  );
   const sourceHash = sanitizeForPostgresStorage(item.sourceHash);
   const idempotencyKey = sanitizeForPostgresStorage(item.idempotencyKey);
   const canonicalItemKey = sanitizeForPostgresStorage(item.canonicalItemKey);
@@ -401,6 +408,8 @@ const sanitizeConversationItemForStorage = (
     logicalSourceId,
     transportChunkText,
     transportChunkEncoding,
+    sourceFingerprint,
+    capturedProject,
     sourceHash,
     idempotencyKey,
     canonicalItemKey,
@@ -457,6 +466,8 @@ const sanitizeConversationItemForStorage = (
     logicalSourceId: logicalSourceId.value as string | undefined,
     transportChunkText: transportChunkText.value as string | undefined,
     transportChunkEncoding: transportChunkEncoding.value as string | undefined,
+    sourceFingerprint: sourceFingerprint.value as string | undefined,
+    capturedProject: capturedProject.value as Record<string, unknown>,
     sourceHash: sourceHash.value as string,
     idempotencyKey: idempotencyKey.value as string,
     canonicalItemKey: canonicalItemKey.value as string | undefined,
@@ -955,6 +966,10 @@ const mapConversationItem = (
   sourceEventType: row.source_event_type,
   sourceSequence: row.source_sequence,
   idempotencyKey: row.idempotency_key,
+  observedAt: row.observed_at.toISOString(),
+  importObservedAt: row.import_observed_at?.toISOString() ?? null,
+  sourceFingerprint: row.source_fingerprint,
+  capturedProject: row.captured_project,
   createdAt: row.created_at.toISOString()
 });
 
@@ -1891,6 +1906,9 @@ export const createConversationItemRepository = (
           source_sequence,
           event_time,
           observed_at,
+          import_observed_at,
+          source_fingerprint,
+          captured_project,
           raw_json,
           raw_text,
           logical_source_id,
@@ -1912,7 +1930,7 @@ export const createConversationItemRepository = (
           $1, $2, $3, $4, $5, $6, $7, $8, $9,
           $10, $11, $12, $13, $14, $15, $16, $17, $18,
           $19, $20, $21, $22, $23, $24, $25, $26, $27, $28,
-          $29, $30, $31, $32, $33, $34, $35, $36
+          $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39
         )
         on conflict (owner_user_id, canonical_item_key)
           where visibility = 'personal'
@@ -1930,6 +1948,9 @@ export const createConversationItemRepository = (
             else conversation_items.source_adapter_version
           end,
           source_transport = case
+            when conversation_items.source_transport = 'hook'
+              or excluded.source_transport = 'hook'
+            then 'hook'
             when excluded.canonical_source_priority > conversation_items.canonical_source_priority
             then excluded.source_transport
             else conversation_items.source_transport
@@ -1999,6 +2020,19 @@ export const createConversationItemRepository = (
             conversation_items.observed_at,
             excluded.observed_at
           ),
+          import_observed_at = coalesce(
+            conversation_items.import_observed_at,
+            excluded.import_observed_at
+          ),
+          source_fingerprint = coalesce(
+            conversation_items.source_fingerprint,
+            excluded.source_fingerprint
+          ),
+          captured_project = case
+            when conversation_items.captured_project = '{}'::jsonb
+            then excluded.captured_project
+            else conversation_items.captured_project
+          end,
           raw_json = case
             when excluded.canonical_source_priority > conversation_items.canonical_source_priority
               or (
@@ -2164,7 +2198,8 @@ export const createConversationItemRepository = (
           canonical_stable_item_id,
           source_record_type, source_event_type, source_sequence,
           idempotency_key, canonical_item_key, canonical_source_priority,
-          created_at
+          observed_at, import_observed_at, source_fingerprint,
+          captured_project, created_at
       `;
         const upsertParams = [
           ownerUserId,
@@ -2187,6 +2222,9 @@ export const createConversationItemRepository = (
           item.sourceSequence ?? null,
           item.eventTime ?? null,
           item.observedAt ?? new Date().toISOString(),
+          item.importObservedAt ?? null,
+          item.sourceFingerprint ?? null,
+          item.capturedProject ?? {},
           JSON.stringify(rawJsonForStorage),
           rawTextForStorage,
           item.logicalSourceId ?? null,
@@ -2276,7 +2314,8 @@ export const createConversationItemRepository = (
                 canonical_stable_item_id,
                 source_record_type, source_event_type, source_sequence,
                 idempotency_key, canonical_item_key,
-                canonical_source_priority, created_at
+                canonical_source_priority, observed_at, import_observed_at,
+                source_fingerprint, captured_project, created_at
               from conversation_items
               where canonical_item_key = $1
                 and visibility = $2::visibility_scope
