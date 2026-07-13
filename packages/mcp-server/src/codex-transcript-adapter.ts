@@ -111,76 +111,91 @@ const rawItemsForObservation = (
     ? observation.parsedItems
     : [{ item: null, itemDiscriminator: "raw", sourceOffset: 0 }];
 
+const observationMetadata = (input: {
+  adapter: CodexTranscriptAdapterInput;
+  observation: CodexTranscriptObservation;
+  parsed: CodexTranscriptParsedItem;
+  assignedTurnId?: string;
+}): Record<string, unknown> => ({
+  ...(input.parsed.item?.metadata ?? {}),
+  ...(input.observation.transcriptByteOffset === undefined
+    ? {}
+    : { transcriptByteOffset: input.observation.transcriptByteOffset }),
+  transcriptSourceLineNumber: input.observation.sourceLineNumber,
+  transcriptItemDiscriminator: input.parsed.itemDiscriminator,
+  ...(input.adapter.hookEventName
+    ? { hookEventName: input.adapter.hookEventName }
+    : {}),
+  sourceEventTimeAccuracy: input.observation.eventTimeAccuracy,
+  ...(input.assignedTurnId
+    ? { transcriptAssignedTurnId: input.assignedTurnId }
+    : {}),
+  threadKind: input.adapter.threadKind,
+  parentThreadId: input.adapter.parentThreadId,
+  ...(input.adapter.sourceTransport === "historical_import"
+    ? { observedViaHistoricalImport: true }
+    : { observedViaHook: true }),
+  ...(input.adapter.sourceFingerprint
+    ? { sourceFingerprint: input.adapter.sourceFingerprint }
+    : {})
+});
+
+const rawItemForObservation = (input: {
+  adapter: CodexTranscriptAdapterInput;
+  observation: CodexTranscriptObservation;
+  parsed: CodexTranscriptParsedItem;
+  assignedTurnId?: string;
+  recordHash: string;
+  position: number;
+}): CodexTranscriptRawItem => {
+  const itemDiscriminator = input.parsed.itemDiscriminator;
+  return {
+    sourceKind: "codex",
+    sourceAdapterVersion: codexTranscriptAdapterVersion,
+    sourceTransport: input.adapter.sourceTransport,
+    sessionId: input.adapter.sessionId,
+    externalSessionId: input.adapter.sourceSessionId,
+    externalThreadId: input.adapter.sourceSessionId,
+    externalTurnId: input.assignedTurnId,
+    externalItemId: input.observation.externalItemId,
+    sourceRecordType: input.observation.sourceRecordType,
+    sourceEventType: input.observation.sourceEventType,
+    sourcePath:
+      input.adapter.sourceTransport === "historical_import"
+        ? undefined
+        : input.adapter.localSourcePath,
+    sourceLineNumber: input.observation.sourceLineNumber,
+    sourceSequence: safeSourceSequence(
+      input.position * 2 + input.parsed.sourceOffset
+    ),
+    eventTime: input.observation.eventTime,
+    rawJson: input.observation.record,
+    rawText: input.parsed.item?.content ?? input.observation.fallbackRawText,
+    sourceHash: hash({ recordHash: input.recordHash, itemDiscriminator }),
+    idempotencyKey: codexTranscriptItemKey({
+      sourceSessionId: input.adapter.sourceSessionId ?? "unknown-session",
+      transcriptPosition: input.position,
+      itemDiscriminator,
+      recordHash: input.recordHash
+    }),
+    projectionStatus: "pending",
+    projectionVersion: codexTranscriptAdapterVersion,
+    metadata: observationMetadata(input)
+  };
+};
+
 const observationItems = (input: {
   adapter: CodexTranscriptAdapterInput;
   observation: CodexTranscriptObservation;
   assignedTurnId?: string;
 }): CodexTranscriptRawItem[] => {
-  const rawItems = rawItemsForObservation(input.observation);
   const recordHash = codexTranscriptRecordHash(input.observation.record);
   const position =
     input.observation.transcriptByteOffset ??
     input.observation.sourceLineNumber;
-  return rawItems.map((parsed) => {
-    const sourceSequence = safeSourceSequence(
-      position * 2 + parsed.sourceOffset
-    );
-    const itemDiscriminator = parsed.itemDiscriminator;
-    const idempotencyKey = codexTranscriptItemKey({
-      sourceSessionId: input.adapter.sourceSessionId ?? "unknown-session",
-      transcriptPosition: position,
-      itemDiscriminator,
-      recordHash
-    });
-    return {
-      sourceKind: "codex",
-      sourceAdapterVersion: codexTranscriptAdapterVersion,
-      sourceTransport: input.adapter.sourceTransport,
-      sessionId: input.adapter.sessionId,
-      externalSessionId: input.adapter.sourceSessionId,
-      externalThreadId: input.adapter.sourceSessionId,
-      externalTurnId: input.assignedTurnId,
-      externalItemId: input.observation.externalItemId,
-      sourceRecordType: input.observation.sourceRecordType,
-      sourceEventType: input.observation.sourceEventType,
-      sourcePath:
-        input.adapter.sourceTransport === "historical_import"
-          ? undefined
-          : input.adapter.localSourcePath,
-      sourceLineNumber: input.observation.sourceLineNumber,
-      sourceSequence,
-      eventTime: input.observation.eventTime,
-      rawJson: input.observation.record,
-      rawText: parsed.item?.content ?? input.observation.fallbackRawText,
-      sourceHash: hash({ recordHash, itemDiscriminator }),
-      idempotencyKey,
-      projectionStatus: "pending",
-      projectionVersion: codexTranscriptAdapterVersion,
-      metadata: {
-        ...(parsed.item?.metadata ?? {}),
-        ...(input.observation.transcriptByteOffset === undefined
-          ? {}
-          : { transcriptByteOffset: input.observation.transcriptByteOffset }),
-        transcriptSourceLineNumber: input.observation.sourceLineNumber,
-        transcriptItemDiscriminator: itemDiscriminator,
-        ...(input.adapter.hookEventName
-          ? { hookEventName: input.adapter.hookEventName }
-          : {}),
-        sourceEventTimeAccuracy: input.observation.eventTimeAccuracy,
-        ...(input.assignedTurnId
-          ? { transcriptAssignedTurnId: input.assignedTurnId }
-          : {}),
-        threadKind: input.adapter.threadKind,
-        parentThreadId: input.adapter.parentThreadId,
-        ...(input.adapter.sourceTransport === "historical_import"
-          ? { observedViaHistoricalImport: true }
-          : { observedViaHook: true }),
-        ...(input.adapter.sourceFingerprint
-          ? { sourceFingerprint: input.adapter.sourceFingerprint }
-          : {})
-      }
-    };
-  });
+  return rawItemsForObservation(input.observation).map((parsed) =>
+    rawItemForObservation({ ...input, parsed, recordHash, position })
+  );
 };
 
 export const adaptCodexTranscriptV1 = (

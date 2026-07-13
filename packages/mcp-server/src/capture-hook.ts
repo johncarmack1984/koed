@@ -2646,6 +2646,20 @@ export const selectRawConversationItemsForHook = (input: {
   return [...transcriptItems, ...controlHookItems];
 };
 
+export interface CodexTranscriptRecordsInput {
+  records: unknown[];
+  indexOffset?: number;
+  sessionId?: string;
+  sourceSessionId?: string;
+  sourceTransport: "hook" | "transcript" | "historical_import";
+  localSourcePath?: string;
+  sourceFingerprint?: string;
+  hookEventName?: string;
+  threadKind: "conversation" | "subagent";
+  parentThreadId?: string;
+  preferStableResponseItems?: boolean;
+}
+
 export const buildRawTranscriptConversationItems = (input: {
   records: unknown[];
   indexOffset?: number;
@@ -2653,7 +2667,8 @@ export const buildRawTranscriptConversationItems = (input: {
   effectiveContext: EffectiveCaptureContext;
   transcriptPath?: string;
   payload: HookPayload;
-  sourceTransport?: "hook" | "transcript";
+  sourceTransport?: "hook" | "transcript" | "historical_import";
+  sourceFingerprint?: string;
   preferStableResponseItems?: boolean;
 }): RawConversationItemRequest[] => {
   const preferProviderResponseItems =
@@ -2710,6 +2725,7 @@ export const buildRawTranscriptConversationItems = (input: {
       sourceSessionId: input.effectiveContext.externalSessionId,
       sourceTransport: input.sourceTransport ?? "hook",
       localSourcePath: input.transcriptPath,
+      sourceFingerprint: input.sourceFingerprint,
       hookEventName: input.payload.hook_event_name,
       threadKind: input.effectiveContext.isSubagent
         ? "subagent"
@@ -2880,7 +2896,10 @@ export const buildRawTranscriptConversationItems = (input: {
         externalItemId: rawExternalItemId(record),
         sourceRecordType: rawRecordType(record),
         sourceEventType: rawEventType(record),
-        sourcePath: input.transcriptPath,
+        sourcePath:
+          input.sourceTransport === "historical_import"
+            ? undefined
+            : input.transcriptPath,
         sourceLineNumber,
         sourceSequence,
         eventTime: effectiveRawEventTime(record),
@@ -2937,7 +2956,13 @@ export const buildRawTranscriptConversationItems = (input: {
           threadKind: input.effectiveContext.isSubagent
             ? "subagent"
             : "conversation",
-          parentThreadId: input.effectiveContext.parentThreadId
+          parentThreadId: input.effectiveContext.parentThreadId,
+          ...(input.sourceTransport === "historical_import"
+            ? { observedViaHistoricalImport: true }
+            : { observedViaHook: true }),
+          ...(input.sourceFingerprint
+            ? { sourceFingerprint: input.sourceFingerprint }
+            : {})
         }
       });
     }
@@ -2954,6 +2979,25 @@ export const buildRawTranscriptConversationItems = (input: {
 
   return items;
 };
+
+export const buildCodexTranscriptConversationItems = (
+  input: CodexTranscriptRecordsInput
+): RawConversationItemRequest[] =>
+  buildRawTranscriptConversationItems({
+    records: input.records,
+    indexOffset: input.indexOffset,
+    sessionId: input.sessionId,
+    effectiveContext: {
+      externalSessionId: input.sourceSessionId,
+      parentThreadId: input.parentThreadId,
+      isSubagent: input.threadKind === "subagent"
+    },
+    transcriptPath: input.localSourcePath,
+    payload: { hook_event_name: input.hookEventName },
+    sourceTransport: input.sourceTransport,
+    sourceFingerprint: input.sourceFingerprint,
+    preferStableResponseItems: input.preferStableResponseItems
+  });
 
 export const selectCaptureItems = (
   transcriptItems: CaptureItem[],
