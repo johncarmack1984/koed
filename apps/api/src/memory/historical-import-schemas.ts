@@ -151,6 +151,7 @@ const historicalConversationItemSchema = z
     transportChunkEncoding: boundedText.optional(),
     sourceHash: boundedText,
     idempotencyKey: boundedText,
+    legacyIdempotencyKeys: z.array(boundedText).max(16).optional(),
     projectionStatus: z.literal("pending").optional(),
     projectionVersion: z.literal("codex-transcript-v1").optional(),
     metadata: historicalItemMetadataSchema

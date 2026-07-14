@@ -54,6 +54,7 @@ export interface CodexTranscriptRawItem {
   rawText?: string;
   sourceHash: string;
   idempotencyKey: string;
+  legacyIdempotencyKeys?: string[];
   projectionStatus: "pending";
   projectionVersion: typeof codexTranscriptAdapterVersion;
   metadata: Record<string, unknown>;
@@ -94,6 +95,24 @@ export const codexTranscriptItemKey = (input: {
     itemDiscriminator: input.itemDiscriminator,
     recordHash: input.recordHash
   })}`;
+
+export const legacyCodexTranscriptItemKey = (input: {
+  sourceSessionId?: string;
+  transcriptPath?: string;
+  sourcePosition: number | string;
+  itemDiscriminator?: string;
+  sourceRecordType: string;
+  sourceEventType?: string;
+}): string =>
+  hash({
+    adapter: codexTranscriptAdapterVersion,
+    externalSessionId: input.sourceSessionId,
+    transcriptPath: input.transcriptPath,
+    sourcePosition: input.sourcePosition,
+    itemDiscriminator: input.itemDiscriminator,
+    sourceRecordType: input.sourceRecordType,
+    sourceEventType: input.sourceEventType
+  });
 
 const semanticTurnId = (input: {
   sourceSessionId?: string;
@@ -147,6 +166,7 @@ const rawItemForObservation = (input: {
   assignedTurnId?: string;
   recordHash: string;
   position: number;
+  includeItemDiscriminatorInLegacyKey: boolean;
 }): CodexTranscriptRawItem => {
   const itemDiscriminator = input.parsed.itemDiscriminator;
   return {
@@ -178,6 +198,20 @@ const rawItemForObservation = (input: {
       itemDiscriminator,
       recordHash: input.recordHash
     }),
+    legacyIdempotencyKeys: [
+      legacyCodexTranscriptItemKey({
+        sourceSessionId: input.adapter.sourceSessionId,
+        transcriptPath: input.adapter.localSourcePath,
+        sourcePosition:
+          input.observation.transcriptByteOffset ??
+          `line:${input.observation.sourceLineNumber}`,
+        itemDiscriminator: input.includeItemDiscriminatorInLegacyKey
+          ? itemDiscriminator
+          : undefined,
+        sourceRecordType: input.observation.sourceRecordType,
+        sourceEventType: input.observation.sourceEventType
+      })
+    ],
     projectionStatus: "pending",
     projectionVersion: codexTranscriptAdapterVersion,
     metadata: observationMetadata(input)
@@ -193,8 +227,15 @@ const observationItems = (input: {
   const position =
     input.observation.transcriptByteOffset ??
     input.observation.sourceLineNumber;
-  return rawItemsForObservation(input.observation).map((parsed) =>
-    rawItemForObservation({ ...input, parsed, recordHash, position })
+  const parsedItems = rawItemsForObservation(input.observation);
+  return parsedItems.map((parsed) =>
+    rawItemForObservation({
+      ...input,
+      parsed,
+      recordHash,
+      position,
+      includeItemDiscriminatorInLegacyKey: parsedItems.length > 1
+    })
   );
 };
 

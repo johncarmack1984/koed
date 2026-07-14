@@ -192,6 +192,120 @@ describeDb("durable historical import repository", () => {
     ).toBeNull();
   });
 
+  it("converges import and Hook Captured Sessions by owner and source session", async () => {
+    const repo = createMemorySourceRepository(pool);
+    const owner = await repo.createUser({
+      email: `session-convergence-${randomUUID()}@example.com`
+    });
+
+    for (const importFirst of [true, false]) {
+      const externalSessionId = `converged-${randomUUID()}`;
+      const importedInput = {
+        externalSessionId,
+        captureMethod: "api" as const,
+        idempotencyKey: `historical-${randomUUID()}`,
+        sourceFingerprint: fingerprint("import"),
+        importObservedAt: "2026-07-02T00:00:00.000Z"
+      };
+      const hookInput = {
+        externalSessionId,
+        captureMethod: "hook" as const,
+        idempotencyKey: `hook-${randomUUID()}`,
+        codexTranscriptPath: `/private/${externalSessionId}.jsonl`
+      };
+      const first = await repo.createCapturedSession(
+        { userId: owner.id },
+        importFirst ? importedInput : hookInput
+      );
+      const second = await repo.createCapturedSession(
+        { userId: owner.id },
+        importFirst ? hookInput : importedInput
+      );
+
+      expect(second.id).toBe(first.id);
+      expect(second.importObservedAt).toBe("2026-07-02T00:00:00.000Z");
+      const stored = await pool.query<{
+        codex_transcript_path: string | null;
+      }>("select codex_transcript_path from sessions where id = $1", [
+        second.id
+      ]);
+      expect(stored.rows[0]?.codex_transcript_path).toBe(
+        `/private/${externalSessionId}.jsonl`
+      );
+    }
+  });
+
+  it("reuses a legacy transcript canonical identity through its compatibility alias", async () => {
+    const repo = createMemorySourceRepository(pool);
+    const owner = await repo.createUser({
+      email: `legacy-identity-${randomUUID()}@example.com`
+    });
+    const session = await repo.createCapturedSession(
+      { userId: owner.id },
+      {
+        externalSessionId: `legacy-identity-${randomUUID()}`,
+        idempotencyKey: `session-${randomUUID()}`
+      }
+    );
+    const legacyKey = `legacy-${randomUUID()}`;
+    const currentKey = `conversation-item:${randomUUID()}`;
+    const legacy = await repo.createConversationItems(
+      { userId: owner.id },
+      {
+        items: [
+          {
+            ...transcriptItem({ sessionId: session.id, transport: "hook" }),
+            idempotencyKey: legacyKey
+          }
+        ]
+      }
+    );
+    const current = await repo.createConversationItems(
+      { userId: owner.id },
+      {
+        items: [
+          {
+            ...transcriptItem({ sessionId: session.id, transport: "hook" }),
+            idempotencyKey: currentKey,
+            legacyIdempotencyKeys: [legacyKey]
+          }
+        ]
+      }
+    );
+
+    expect(current[0]?.id).toBe(legacy[0]?.id);
+  });
+
+  it("excludes inactive Captured Sessions from Projection admission backlog", async () => {
+    const repo = createMemorySourceRepository(pool);
+    const owner = await repo.createUser({
+      email: `inactive-backlog-${randomUUID()}@example.com`
+    });
+    const session = await repo.createCapturedSession(
+      { userId: owner.id },
+      {
+        externalSessionId: `inactive-backlog-${randomUUID()}`,
+        idempotencyKey: `session-${randomUUID()}`
+      }
+    );
+    const before = await repo.getConversationProjectionBacklog();
+    await repo.createConversationItems(
+      { userId: owner.id },
+      {
+        items: [transcriptItem({ sessionId: session.id, transport: "hook" })]
+      }
+    );
+    const active = await repo.getConversationProjectionBacklog();
+    expect(active.liveProjectionRows).toBe(before.liveProjectionRows + 1);
+
+    await pool.query(
+      "update sessions set invalidated_at = now() where id = $1",
+      [session.id]
+    );
+    const inactive = await repo.getConversationProjectionBacklog();
+    expect(inactive.liveProjectionRows).toBe(before.liveProjectionRows);
+  });
+
   it("commits policy-gated batches and checkpoints atomically under retry", async () => {
     const repo = createMemorySourceRepository(pool);
     const owner = await repo.createUser({

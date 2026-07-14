@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   adaptCodexTranscriptV1,
   codexTranscriptRecordHash,
+  legacyCodexTranscriptItemKey,
   type CodexTranscriptObservation
 } from "../src/codex-transcript-adapter.js";
 import { buildCodexTranscriptConversationItems } from "../src/codex-transcript-parser.js";
@@ -70,6 +71,26 @@ describe("codex-transcript-v1 adapter", () => {
       transcriptItemDiscriminator: "primary:codex_transcript_user",
       sourceFingerprint: "a".repeat(64)
     });
+  });
+
+  it("emits the exact path-bound v1 identity as a migration alias", () => {
+    const item = adaptCodexTranscriptV1({
+      observations: [observation],
+      sourceSessionId: "session-1",
+      sourceTransport: "hook",
+      localSourcePath: "/Users/alice/.codex/session.jsonl",
+      threadKind: "conversation"
+    })[0]!;
+
+    expect(item.legacyIdempotencyKeys).toEqual([
+      legacyCodexTranscriptItemKey({
+        sourceSessionId: "session-1",
+        transcriptPath: "/Users/alice/.codex/session.jsonl",
+        sourcePosition: 512,
+        sourceRecordType: "event_msg",
+        sourceEventType: "user_message"
+      })
+    ]);
   });
 
   it("uses one parser and adapter path for Hook and historical observations", () => {

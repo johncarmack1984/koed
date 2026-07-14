@@ -380,6 +380,9 @@ const sanitizeConversationItemForStorage = (
   );
   const sourceHash = sanitizeForPostgresStorage(item.sourceHash);
   const idempotencyKey = sanitizeForPostgresStorage(item.idempotencyKey);
+  const legacyIdempotencyKeys = (item.legacyIdempotencyKeys ?? []).map((key) =>
+    sanitizeForPostgresStorage(key)
+  );
   const canonicalItemKey = sanitizeForPostgresStorage(item.canonicalItemKey);
   const canonicalStableItemId = sanitizeForPostgresStorage(
     item.canonicalStableItemId
@@ -413,6 +416,7 @@ const sanitizeConversationItemForStorage = (
     capturedProject,
     sourceHash,
     idempotencyKey,
+    ...legacyIdempotencyKeys,
     canonicalItemKey,
     canonicalStableItemId,
     observationKind,
@@ -471,6 +475,9 @@ const sanitizeConversationItemForStorage = (
     capturedProject: capturedProject.value as Record<string, unknown>,
     sourceHash: sourceHash.value as string,
     idempotencyKey: idempotencyKey.value as string,
+    legacyIdempotencyKeys: legacyIdempotencyKeys.map(
+      (key) => key.value as string
+    ),
     canonicalItemKey: canonicalItemKey.value as string | undefined,
     canonicalStableItemId: canonicalStableItemId.value as string | undefined,
     observationKind: observationKind.value as
@@ -1618,7 +1625,21 @@ export const createConversationItemRepository = (
         ...sanitizedItem,
         observationKind: observationKindFor(sanitizedItem)
       });
-      const canonicalItemKey = canonicalItemKeyFor(item);
+      let canonicalItemKey = canonicalItemKeyFor(item);
+      const legacyCanonicalItemKeys = [
+        ...new Set(item.legacyIdempotencyKeys ?? [])
+      ].filter((key) => key !== canonicalItemKey);
+      if (
+        legacyCanonicalItemKeys.length > 0 &&
+        item.sourceAdapterVersion !== "codex-transcript-v1"
+      ) {
+        throw Object.assign(
+          new Error(
+            "Legacy conversation identity aliases require codex-transcript-v1"
+          ),
+          { statusCode: 400, code: "legacy_identity_alias_invalid" }
+        );
+      }
       const payloadHash = observationPayloadHashFor(item);
       const observationKey = observationKeyFor(item, sourceIdempotencyKey);
       const canonicalSourcePriority = canonicalSourcePriorityFor(item);
@@ -1686,12 +1707,52 @@ export const createConversationItemRepository = (
           item,
           resolveCapturePolicy: options.resolveCapturePolicy
         });
-        await client.query(
-          "select pg_advisory_xact_lock(hashtextextended($1, 0))",
-          [
-            `conversation-item:${ownerUserId ?? "anonymous"}:${visibility}:${canonicalItemKey}`
-          ]
-        );
+        for (const key of [
+          canonicalItemKey,
+          ...legacyCanonicalItemKeys
+        ].sort()) {
+          await client.query(
+            "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+            [
+              `conversation-item:${ownerUserId ?? "anonymous"}:${visibility}:${key}`
+            ]
+          );
+        }
+        if (legacyCanonicalItemKeys.length > 0) {
+          const existingCanonicalRows = await client.query<{
+            canonical_item_key: string;
+          }>(
+            `
+              select canonical_item_key
+              from conversation_items
+              where owner_user_id = $1
+                and visibility = 'personal'
+                and canonical_item_key = any($2::text[])
+                and personal_deleted_at is null
+              order by case when canonical_item_key = $3 then 0 else 1 end
+            `,
+            [
+              ownerUserId,
+              [canonicalItemKey, ...legacyCanonicalItemKeys],
+              canonicalItemKey
+            ]
+          );
+          const existingKeys = [
+            ...new Set(
+              existingCanonicalRows.rows.map((row) => row.canonical_item_key)
+            )
+          ];
+          if (existingKeys.includes(canonicalItemKey)) {
+            // The current identity wins when both current and legacy rows exist.
+          } else if (existingKeys.length === 1) {
+            canonicalItemKey = existingKeys[0]!;
+          } else if (existingKeys.length > 1) {
+            throw Object.assign(
+              new Error("Legacy conversation identity matches multiple items"),
+              { statusCode: 409, code: "legacy_identity_ambiguous" }
+            );
+          }
+        }
 
         const replayRows =
           await client.query<ExistingConversationItemObservationRow>(

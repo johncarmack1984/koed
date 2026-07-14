@@ -890,6 +890,7 @@ export interface ConversationItemInput {
   transportChunkEncoding?: string;
   sourceHash: string;
   idempotencyKey: string;
+  legacyIdempotencyKeys?: string[];
   canonicalItemKey?: string;
   canonicalStableItemId?: string;
   canonicalSourcePriority?: number;

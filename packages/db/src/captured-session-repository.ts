@@ -283,7 +283,7 @@ const capturedSessionColumns = `
 `;
 
 const resolveWorkspaceForeignKey = async (
-  pool: pg.Pool,
+  pool: pg.Pool | pg.PoolClient,
   actor: ActorContext,
   workspaceId: string | undefined
 ): Promise<string | null> => {
@@ -309,30 +309,116 @@ export const createCapturedSessionRepository = (
   pool: pg.Pool
 ): CapturedSessionRepository => ({
   async createCapturedSession(actor, input) {
-    const metadata = normalizeSessionMetadata(input);
-    const workspaceForeignKey = await resolveWorkspaceForeignKey(
-      pool,
-      actor,
-      input.workspaceId
-    );
-    const detectedProjects = detectedProjectsForCapture(input);
-    const automaticProject =
-      detectedProjects.length === 1 ? detectedProjects[0]! : null;
-    const detectedProjectInputProvided = hasDetectedProjectInput(input);
-    const capturedProjectProvenance = {
-      schemaVersion: 1,
-      capturedCwd: input.cwd ?? null,
-      capturedWorkspaceId: input.workspaceId ?? null,
-      candidates: detectedProjects,
-      outcome:
-        detectedProjects.length === 1
-          ? "unambiguous"
-          : detectedProjects.length > 1
-            ? "ambiguous"
-            : "no_signal"
-    };
-    const result = await pool.query<CapturedSessionRow>(
-      `
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      if (input.externalSessionId) {
+        await client.query(
+          "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+          [`captured-session:${actor.userId}:${input.externalSessionId}`]
+        );
+      }
+      const metadata = normalizeSessionMetadata(input);
+      const workspaceForeignKey = await resolveWorkspaceForeignKey(
+        client,
+        actor,
+        input.workspaceId
+      );
+      const detectedProjects = detectedProjectsForCapture(input);
+      const automaticProject =
+        detectedProjects.length === 1 ? detectedProjects[0]! : null;
+      const detectedProjectInputProvided = hasDetectedProjectInput(input);
+      const capturedProjectProvenance = {
+        schemaVersion: 1,
+        capturedCwd: input.cwd ?? null,
+        capturedWorkspaceId: input.workspaceId ?? null,
+        candidates: detectedProjects,
+        outcome:
+          detectedProjects.length === 1
+            ? "unambiguous"
+            : detectedProjects.length > 1
+              ? "ambiguous"
+              : "no_signal"
+      };
+      if (input.externalSessionId) {
+        const converged = await client.query<CapturedSessionRow>(
+          `
+            update sessions
+            set
+              updated_at = now(),
+              workspace_id = coalesce(workspace_id, $3),
+              codex_transcript_path = coalesce(codex_transcript_path, $4),
+              model = coalesce(model, $5),
+              cwd = coalesce(cwd, $6),
+              metadata =
+                metadata || $7::jsonb ||
+                case
+                  when metadata ->> 'threadNameSource' = 'manual'
+                  then jsonb_strip_nulls(jsonb_build_object(
+                    'threadName', metadata ->> 'threadName',
+                    'threadNameSource', metadata ->> 'threadNameSource',
+                    'threadNameEditedAt', metadata ->> 'threadNameEditedAt'
+                  ))
+                  else '{}'::jsonb
+                end,
+              source_metadata = source_metadata || $7::jsonb,
+              source_fingerprint = coalesce(source_fingerprint, $8),
+              captured_project = case
+                when captured_project = '{}'::jsonb then $9::jsonb
+                else captured_project
+              end,
+              import_observed_at = coalesce(import_observed_at, $10),
+              captured_project_provenance = case
+                when $11::boolean then $12::jsonb
+                else captured_project_provenance
+              end,
+              automatic_project_id = case when $11::boolean then $13 else automatic_project_id end,
+              automatic_project_name = case when $11::boolean then $14 else automatic_project_name end,
+              automatic_project_path = case when $11::boolean then $15 else automatic_project_path end,
+              automatic_project_detected_at = case
+                when $11::boolean and $13::text is not null then now()
+                when $11::boolean then null
+                else automatic_project_detected_at
+              end
+            where id = (
+              select id
+              from sessions
+              where owner_user_id = $1
+                and visibility = 'personal'
+                and external_session_id = $2
+                and invalidated_at is null
+                and personal_deleted_at is null
+              order by created_at asc, id asc
+              limit 1
+            )
+            returning ${capturedSessionColumns}
+          `,
+          [
+            actor.userId,
+            input.externalSessionId,
+            workspaceForeignKey,
+            input.codexTranscriptPath ?? null,
+            input.model ?? null,
+            input.cwd ?? null,
+            metadata,
+            input.sourceFingerprint ?? null,
+            input.capturedProject ?? {},
+            input.importObservedAt ?? null,
+            detectedProjectInputProvided,
+            capturedProjectProvenance,
+            automaticProject?.id ?? null,
+            automaticProject?.name ?? null,
+            automaticProject?.path ?? null
+          ]
+        );
+        const convergedRow = converged.rows[0];
+        if (convergedRow) {
+          await client.query("commit");
+          return mapCapturedSession(convergedRow);
+        }
+      }
+      const result = await client.query<CapturedSessionRow>(
+        `
         insert into sessions (
           owner_user_id,
           workspace_id,
@@ -433,70 +519,77 @@ export const createCapturedSessionRepository = (
           and sessions.personal_deleted_at is null
         returning ${capturedSessionColumns}
       `,
-      [
-        actor.userId,
-        workspaceForeignKey,
-        input.externalSessionId ?? null,
-        input.sourceRuntime ?? "codex",
-        input.captureMethod ?? "mcp",
-        input.codexTranscriptPath ?? null,
-        input.idempotencyKey ?? null,
-        input.sourceHash ?? null,
-        input.model ?? null,
-        input.cwd ?? null,
-        metadata,
-        input.sourceKind ?? "codex",
-        input.sourceAdapterVersion ??
-          (input.sourceRuntime === "codex-cli"
-            ? "codex-cli-hook-v1"
-            : "codex-app-server-v1"),
-        input.externalSessionId ?? null,
-        typeof metadata.forked_from_id === "string"
-          ? metadata.forked_from_id
-          : null,
-        typeof metadata.parentThreadId === "string"
-          ? metadata.parentThreadId
-          : typeof metadata.parentExternalSessionId === "string"
-            ? metadata.parentExternalSessionId
+        [
+          actor.userId,
+          workspaceForeignKey,
+          input.externalSessionId ?? null,
+          input.sourceRuntime ?? "codex",
+          input.captureMethod ?? "mcp",
+          input.codexTranscriptPath ?? null,
+          input.idempotencyKey ?? null,
+          input.sourceHash ?? null,
+          input.model ?? null,
+          input.cwd ?? null,
+          metadata,
+          input.sourceKind ?? "codex",
+          input.sourceAdapterVersion ??
+            (input.sourceRuntime === "codex-cli"
+              ? "codex-cli-hook-v1"
+              : "codex-app-server-v1"),
+          input.externalSessionId ?? null,
+          typeof metadata.forked_from_id === "string"
+            ? metadata.forked_from_id
             : null,
-        typeof metadata.agent_nickname === "string"
-          ? metadata.agent_nickname
-          : typeof metadata.agentNickname === "string"
-            ? metadata.agentNickname
-            : null,
-        typeof metadata.agent_role === "string"
-          ? metadata.agent_role
-          : typeof metadata.agentType === "string"
-            ? metadata.agentType
-            : null,
-        typeof metadata.agent_path === "string" ? metadata.agent_path : null,
-        typeof metadata.thread_source === "string"
-          ? metadata.thread_source
-          : typeof metadata.threadKind === "string"
-            ? metadata.threadKind
-            : null,
-        metadata,
-        capturedProjectProvenance,
-        automaticProject?.id ?? null,
-        automaticProject?.name ?? null,
-        automaticProject?.path ?? null,
-        input.sourceFingerprint ?? null,
-        input.capturedProject ?? {},
-        input.importObservedAt ?? null,
-        detectedProjectInputProvided
-      ]
-    );
-
-    const row = result.rows[0];
-    if (!row) {
-      throw Object.assign(
-        new Error(
-          "Duplicate Captured Session conflicts with data outside caller visibility"
-        ),
-        { statusCode: 409 }
+          typeof metadata.parentThreadId === "string"
+            ? metadata.parentThreadId
+            : typeof metadata.parentExternalSessionId === "string"
+              ? metadata.parentExternalSessionId
+              : null,
+          typeof metadata.agent_nickname === "string"
+            ? metadata.agent_nickname
+            : typeof metadata.agentNickname === "string"
+              ? metadata.agentNickname
+              : null,
+          typeof metadata.agent_role === "string"
+            ? metadata.agent_role
+            : typeof metadata.agentType === "string"
+              ? metadata.agentType
+              : null,
+          typeof metadata.agent_path === "string" ? metadata.agent_path : null,
+          typeof metadata.thread_source === "string"
+            ? metadata.thread_source
+            : typeof metadata.threadKind === "string"
+              ? metadata.threadKind
+              : null,
+          metadata,
+          capturedProjectProvenance,
+          automaticProject?.id ?? null,
+          automaticProject?.name ?? null,
+          automaticProject?.path ?? null,
+          input.sourceFingerprint ?? null,
+          input.capturedProject ?? {},
+          input.importObservedAt ?? null,
+          detectedProjectInputProvided
+        ]
       );
+
+      const row = result.rows[0];
+      if (!row) {
+        throw Object.assign(
+          new Error(
+            "Duplicate Captured Session conflicts with data outside caller visibility"
+          ),
+          { statusCode: 409 }
+        );
+      }
+      await client.query("commit");
+      return mapCapturedSession(row);
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
     }
-    return mapCapturedSession(row);
   },
 
   async updateCapturedSessionTitle(actor, sessionId, input) {

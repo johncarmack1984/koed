@@ -19810,7 +19810,7 @@ describeDb("memory repository visibility", () => {
     );
   });
 
-  it("admits an oversized first atomic unit under each soft cap", async () => {
+  it("does not admit an oversized first atomic unit past hard caps", async () => {
     const alice = await repo.createUser({
       email: `alice-oversized-first-${randomUUID()}@example.com`
     });
@@ -19859,9 +19859,9 @@ describeDb("memory repository visibility", () => {
       "select projection_status from conversation_items order by source_sequence"
     );
 
-    expect(projection.rawItemsProjected).toBe(1);
+    expect(projection.rawItemsProjected).toBe(0);
     expect(rowCappedStatuses.rows.map((row) => row.projection_status)).toEqual([
-      "projected",
+      "pending",
       "pending"
     ]);
 
@@ -19884,9 +19884,9 @@ describeDb("memory repository visibility", () => {
       "select projection_status from conversation_items order by source_sequence"
     );
 
-    expect(byteCappedProjection.rawItemsProjected).toBe(1);
+    expect(byteCappedProjection.rawItemsProjected).toBe(0);
     expect(byteCappedStatuses.rows.map((row) => row.projection_status)).toEqual(
-      ["projected", "pending"]
+      ["pending", "pending"]
     );
   });
 
@@ -19948,7 +19948,7 @@ describeDb("memory repository visibility", () => {
     ]);
   });
 
-  it("admits and completes a Stop scope atomically before considering runtime", async () => {
+  it("keeps a Stop scope pending when its atomic unit exceeds hard caps", async () => {
     const alice = await repo.createUser({
       email: `alice-stop-atomic-${randomUUID()}@example.com`
     });
@@ -20004,12 +20004,12 @@ describeDb("memory repository visibility", () => {
       "select projection_status from conversation_items order by source_sequence"
     );
 
-    expect(projection.rawItemsProjected).toBe(3);
-    expect(projection.memoryEventsCreated).toBe(2);
+    expect(projection.rawItemsProjected).toBe(0);
+    expect(projection.memoryEventsCreated).toBe(0);
     expect(statuses.rows.map((row) => row.projection_status)).toEqual([
-      "projected",
-      "projected",
-      "projected"
+      "pending",
+      "pending",
+      "pending"
     ]);
   });
 

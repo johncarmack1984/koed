@@ -4555,14 +4555,12 @@ export const createMemorySourceRepository = (
         ), admitted_units as (
           select *
           from ranked_units
-          where unit_number = 1 or (
-            (
-              ($5::text = 'historical_import_backfill' and selected_row_count <= $2)
-              or
-              ($5::text is distinct from 'historical_import_backfill' and unit_number <= $2)
-            )
-            and ($6::bigint is null or selected_byte_count <= $6)
+          where (
+            ($5::text = 'historical_import_backfill' and selected_row_count <= $2)
+            or
+            ($5::text is distinct from 'historical_import_backfill' and unit_number <= $2)
           )
+          and ($6::bigint is null or selected_byte_count <= $6)
         )
         select
           pi.projection_source_table,
@@ -6082,9 +6080,18 @@ export const createMemorySourceRepository = (
             where visibility = 'personal' and status = 'pending'
           ) as interactive_question_rows
         from conversation_items ci
+        left join sessions s on s.id = ci.session_id
         where ci.projection_status in ('pending', 'error')
           and ci.memory_excluded_at is null
           and ci.personal_deleted_at is null
+          and (
+            ci.session_id is null
+            or (
+              s.id is not null
+              and s.invalidated_at is null
+              and s.personal_deleted_at is null
+            )
+          )
       `
       );
       const row = result.rows[0];

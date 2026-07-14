@@ -361,8 +361,8 @@ policy, or full URLs containing customer content.
 - `MEMORY_RAW_PROJECTION_INTERVAL_MS`: worker interval for projecting pending raw `conversation_items` into messages, tool events, Memory Events, and token-usage rows. Default `5000`.
 - `MEMORY_RAW_PROJECTION_BATCH_LIMIT`: maximum raw rows projected per actor on each worker catch-up pass. Default `1000`.
 - `MEMORY_RAW_PROJECTION_ACTOR_LIMIT`: maximum memory owner scopes checked on each worker catch-up pass. Default `10`.
-- `MEMORY_HISTORICAL_IMPORT_BATCH_ROWS`: maximum raw rows selected for one historical Projection batch. Default `100`; valid range `1`–`1000`.
-- `MEMORY_HISTORICAL_IMPORT_BATCH_BYTES`: maximum raw payload bytes selected for one historical Projection batch. Default `1000000`; valid range `1`–`10000000`.
+- `MEMORY_HISTORICAL_IMPORT_BATCH_ROWS`: hard maximum raw rows selected for one historical Projection batch. An atomic segment larger than this cap remains pending until the Operator raises the cap. Default `100`; valid range `1`–`1000`.
+- `MEMORY_HISTORICAL_IMPORT_BATCH_BYTES`: hard maximum raw payload bytes selected for one historical Projection batch. An atomic segment larger than this cap remains pending until the Operator raises the cap. Default `1000000`; valid range `1`–`10000000`.
 - `MEMORY_HISTORICAL_IMPORT_BATCH_RUNTIME_MS`: maximum historical Projection runtime before yielding at next Projection boundary. Default `15000`; valid range `100`–`60000`.
 - `MEMORY_HISTORICAL_IMPORT_CONCURRENCY`: historical Projection worker slots. Must remain `1`; values outside `1`–`1` fail configuration validation.
 - `MEMORY_HISTORICAL_IMPORT_LIVE_BACKLOG_MAX`: live raw-Projection rows permitted before historical admission pauses. Default `0`; valid range `0`–`10000`.

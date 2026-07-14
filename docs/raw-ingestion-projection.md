@@ -96,7 +96,15 @@ Managed app-server/JSONL overlap uses exact provider thread, turn, stable item,
 and component identity instead. Raw local paths never participate. Hook/import
 overlap therefore reconciles one raw row; a later live observation promotes its
 durable Projection work class to live priority. Metadata retains whether hook
-and historical import both observed row.
+and historical import both observed row. During migration from the earlier
+path-bound transcript identity, adapters submit the old identity as a bounded
+compatibility alias. Koed may reuse an existing canonical row through that
+alias, but never uses the alias as the identity for a new row.
+
+Hook capture and historical import also converge on the same active Personal
+Captured Session when owning User and source session ID match. Session creation
+is serialized for that owner/source pair, so import-first, Hook-first, and
+concurrent observations do not split later raw items across duplicate sessions.
 
 The experimental Koed-managed conversation adapter uses
 `sourceAdapterVersion=codex-app-server-conversation-v1` and
@@ -266,10 +274,12 @@ Embedding Service is healthy.
 
 Historical batches meter every physical raw row and all raw JSON, text, and
 transport-chunk bytes before admission. Completed-turn segments remain atomic.
-The first atomic segment may exceed a row or byte target so an oversized segment
-cannot block progress forever; no later segment may cross either target. Runtime
-is also a soft atomic-segment boundary: Koed completes the first admitted
-segment, then yields before starting another segment after the deadline.
+No atomic segment is admitted when it would exceed the configured row or byte
+cap; the raw rows remain pending until the Operator raises the cap. Runtime is
+an atomic-segment boundary rather than a strict wall-clock cancellation: Koed
+finishes an admitted segment, then yields before starting another segment after
+the deadline. Admission backlog counts exclude rows attached to invalidated or
+deleted Captured Sessions.
 Concurrency is one database-leased Worker slot across processes; a crashed
 Worker releases its session-scoped lease when Postgres closes the connection.
 
