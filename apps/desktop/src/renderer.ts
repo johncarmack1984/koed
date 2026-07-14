@@ -2,7 +2,7 @@ import koedMarkUrl from "../../explorer/src/koed/assets/koed-mark.svg";
 import { createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import "./styles.css";
-import { NativeConversationSurface } from "./NativeConversationSurface.js";
+import { ProjectWorkspace } from "./ProjectWorkspace.js";
 import {
   stateLabels,
   statusCards,
@@ -17,8 +17,7 @@ import {
   mergeProjectSources,
   projectIdForSession,
   projectIsActive,
-  projectLatestAt,
-  relativeTime,
+  reconcileSelectedProjectId,
   sessionSelectionId,
   sortProjects,
   type DesktopProject,
@@ -27,6 +26,12 @@ import {
   type DesktopThreadGroup,
   type DesktopView
 } from "./project-memory-ui.js";
+import {
+  readTeamBackendDisclosureState,
+  renderTeamBackendSettings,
+  restoreTeamBackendDisclosureState,
+  teamBackendStatusCue
+} from "./team-backend-settings.js";
 import type {
   ComponentState,
   ComponentStatus,
@@ -119,6 +124,8 @@ let sidebarCollapsed = true;
 let refreshInFlight: Promise<void> | null = null;
 let explorerApiToken: string | null = null;
 let teamBackendUrlInput = "";
+let revealTeamBackendFailure = false;
+let selectionClearedByInactiveCollapse = false;
 let activeDesktopView: DesktopView = "projects";
 let showInactiveProjects = false;
 let selectedProjectId: string | null = null;
@@ -126,15 +133,15 @@ let selectedSessionId: string | null = null;
 let projectGraph: DesktopProjectGroup[] = [];
 let projectCatalog: DesktopProjectMetadata[] = [];
 let projectGraphError = "";
-let projectDataRevision = 0;
 let projectGraphFingerprint = "";
 let projectCatalogFingerprint = "";
 const projectGraphRequestGate = new LatestRequestGate();
 let projectAssignmentBusy = false;
 let projectAssignmentError = "";
-let nativeConversationRoot: Root | null = null;
-let nativeConversationContainer: HTMLElement | null = null;
-let focusedDashboardRoute = "";
+let projectAssignmentSessionId: string | null = null;
+let projectAssignmentRevision = 0;
+let projectWorkspaceRoot: Root | null = null;
+let projectWorkspaceContainer: HTMLElement | null = null;
 type StartupLogLine = {
   key?: string;
   text: string;
@@ -1193,6 +1200,14 @@ const statusCardResultCue = (cardId: StatusCardId): string => {
     return "Waiting for first status";
   }
   const state = statusCardState(cardId);
+  if (cardId === "teamBackend") {
+    const cue = teamBackendStatusCue({
+      healthy: state === "healthy",
+      registered: status.upstreamBackends.registered,
+      validated: status.upstreamBackends.validated
+    });
+    if (cue) return cue;
+  }
   if (
     cardId === "serverPackage" &&
     status.serverPackage?.source === "bundled-fallback"
@@ -1415,11 +1430,14 @@ const renderStatusCardActions = (cardId: StatusCardId): string => {
     const backendId = firstUpstreamBackendId();
     return `
       <form class="team-backend-form" data-team-backend-form>
+        <label for="team-backend-url">Team Backend URL</label>
         <input
+          id="team-backend-url"
           type="url"
           data-team-backend-url
           placeholder="https://team.example.com"
           value="${escapeHtml(teamBackendUrlInput)}"
+          autocomplete="url"
           ${busyAction ? "disabled" : ""}
         />
         <button type="submit" class="primary" ${busyAction ? "disabled" : ""}>Connect</button>
@@ -1461,141 +1479,65 @@ const selectedSession = (): DesktopThreadGroup | null =>
     (thread) => sessionSelectionId(thread) === selectedSessionId
   ) ?? null;
 
-const countLabel = (count: number, singular: string): string =>
-  `${count} ${count === 1 ? singular : `${singular}s`}`;
-
-const projectSecondaryLabel = (project: DesktopProject): string =>
-  project.remoteDisplay ?? project.path ?? "Local Project";
-
-const projectAssignmentLabel = (session: DesktopThreadGroup): string => {
-  if (session.projectAssignmentSource === "user_override") return "Manual";
-  if (session.projectAssignmentSource === "detected") return "Automatic";
-  return "Unassigned";
-};
-
-const renderProjectAssignmentControls = (
-  session: DesktopThreadGroup
-): string => {
-  if (!session.sessionId) {
-    return `<span class="assignment-state unassigned">Unassigned · session unavailable</span>`;
-  }
-  const targets = assignmentTargetProjects(sortedProjects(), session.projectId);
-  const options = targets
-    .map(
-      (project) =>
-        `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)}</option>`
-    )
-    .join("");
-  return `
-    <form class="project-assignment-form" data-session-project-form aria-busy="${projectAssignmentBusy}">
-      <label><span>Move to another Personal Project</span><select data-session-project-target required ${projectAssignmentBusy || targets.length === 0 ? "disabled" : ""}><option value="" selected disabled>${targets.length === 0 ? "No other Projects" : "Select destination…"}</option>${options}</select></label>
-      <button type="submit" class="secondary" ${projectAssignmentBusy || targets.length === 0 ? "disabled" : ""}>${projectAssignmentBusy ? "Saving…" : "Move"}</button>
-      ${session.projectAssignmentSource === "user_override" ? `<button type="button" class="secondary" data-reset-session-project ${projectAssignmentBusy ? "disabled" : ""}>Reset to automatic</button>` : ""}
-      <span class="assignment-state ${session.projectAssignmentSource ?? "unassigned"}" role="status" aria-live="polite">${projectAssignmentLabel(session)} · ${escapeHtml(session.projectName)}</span>
-    </form>
-    ${projectAssignmentError ? `<p class="assignment-error" role="alert">${escapeHtml(projectAssignmentError)}</p>` : ""}
-  `;
-};
-
-const renderProjectCard = (project: DesktopProject): string => {
-  const active = projectIsActive(project);
-  return `
-    <button type="button" class="project-card" data-project-id="${escapeHtml(project.id)}">
-      <span class="project-icon" aria-hidden="true">${escapeHtml(project.name.slice(0, 1).toUpperCase() || "P")}</span>
-      <span class="project-card-copy">
-        <strong>${escapeHtml(project.name || "Untitled Project")}</strong>
-        <small>${escapeHtml(projectSecondaryLabel(project))}</small>
-        <span>${countLabel(project.threads.length, "session")} · ${countLabel(project.eventCount, "memory event")}${project.branch ? ` · ${escapeHtml(project.branch)}` : ""}</span>
-      </span>
-      <span class="project-card-tail"><span class="activity-state ${active ? "active" : "inactive"}">${active ? "Active" : "Inactive"}</span><small>${escapeHtml(relativeTime(projectLatestAt(project)))}</small><svg class="row-chevron" aria-hidden="true" viewBox="0 0 20 20"><path d="m7.5 4.5 5 5-5 5" /></svg></span>
-    </button>
-  `;
-};
-
-const renderProjectSection = (
-  title: string,
-  projects: DesktopProject[],
-  tone: "active" | "inactive"
-): string => `
-  <section class="project-section ${tone}">
-    <div class="section-heading"><span></span><strong>${escapeHtml(title)}</strong><em>${projects.length}</em></div>
-    <div class="project-list">${projects.map(renderProjectCard).join("")}</div>
-  </section>
-`;
-
-const renderProjectList = (): string => {
+const reconcileProjectSelection = (): void => {
   const projects = sortedProjects();
-  const activeProjects = projects.filter((project) => projectIsActive(project));
-  const inactiveProjects = projects.filter(
-    (project) => !projectIsActive(project)
+  if (!projects.length) {
+    selectedProjectId = null;
+    selectedSessionId = null;
+    return;
+  }
+  const reconciledProjectId = reconcileSelectedProjectId(
+    projects,
+    selectedProjectId,
+    selectionClearedByInactiveCollapse
   );
-  const projectContent = projectGraphError
-    ? `<div class="empty-card hero-empty error"><strong>Personal Memory is temporarily unavailable</strong><p>${escapeHtml(projectGraphError)}</p><button type="button" class="secondary-button" data-retry-projects>Retry</button></div>`
-    : activeProjects.length
-      ? renderProjectSection("ACTIVE PROJECTS", activeProjects, "active")
-      : `<div class="empty-card hero-empty"><strong>No active Projects yet</strong><p>Use your AI Client in a Project and captured sessions will appear here.</p></div>`;
-  return `
-    <div class="projects-screen screen-stack" data-view-root tabindex="-1">
-      <header class="screen-header">
-        <div><p class="eyebrow">Personal Memory</p><h1>Projects</h1><p>Recent local Projects, with every captured session gathered in one place.</p></div>
-        <span class="scope-badge"><span></span> On this device</span>
-      </header>
-      ${projectContent}
-      ${inactiveProjects.length ? `<button type="button" class="show-inactive" data-toggle-inactive aria-expanded="${showInactiveProjects}">${showInactiveProjects ? "Hide inactive Projects" : `Show inactive Projects · ${inactiveProjects.length}`} <span aria-hidden="true">${showInactiveProjects ? "↑" : "↓"}</span></button>` : ""}
-      ${showInactiveProjects && inactiveProjects.length ? renderProjectSection("INACTIVE PROJECTS", inactiveProjects, "inactive") : ""}
-    </div>
-  `;
+  if (reconciledProjectId !== selectedProjectId) {
+    selectedProjectId = reconciledProjectId;
+    selectedSessionId = null;
+  }
+  const selected = projects.find((project) => project.id === selectedProjectId);
+  if (selected && !projectIsActive(selected)) {
+    showInactiveProjects = true;
+  }
 };
 
-const renderSessionList = (): string => {
-  const project = selectedProject();
-  if (!project) {
-    return renderProjectList();
+const selectProject = (projectId: string): void => {
+  selectionClearedByInactiveCollapse = false;
+  selectedProjectId = projectId;
+  selectedSessionId = null;
+  if (!projectAssignmentBusy) {
+    projectAssignmentError = "";
+    projectAssignmentSessionId = null;
   }
-  const threads = [...project.threads].sort(
-    (left, right) => Date.parse(right.latestAt) - Date.parse(left.latestAt)
-  );
-  return `
-    <div class="project-detail-screen screen-stack" data-view-root tabindex="-1">
-      <nav class="breadcrumbs" aria-label="Breadcrumb"><button type="button" data-back-to-projects>Projects</button><span>›</span><strong>${escapeHtml(project.name)}</strong></nav>
-      <header class="project-detail-header"><span class="project-monogram" aria-hidden="true">${escapeHtml(project.name.slice(0, 1).toUpperCase() || "P")}</span><div><p class="eyebrow">Local Project</p><h1>${escapeHtml(project.name)}</h1><p>${escapeHtml(project.path ?? "Local path unavailable")}</p></div></header>
-      <div class="project-summary-grid"><div><strong>${project.threads.length}</strong><span>Sessions</span></div><div><strong>${project.eventCount}</strong><span>Memory events</span></div><div><strong>${escapeHtml(relativeTime(projectLatestAt(project)))}</strong><span>Last activity</span></div></div>
-      <div class="project-identity-row">${project.branch ? `<span>Branch · ${escapeHtml(project.branch)}</span>` : ""}${project.isWorktree ? "<span>Git worktree</span>" : ""}${project.catalogued ? "<span>Project metadata discovered</span>" : ""}</div>
-      <section class="sessions-pane">
-        <div class="section-heading"><span></span><strong>CAPTURED SESSIONS</strong><em>${threads.length}</em></div>
-        <div class="session-list">
-        ${
-          threads.length
-            ? threads
-                .map((thread) => {
-                  const id = sessionSelectionId(thread);
-                  return `<button type="button" class="session-row" data-session-id="${escapeHtml(id)}"><span class="session-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M5 4.5h10v7H9l-4 3v-10Z" /><path d="M8 8h4" /></svg></span><span class="session-row-copy"><strong>${escapeHtml(thread.name || "Untitled session")}</strong><small>${escapeHtml(thread.sample || "Captured Conversation")}</small><span>${countLabel(thread.eventCount, "Memory Event")} · ${escapeHtml(relativeTime(thread.latestAt))}</span></span><svg class="session-row-tail row-chevron" aria-hidden="true" viewBox="0 0 20 20"><path d="m7.5 4.5 5 5-5 5" /></svg></button>`;
-                })
-                .join("")
-            : `<div class="empty-card"><strong>No captured sessions yet</strong><p>The Project metadata is ready. Sessions will appear after the Supported Capture Hook records activity here.</p></div>`
-        }
-        </div>
-      </section>
-    </div>
-  `;
+  activeDesktopView = "project";
+  syncUI();
 };
 
-const renderConversationPane = (): string => {
-  const session = selectedSession();
-  if (!session) {
-    return selectedProject() ? renderSessionList() : renderProjectList();
+const selectSession = (sessionId: string): void => {
+  selectedSessionId = sessionId;
+  if (!projectAssignmentBusy) {
+    projectAssignmentError = "";
+    projectAssignmentSessionId = null;
   }
-  return `
-    <div class="conversation-screen" data-view-root tabindex="-1">
-      <nav class="breadcrumbs conversation-breadcrumbs" aria-label="Breadcrumb"><button type="button" data-back-to-projects>Projects</button><span>›</span><button type="button" data-back-to-project>${escapeHtml(selectedProject()?.name ?? session.projectName)}</button><span>›</span><strong>${escapeHtml(session.name || "Untitled session")}</strong></nav>
-      <section class="conversation-pane">
-        <div class="conversation-toolbar"><div><p class="eyebrow">Raw Conversation</p><strong>${escapeHtml(session.name || "Untitled session")}</strong><small>${countLabel(session.eventCount, "Memory Event")} · ${escapeHtml(relativeTime(session.latestAt))}</small></div><span class="conversation-local-badge"><span aria-hidden="true"></span> On this device</span></div>
-        <div class="conversation-assignment">${renderProjectAssignmentControls(session)}</div>
-        <div class="native-conversation-host" data-native-conversation-root></div>
-      </section>
-    </div>
-  `;
+  activeDesktopView = "session";
+  syncUI();
 };
+
+const toggleInactiveProjects = (): void => {
+  if (showInactiveProjects && selectedProjectId) {
+    const selected = selectedProject();
+    if (selected && !projectIsActive(selected)) {
+      selectionClearedByInactiveCollapse = true;
+      selectedProjectId = null;
+      selectedSessionId = null;
+    }
+  }
+  showInactiveProjects = !showInactiveProjects;
+  syncUI();
+};
+
+const renderProjectWorkspaceHost = (): string =>
+  `<div class="project-workspace-host" data-project-workspace-root></div>`;
 
 const statusGroupState = (
   group: (typeof statusGroups)[number]
@@ -1616,7 +1558,7 @@ const statusGroupSummary = (group: (typeof statusGroups)[number]): string => {
 
 const renderSettingsPane = (): string => `
   <div class="settings-screen screen-stack" data-view-root tabindex="-1">
-    <header class="screen-header"><div><p class="eyebrow">This device</p><h1>Settings</h1><p>Local Personal Memory setup, health, and repair actions.</p></div></header>
+    <header class="screen-header"><div><p class="eyebrow">Koed</p><h1>Settings</h1><p>Capture, recall, and local service health.</p></div></header>
     <div class="settings-list">
       ${statusGroups
         .map((group) => {
@@ -1630,21 +1572,24 @@ const renderSettingsPane = (): string => `
       <button type="button" class="secondary" data-startup-action="doctor">Run doctor</button>
       <button type="button" class="secondary" data-startup-action="setup_codex">Setup AI Client</button>
     </div>
+    ${renderTeamBackendSettings({
+      busy: Boolean(busyAction),
+      canDisconnect: Boolean(firstUpstreamBackendId()),
+      connected: (status?.upstreamBackends.registered ?? 0) > 0,
+      detail: statusCardLiveOutput("teamBackend"),
+      status: statusCardResultCue("teamBackend"),
+      urlValue: teamBackendUrlInput
+    })}
     <details class="diagnostic-details"><summary>Advanced diagnostics <span>${statusCards.length} components</span></summary><div class="diagnostic-list">${statusCards.map((card) => `<div class="diagnostic-row"><span>${escapeHtml(card.title)}</span><strong class="${statusCardState(card.id)}">${escapeHtml(statusCardResultCue(card.id))}</strong></div>`).join("")}</div></details>
   </div>
 `;
 
 const renderProjectDashboard = (): string => {
   if (activeDesktopView === "settings") return renderSettingsPane();
-  if (activeDesktopView === "session") return renderConversationPane();
-  if (activeDesktopView === "project") return renderSessionList();
-  return renderProjectList();
+  return renderProjectWorkspaceHost();
 };
 
 const dashboardRenderKey = (): string => {
-  if (activeDesktopView === "session") {
-    return `session:${selectedProjectId ?? ""}:${selectedSessionId ?? ""}:${status?.api.url ?? ""}:${Boolean(explorerApiToken)}:${projectDataRevision}:${projectAssignmentBusy}:${projectAssignmentError}`;
-  }
   if (activeDesktopView === "settings") {
     const cardState = statusCards
       .map(
@@ -1652,13 +1597,10 @@ const dashboardRenderKey = (): string => {
           `${card.id}:${statusCardState(card.id)}:${statusCardResultCue(card.id)}`
       )
       .join("|");
-    return `settings:${status?.state ?? "starting"}:${busyAction ?? ""}:${cardState}`;
+    return `settings:${status?.state ?? "starting"}:${busyAction ?? ""}:${status?.upstreamBackends.registered ?? 0}:${status?.upstreamBackends.validated ?? 0}:${firstUpstreamBackendId() ?? ""}:${cardState}`;
   }
-  return `${activeDesktopView}:${selectedProjectId ?? ""}:${showInactiveProjects}:${projectDataRevision}:${projectAssignmentBusy}:${projectAssignmentError}`;
+  return "project-workspace";
 };
-
-const dashboardRouteKey = (): string =>
-  `${activeDesktopView}:${selectedProjectId ?? ""}:${selectedSessionId ?? ""}`;
 
 const renderShell = () => {
   if (rendered) {
@@ -1670,10 +1612,9 @@ const renderShell = () => {
       <aside class="desktop-navigation">
         <button type="button" class="memory-brand" data-pane="projects" aria-label="Open Projects"><img class="brand-logo" src="${koedMarkUrl}" alt="" /><span>koed</span></button>
         <nav class="memory-tabs" aria-label="Koed sections"><button type="button" class="active" data-pane="projects"><span aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M3.5 5.5h5l1.5 2h6.5v8h-13v-10Z" /></svg></span>Projects</button><button type="button" data-pane="settings"><span aria-hidden="true"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.5" /><path d="M10 2.75v2M10 15.25v2M2.75 10h2M15.25 10h2M4.85 4.85l1.4 1.4M13.75 13.75l1.4 1.4M15.15 4.85l-1.4 1.4M6.25 13.75l-1.4 1.4" /></svg></span>Settings</button></nav>
-        <div class="navigation-footer"><span class="status-dot starting" data-status-dot title="Overall health: ${stateLabels.starting}" aria-label="Overall health: ${stateLabels.starting}"></span><span><strong>Personal Memory</strong><small>Stored locally</small></span></div>
+        <div class="navigation-footer"><span class="status-dot starting" data-status-dot title="Overall health: ${stateLabels.starting}" aria-label="Overall health: ${stateLabels.starting}"></span><span><strong>Koed status</strong><small data-navigation-status>${stateLabels.starting}</small></span></div>
       </aside>
       <main class="desktop-workspace">
-        <header class="workspace-bar"><span>Personal</span><span class="status-pill starting" data-status-pill>${stateLabels.starting}</span></header>
         <div class="project-dashboard" data-project-dashboard data-render-key="${escapeHtml(dashboardRenderKey())}">${renderProjectDashboard()}</div>
       </main>
     </section>
@@ -1764,8 +1705,10 @@ const syncStartupSteps = () => {
 };
 
 const syncStatusCards = () => {
-  const statusPill = app.querySelector<HTMLElement>("[data-status-pill]");
   const statusDot = app.querySelector<HTMLElement>("[data-status-dot]");
+  const navigationStatus = app.querySelector<HTMLElement>(
+    "[data-navigation-status]"
+  );
   const hintStartup = app.querySelector<HTMLElement>("[data-startup-hint]");
   const startupPhaseNode = app.querySelector<HTMLElement>(
     "[data-startup-phase]"
@@ -1783,18 +1726,15 @@ const syncStatusCards = () => {
     startupDetailNode.textContent = startupDetail;
   }
 
-  if (statusPill) {
-    const state = status?.state ?? "starting";
-    statusPill.className = `status-pill ${state}`;
-    statusPill.textContent = stateLabels[state];
-    statusPill.title = `Overall health: ${stateLabels[state]}`;
-  }
   if (statusDot) {
     const state = status?.state ?? "starting";
     const label = `Overall health: ${stateLabels[state]}`;
     statusDot.className = `status-dot ${state}`;
     statusDot.title = label;
     statusDot.setAttribute("aria-label", label);
+  }
+  if (navigationStatus) {
+    navigationStatus.textContent = stateLabels[status?.state ?? "starting"];
   }
 
   if (hintStartup) {
@@ -1900,43 +1840,71 @@ const syncStatusCards = () => {
 };
 
 const syncProjectDashboard = () => {
+  reconcileProjectSelection();
   const dashboard = app.querySelector<HTMLElement>("[data-project-dashboard]");
   const nextRenderKey = dashboardRenderKey();
   if (dashboard && dashboard.dataset.renderKey !== nextRenderKey) {
     const diagnosticsOpen =
       dashboard.querySelector<HTMLDetailsElement>(".diagnostic-details")
         ?.open ?? false;
-    nativeConversationRoot?.unmount();
-    nativeConversationRoot = null;
-    nativeConversationContainer = null;
+    const teamBackendDisclosureState =
+      readTeamBackendDisclosureState(dashboard);
+    projectWorkspaceRoot?.unmount();
+    projectWorkspaceRoot = null;
+    projectWorkspaceContainer = null;
     dashboard.innerHTML = renderProjectDashboard();
     dashboard.dataset.renderKey = nextRenderKey;
     const diagnostics = dashboard.querySelector<HTMLDetailsElement>(
       ".diagnostic-details"
     );
     if (diagnostics) diagnostics.open = diagnosticsOpen;
+    restoreTeamBackendDisclosureState(
+      dashboard,
+      teamBackendDisclosureState,
+      revealTeamBackendFailure
+    );
   }
-  const conversationContainer = dashboard?.querySelector<HTMLElement>(
-    "[data-native-conversation-root]"
+  if (dashboard && revealTeamBackendFailure) {
+    restoreTeamBackendDisclosureState(
+      dashboard,
+      readTeamBackendDisclosureState(dashboard),
+      true
+    );
+    revealTeamBackendFailure = false;
+  }
+  const workspaceContainer = dashboard?.querySelector<HTMLElement>(
+    "[data-project-workspace-root]"
   );
-  const session = selectedSession();
-  if (conversationContainer && session) {
-    if (conversationContainer !== nativeConversationContainer) {
-      nativeConversationRoot?.unmount();
-      nativeConversationContainer = conversationContainer;
-      nativeConversationRoot = createRoot(conversationContainer);
+  if (workspaceContainer && activeDesktopView !== "settings") {
+    if (workspaceContainer !== projectWorkspaceContainer) {
+      projectWorkspaceRoot?.unmount();
+      projectWorkspaceContainer = workspaceContainer;
+      projectWorkspaceRoot = createRoot(workspaceContainer);
     }
-    nativeConversationRoot?.render(
-      createElement(NativeConversationSurface, {
+    projectWorkspaceRoot?.render(
+      createElement(ProjectWorkspace, {
+        projects: sortedProjects(),
+        view: activeDesktopView,
+        selectedProjectId,
+        selectedSessionId,
+        showInactiveProjects,
+        projectGraphError,
+        projectAssignmentBusy,
+        projectAssignmentError:
+          projectAssignmentSessionId === selectedSessionId
+            ? projectAssignmentError
+            : "",
         apiBaseUrl: status?.api.url ?? null,
         apiToken: explorerApiToken,
-        thread: session
+        onSelectProject: selectProject,
+        onSelectSession: selectSession,
+        onToggleInactive: toggleInactiveProjects
       })
     );
-  } else if (nativeConversationRoot) {
-    nativeConversationRoot.unmount();
-    nativeConversationRoot = null;
-    nativeConversationContainer = null;
+  } else if (projectWorkspaceRoot) {
+    projectWorkspaceRoot.unmount();
+    projectWorkspaceRoot = null;
+    projectWorkspaceContainer = null;
   }
   app.querySelectorAll<HTMLButtonElement>("[data-pane]").forEach((button) => {
     const projectsActive =
@@ -1948,12 +1916,6 @@ const syncProjectDashboard = () => {
     if (active) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   });
-  const nextRoute = dashboardRouteKey();
-  if (dashboard && focusedDashboardRoute !== nextRoute) {
-    focusedDashboardRoute = nextRoute;
-    const viewRoot = dashboard.querySelector<HTMLElement>("[data-view-root]");
-    requestAnimationFrame(() => viewRoot?.focus({ preventScroll: true }));
-  }
 };
 
 const syncUI = () => {
@@ -1999,15 +1961,16 @@ const refreshExplorerCredential = async (): Promise<void> => {
   }
 };
 
-const refreshProjectGraph = async (): Promise<boolean> => {
+type ProjectGraphRefreshResult = "refreshed" | "superseded" | "failed";
+
+const refreshProjectGraph = async (): Promise<ProjectGraphRefreshResult> => {
   const requestRevision = projectGraphRequestGate.begin();
   if (!status?.api.url || !explorerApiToken) {
     if (projectGraph.length) {
       projectGraph = [];
       projectGraphFingerprint = "";
-      projectDataRevision += 1;
     }
-    return false;
+    return "failed";
   }
   try {
     const graphUrl = `${status.api.url.replace(/\/$/, "")}/v1/memory/graph/threads?limit=500&offset=0&includeInvalidated=false`;
@@ -2038,7 +2001,9 @@ const refreshProjectGraph = async (): Promise<boolean> => {
           : `Project graph failed with HTTP ${response.status}`
       );
     }
-    if (!projectGraphRequestGate.isCurrent(requestRevision)) return false;
+    if (!projectGraphRequestGate.isCurrent(requestRevision)) {
+      return "superseded";
+    }
     const nextProjects = Array.isArray(payload.projects)
       ? payload.projects
       : [];
@@ -2051,25 +2016,23 @@ const refreshProjectGraph = async (): Promise<boolean> => {
           projectIdForSession(nextProjects, selectedSessionId) ??
           selectedProjectId;
       }
-      projectDataRevision += 1;
     }
     if (projectAssignmentError === PROJECT_ASSIGNMENT_REFRESH_ERROR) {
       projectAssignmentError = "";
-      projectDataRevision += 1;
     }
     if (projectGraphError) {
       projectGraphError = "";
-      projectDataRevision += 1;
     }
-    return true;
+    return "refreshed";
   } catch (error) {
-    if (!projectGraphRequestGate.isCurrent(requestRevision)) return false;
+    if (!projectGraphRequestGate.isCurrent(requestRevision)) {
+      return "superseded";
+    }
     const message = error instanceof Error ? error.message : String(error);
     if (message !== projectGraphError) {
       projectGraphError = message;
-      projectDataRevision += 1;
     }
-    return false;
+    return "failed";
   }
 };
 
@@ -2083,7 +2046,6 @@ const refreshProjectCatalog = async (): Promise<void> => {
   if (nextFingerprint !== projectCatalogFingerprint) {
     projectCatalog = nextProjects;
     projectCatalogFingerprint = nextFingerprint;
-    projectDataRevision += 1;
   }
 };
 
@@ -2095,7 +2057,7 @@ const patchSessionProject = async (
   target: DesktopProject | null
 ): Promise<string> => {
   if (action === "move" && !target) {
-    throw new Error("Personal Project target is required.");
+    throw new Error("Project target is required.");
   }
   const project = target
     ? { id: target.id, name: target.name, path: target.path }
@@ -2139,13 +2101,16 @@ const updateSessionProject = async (
 ): Promise<void> => {
   const session = selectedSession();
   if (!session?.sessionId || !status?.api.url || !explorerApiToken) return;
+  const operationSessionId = sessionSelectionId(session);
+  const operationRevision = ++projectAssignmentRevision;
   const target = targetProjectId
     ? (assignmentTargetProjects(sortedProjects()).find(
         (project) => project.id === targetProjectId
       ) ?? null)
     : null;
+  projectAssignmentSessionId = operationSessionId;
   if (action === "move" && !target) {
-    projectAssignmentError = "Select a Personal Project.";
+    projectAssignmentError = "Select a Project.";
     syncUI();
     return;
   }
@@ -2153,7 +2118,7 @@ const updateSessionProject = async (
   projectAssignmentError = "";
   syncUI();
   try {
-    const nextProjectId = await patchSessionProject(
+    await patchSessionProject(
       status.api.url,
       explorerApiToken,
       session.sessionId,
@@ -2161,16 +2126,21 @@ const updateSessionProject = async (
       target
     );
     const refreshed = await refreshProjectGraph();
-    if (!refreshed && selectedProjectId !== nextProjectId) {
+    if (operationRevision !== projectAssignmentRevision) return;
+    if (refreshed === "failed") {
+      projectAssignmentSessionId = operationSessionId;
       projectAssignmentError = PROJECT_ASSIGNMENT_REFRESH_ERROR;
     }
-    projectDataRevision += 1;
   } catch (error) {
+    if (operationRevision !== projectAssignmentRevision) return;
+    projectAssignmentSessionId = operationSessionId;
     projectAssignmentError =
       error instanceof Error ? error.message : String(error);
   } finally {
-    projectAssignmentBusy = false;
-    syncUI();
+    if (operationRevision === projectAssignmentRevision) {
+      projectAssignmentBusy = false;
+      syncUI();
+    }
   }
 };
 
@@ -2873,6 +2843,7 @@ const runTeamBackendConnect = async (): Promise<void> => {
   const url = teamBackendUrlInput.trim();
   if (!url) {
     appendStatusCardLog(cardId, "failed: Team Backend URL is required");
+    revealTeamBackendFailure = true;
     syncUI();
     return;
   }
@@ -2887,6 +2858,7 @@ const runTeamBackendConnect = async (): Promise<void> => {
     const error = commandResultError(result);
     if (error) {
       appendStatusCardLog(cardId, `failed: ${error}`);
+      revealTeamBackendFailure = true;
     } else {
       const activationUrl =
         result &&
@@ -2904,7 +2876,7 @@ const runTeamBackendConnect = async (): Promise<void> => {
         cardId,
         browserOpenRequested
           ? "enrollment started; browser open requested"
-          : "enrollment started; open the approval URL manually"
+          : "enrollment started; open approval URL manually"
       );
       if (activationUrl) {
         appendStatusCardLog(cardId, `approval URL: ${activationUrl}`);
@@ -2916,6 +2888,7 @@ const runTeamBackendConnect = async (): Promise<void> => {
       cardId,
       `failed: ${error instanceof Error ? error.message : String(error)}`
     );
+    revealTeamBackendFailure = true;
   } finally {
     statusCardCheckedAt[cardId] = new Date().toISOString();
     busyAction = null;
@@ -2975,21 +2948,19 @@ const registerHandlers = () => {
     }
     if (form.matches("[data-team-backend-form]")) {
       event.preventDefault();
-      event.stopPropagation();
-      const input = form.querySelector<HTMLInputElement>(
-        "[data-team-backend-url]"
-      );
-      teamBackendUrlInput = input?.value ?? "";
+      teamBackendUrlInput =
+        form.querySelector<HTMLInputElement>("[data-team-backend-url]")
+          ?.value ?? "";
       void runTeamBackendConnect();
     }
   });
 
   app.addEventListener("input", (event) => {
     const input = event.target;
-    if (!(input instanceof HTMLInputElement)) {
-      return;
-    }
-    if (input.matches("[data-team-backend-url]")) {
+    if (
+      input instanceof HTMLInputElement &&
+      input.matches("[data-team-backend-url]")
+    ) {
       teamBackendUrlInput = input.value;
     }
   });
@@ -3062,7 +3033,6 @@ const registerHandlers = () => {
       event.preventDefault();
       activeDesktopView = paneButton.dataset.pane;
       if (activeDesktopView === "projects") {
-        selectedProjectId = null;
         selectedSessionId = null;
       }
       syncUI();
@@ -3075,7 +3045,6 @@ const registerHandlers = () => {
     if (backToProjects) {
       event.preventDefault();
       activeDesktopView = "projects";
-      selectedProjectId = null;
       selectedSessionId = null;
       syncUI();
       return;

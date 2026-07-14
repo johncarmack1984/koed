@@ -86,7 +86,7 @@ export const componentDefinitions = {
   upstreamBackends: {
     label: "Team Backend",
     description:
-      "Registered remote Team Backend used by local edge routing and Team Workspace recall."
+      "Registered remote Team Backend used by local-edge routing and Team Workspace recall."
   },
   lastVerification: {
     label: "Last verification",
@@ -305,7 +305,7 @@ export const statusCards = [
   {
     id: "teamBackend",
     title: "Team Backend",
-    role: "Remote Team Backend connection used for shared Workspace memory.",
+    role: "Remote Team Backend connection used for Team Workspace memory.",
     impact:
       "Team Workspace recall stays unavailable until a backend is connected and enrolled.",
     componentKeys: ["upstreamBackends"],
