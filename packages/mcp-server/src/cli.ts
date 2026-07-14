@@ -2,7 +2,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { readLocalEdgeClientCredentialAuthorization } from "@koed/shared";
+import {
+  CURATED_MEMORY_REVIEW_MAX_EVIDENCE,
+  readLocalEdgeClientCredentialAuthorization
+} from "@koed/shared";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -15,6 +18,7 @@ import {
 import { startAnswerBridgeWithRetry } from "./answer-bridge-lifecycle.js";
 import {
   MemoryApiClient,
+  backendToolCapabilitiesFrom,
   type McpServerConfig,
   defaultAnswerScope,
   defaultConfig,
@@ -22,9 +26,11 @@ import {
   localMemoryAgentSettingFor,
   memoryAnswerToolDescription,
   memoryAccessCheck,
+  memoryIntakeProposeToolDescription,
   memoryServerInstructions,
   workerOverridesFromLocalMemorySetting,
-  resolveToolExposureConfig
+  resolveToolExposureConfig,
+  unavailableBackendToolCapabilities
 } from "./index.js";
 import {
   resolveLcmSummaryWorkerConfig,
@@ -36,6 +42,8 @@ import {
   startLcmSummaryService
 } from "./lcm-summary-service.js";
 import { generatePendingSessionTitles } from "./session-title-worker.js";
+import { startCuratedMemoryReviewService } from "./curated-memory-review-service.js";
+import { resolveCuratedMemoryReviewConfig } from "./curated-memory-review-worker.js";
 import {
   answerMarkdownFromAnswer,
   citationsFromAnswer,
@@ -242,14 +250,15 @@ const sleep = (ms: number): Promise<void> =>
 
 if (command === "doctor") {
   try {
+    const accessCheck = await memoryAccessCheck(client);
     console.log(
       JSON.stringify(
         {
           ok: true,
           apiUrl: client.config.apiUrl,
           hasApiToken: Boolean(client.config.apiToken),
-          tools: exposedTools(toolExposure),
-          accessCheck: await memoryAccessCheck(client)
+          tools: accessCheck.exposedTools,
+          accessCheck
         },
         null,
         2
@@ -320,6 +329,18 @@ if (command) {
   process.exit(1);
 }
 
+const backendToolCapabilities = await client
+  .capabilities()
+  .then(backendToolCapabilitiesFrom)
+  .catch((error) => {
+    logger.warn(
+      { err: error, apiUrl: client.config.apiUrl },
+      "backend capabilities unavailable; capability-gated MCP tools disabled"
+    );
+    return unavailableBackendToolCapabilities;
+  });
+const activeTools = exposedTools(toolExposure, backendToolCapabilities);
+
 const server = new McpServer(
   {
     name: "koed-mcp",
@@ -334,11 +355,15 @@ const backgroundLcmSummaryService = startLcmSummaryService(client, {
   serviceConfig: resolveLcmSummaryServiceConfig(process.env),
   workerConfig: resolveLcmSummaryWorkerConfig(process.env)
 });
+const backgroundCuratedMemoryReviewService = startCuratedMemoryReviewService(
+  client,
+  { workerConfig: resolveCuratedMemoryReviewConfig(process.env) }
+);
 const answerBridgeHandle = startAnswerBridgeWithRetry();
 logger.info(
   {
     apiUrl: client.config.apiUrl,
-    tools: exposedTools(toolExposure),
+    tools: activeTools,
     bridgeEnabled:
       process.env.MEMORY_ANSWER_BRIDGE_ENABLED?.trim().toLowerCase() !== "false"
   },
@@ -362,7 +387,8 @@ if (toolExposure.exposeDiagnosticMemoryTools) {
     async ({ include_notes = true }) =>
       jsonResponse(
         await memoryAccessCheck(client, include_notes, {
-          lcmSummaryService: backgroundLcmSummaryService
+          lcmSummaryService: backgroundLcmSummaryService,
+          curatedMemoryReviewService: backgroundCuratedMemoryReviewService
         })
       )
   );
@@ -696,6 +722,134 @@ server.registerTool(
   }
 );
 
+if (backendToolCapabilities.curatedMemoryIntakeAvailable) {
+  server.registerTool(
+    "memory_intake_propose",
+    {
+      title: "Propose Curated Memory",
+      description: memoryIntakeProposeToolDescription,
+      inputSchema: {
+        proposed_claim: z
+          .string()
+          .min(1)
+          .max(4000)
+          .describe(
+            "A concise candidate fact, preference, decision, plan, or correction. A separate local review agent verifies and rewrites it from the supplied evidence."
+          ),
+        proposed_topic: z
+          .string()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe("Optional semantic place/topic for the fact."),
+        rationale: z
+          .string()
+          .max(4000)
+          .optional()
+          .describe("Why this looks durable and useful to remember."),
+        tags: z.array(z.string().min(1).max(80)).max(20).default([]),
+        sensitivity_hint: z
+          .enum(["normal", "sensitive", "review_required"])
+          .default("normal"),
+        expires_at: z
+          .string()
+          .datetime({ offset: true })
+          .optional()
+          .describe(
+            "Optional ISO 8601 timestamp after which this Curated Memory must not be recalled."
+          ),
+        evidence_conversation_item_ids: z
+          .array(uuidSchema)
+          .max(CURATED_MEMORY_REVIEW_MAX_EVIDENCE)
+          .default([])
+          .describe("Conversation item UUIDs that directly support the claim."),
+        evidence_memory_event_ids: z
+          .array(uuidSchema)
+          .max(CURATED_MEMORY_REVIEW_MAX_EVIDENCE)
+          .default([])
+          .describe(
+            "Optional Memory Event UUIDs that directly support the claim."
+          ),
+        evidence_exact_quote: z
+          .string()
+          .min(1)
+          .max(16_000)
+          .optional()
+          .describe(
+            "The exact supporting User statement. Required when evidence IDs and source_session_id are unavailable; ambiguous matches fail closed."
+          ),
+        operation: z
+          .enum(["store", "merge", "supersede", "conflict"])
+          .default("store")
+          .describe(
+            "Optional operation hint for the local reviewer: store, merge duplicate evidence, supersede a correction, or record a conflict. The reviewer makes the final decision."
+          ),
+        target_assertion_id: uuidSchema
+          .optional()
+          .describe(
+            "Optional current Curated Memory assertion ID that may be relevant to a duplicate, correction, or conflict."
+          ),
+        source_workspace_id: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Workspace path used to resolve the current user-authored evidence server-side. Defaults to the current Codex workspace."
+          ),
+        source_session_id: uuidSchema
+          .optional()
+          .describe(
+            "Optional backend session UUID for narrower evidence resolution."
+          )
+      }
+    },
+    async (input) => {
+      if (
+        input.evidence_conversation_item_ids.length +
+          input.evidence_memory_event_ids.length >
+        CURATED_MEMORY_REVIEW_MAX_EVIDENCE
+      ) {
+        throw new Error(
+          `At most ${CURATED_MEMORY_REVIEW_MAX_EVIDENCE} total evidence sources are allowed`
+        );
+      }
+      logger.info(
+        {
+          evidenceConversationItems:
+            input.evidence_conversation_item_ids.length,
+          evidenceMemoryEvents: input.evidence_memory_event_ids.length,
+          hasTopic: Boolean(input.proposed_topic),
+          tagCount: input.tags.length,
+          operation: input.operation,
+          hasTargetAssertion: Boolean(input.target_assertion_id)
+        },
+        "memory_intake_propose tool call started"
+      );
+      const result = await client.proposeCuratedMemory({
+        ...input,
+        source_workspace_id: normalizeToolWorkspaceId(
+          input.source_workspace_id
+        ),
+        created_by_model: "codex",
+        created_by_prompt_version: "memory-intake-propose-mcp-v1"
+      });
+      logger.info(
+        {
+          proposalId:
+            typeof result.proposal === "object" &&
+            result.proposal !== null &&
+            "id" in result.proposal
+              ? result.proposal.id
+              : undefined
+        },
+        "memory_intake_propose tool call completed"
+      );
+      backgroundCuratedMemoryReviewService.nudge("proposal_created");
+      return jsonResponse(result);
+    }
+  );
+}
+
 if (toolExposure.exposeLowLevelMemoryTools) {
   server.registerTool(
     "memory_search",
@@ -751,6 +905,7 @@ const cleanup = () => {
   logger.info("koed MCP server shutting down");
   answerBridgeHandle.close();
   backgroundLcmSummaryService?.stop();
+  backgroundCuratedMemoryReviewService.stop();
 };
 
 process.once("SIGINT", () => {
