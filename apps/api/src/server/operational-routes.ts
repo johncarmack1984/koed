@@ -539,7 +539,9 @@ export const registerOperationalRoutes = (
           operationFamily: "sync",
           upstreamBackend: backend,
           upstreamBackendId: backend.id,
-          upstreamCredentialAvailable: Boolean(authorization)
+          upstreamCredentialAvailable: Boolean(authorization),
+          identityRemoteOperationsAllowed:
+            context.localEdge.remoteOperationsAllowed()
         }).action === "queued_sync_handoff"
       );
     })

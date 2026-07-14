@@ -20,6 +20,7 @@ import {
 } from "./paths.js";
 import { applyPersistedLocalPorts } from "./ports.js";
 import { isProcessRunning } from "./process-liveness.js";
+import { ensureDeviceIdentity } from "./device-identity.js";
 import { collectUpstreamRegistryStatus } from "./upstream-registry.js";
 import type {
   KoedServerComponentState,
@@ -642,6 +643,24 @@ const inspectLastVerification = (
   };
 };
 
+const inspectDeviceIdentity = async (
+  paths: KoedServerPaths,
+  environment: NodeJS.ProcessEnv
+): Promise<KoedServerStatus["deviceIdentity"]> => {
+  const identity = await ensureDeviceIdentity(paths, { environment });
+  const component = identity.remoteOperationsAllowed
+    ? healthy(identity.message)
+    : needsAttention(identity.message, identity.action);
+  return {
+    ...component,
+    health: identity.health,
+    deploymentId: identity.deploymentId,
+    deviceInstanceId: identity.deviceInstanceId,
+    remoteOperationsAllowed: identity.remoteOperationsAllowed,
+    platformProtection: identity.platformProtection
+  };
+};
+
 const inspectUpstreamBackends = (
   paths: KoedServerPaths,
   deps: Required<KoedServerStatusDependencies>
@@ -880,7 +899,10 @@ export const collectKoedServerStatus = async (
             "Fix MCP Server health first."
           );
   const lastVerification = inspectLastVerification(paths, deps);
-  const upstreamBackends = inspectUpstreamBackends(paths, deps);
+  const [deviceIdentity, upstreamBackends] = await Promise.all([
+    inspectDeviceIdentity(paths, environment),
+    Promise.resolve(inspectUpstreamBackends(paths, deps))
+  ]);
   const explorerCredential = loadExplorerCredential(paths);
   const explorer = await inspectExplorer(
     explorerUrl,
@@ -906,6 +928,7 @@ export const collectKoedServerStatus = async (
     captureHook,
     codex,
     lcmSummaryService,
+    deviceIdentity,
     upstreamBackends,
     explorer: { ...explorer, url: explorerUrl },
     lastVerification
@@ -943,6 +966,7 @@ export const collectKoedServerDoctor = async (
     ["captureHook", "Supported Capture Hook", status.captureHook],
     ["codex", "Codex configuration", status.codex],
     ["lcmSummaryService", "LCM Summary Service", status.lcmSummaryService],
+    ["deviceIdentity", "Device identity", status.deviceIdentity],
     ["upstreamBackends", "Upstream Backends", status.upstreamBackends],
     ["lastVerification", "Last verification", status.lastVerification]
   ].map(([id, label, component]) => ({
@@ -952,7 +976,9 @@ export const collectKoedServerDoctor = async (
   }));
   const blockingChecks = checks.filter(
     (check) =>
-      check.id !== "lastVerification" && check.id !== "upstreamBackends"
+      check.id !== "lastVerification" &&
+      check.id !== "upstreamBackends" &&
+      check.id !== "deviceIdentity"
   );
   const failed = blockingChecks.filter(
     (check) => check.state === "needs_attention"

@@ -51,6 +51,7 @@ import {
 } from "../memory/index.js";
 import {
   createEnvelopeEncryptionProviderFromEnvironment,
+  inspectDeviceIdentityAtKoedHome,
   embeddingDispatchKey,
   readUpstreamCredentialAuthorization,
   type EnvelopeEncryptionProvider,
@@ -89,6 +90,7 @@ interface BuildServerOptions {
   upstreamBackendsPath?: string;
   fetch?: typeof fetch;
   resolveUpstreamAuthorization?: ApiRouteContext["localEdge"]["resolveUpstreamAuthorization"];
+  remoteOperationsAllowed?: ApiRouteContext["localEdge"]["remoteOperationsAllowed"];
   workosClient?: WorkosAuthKitClient;
   envelopeEncryptionProvider?: EnvelopeEncryptionProvider;
 }
@@ -407,6 +409,15 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     localEdge: {
       upstreamBackendsPath:
         options.upstreamBackendsPath ?? config.upstreamBackendsPath,
+      remoteOperationsAllowed:
+        options.remoteOperationsAllowed ??
+        (config.test
+          ? () => true
+          : () =>
+              inspectDeviceIdentityAtKoedHome({
+                koedHome: config.koedHome,
+                environment: process.env
+              }).remoteOperationsAllowed),
       fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
       resolveUpstreamAuthorization:
         options.resolveUpstreamAuthorization ??

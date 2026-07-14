@@ -28,6 +28,13 @@ export interface KoedServerStatus {
   captureHook: KoedServerComponentStatus;
   codex: KoedServerComponentStatus & { configured: boolean };
   lcmSummaryService: KoedServerComponentStatus;
+  deviceIdentity: KoedServerComponentStatus & {
+    health: string;
+    deploymentId: string | null;
+    deviceInstanceId: string | null;
+    remoteOperationsAllowed: boolean;
+    platformProtection: "verified" | "limited";
+  };
   upstreamBackends: KoedServerComponentStatus & {
     registered: number;
     validated: number;
