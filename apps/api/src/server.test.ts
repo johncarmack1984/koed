@@ -557,6 +557,7 @@ type GraphThreadIndexResponse = {
       id: string;
       name: string;
       sessionId: string | null;
+      sourceAiClient: "codex" | "codex-cli" | null;
       projectId: string;
       projectName: string;
       projectPath: string | null;
@@ -3793,6 +3794,7 @@ const createFakeRepository = () => {
             id: string;
             name: string;
             sessionId: string | null;
+            sourceAiClient: "codex" | "codex-cli" | null;
             projectId: string;
             projectName: string;
             projectPath: string | null;
@@ -3814,6 +3816,7 @@ const createFakeRepository = () => {
           id: string;
           name: string;
           sessionId: string | null;
+          sourceAiClient: "codex" | "codex-cli" | null;
           projectId: string;
           projectName: string;
           projectPath: string | null;
@@ -3862,6 +3865,8 @@ const createFakeRepository = () => {
               event.sessionId ??
               "Untitled conversation",
             sessionId: event.sessionId,
+            sourceAiClient:
+              session?.sourceRuntime ?? event.sourceRuntime ?? null,
             projectId,
             projectName,
             projectPath: event.projectPath,
@@ -3948,6 +3953,7 @@ const createFakeRepository = () => {
               session.externalSessionId ??
               "Untitled conversation",
             sessionId: session.id,
+            sourceAiClient: session.sourceRuntime,
             projectId,
             projectName,
             projectPath: session.project?.path ?? null,
@@ -11793,6 +11799,7 @@ describe("account and access flows", () => {
     });
     expect(indexA).not.toHaveProperty("rawContent");
     expect(indexA).not.toHaveProperty("contentPreview");
+    expect(indexA).toMatchObject({ sourceAiClient: "codex-cli" });
     expect(indexA).not.toHaveProperty("metadata");
     expect(
       jsonBody<GraphThreadIndexResponse>(limitedIndex).projects

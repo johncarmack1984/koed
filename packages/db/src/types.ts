@@ -19,6 +19,8 @@ export type CaptureMethod = "hook" | "mcp" | "web" | "api";
 
 export type SourceRuntime = "codex" | "codex-cli";
 
+export type SourceAiClient = SourceRuntime;
+
 export type CaptureState = "enabled" | "disabled" | "ask";
 
 export type CapturePolicyTarget = "global" | "project" | "thread";
@@ -747,6 +749,7 @@ export interface LcmGraphThread {
   id: string;
   name: string;
   sessionId: string | null;
+  sourceAiClient: SourceAiClient | null;
   projectId: string;
   projectName: string;
   projectPath: string | null;
