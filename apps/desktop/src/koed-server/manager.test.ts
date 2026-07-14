@@ -17,6 +17,16 @@ const childProcess = (): FakeChildProcess => {
   return child;
 };
 
+const waitFor = async (predicate: () => boolean): Promise<void> => {
+  const deadline = Date.now() + 1_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error("Condition was not met within 1000ms");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+};
+
 describe("Koed server desktop manager", () => {
   it("adds KOED_REPO_ROOT without overriding explicit values", () => {
     expect(createKoedEnvironment("/repo", {})).toMatchObject({
@@ -111,6 +121,136 @@ describe("Koed server desktop manager", () => {
         "--json"
       ]
     });
+  });
+
+  it("reconciles approved upstream enrollment between ordinary status refreshes", async () => {
+    const calls: string[][] = [];
+    let statusCalls = 0;
+    const manager = createKoedServerManager({
+      repoRoot: "/repo",
+      cliPath: "/repo/cli.js",
+      environment: {},
+      createCliInvocation: (args) => ({
+        command: "/node",
+        args: ["/repo/cli.js", ...args],
+        env: { KOED_REPO_ROOT: "/repo" }
+      }),
+      existsSync: () => true,
+      execFile: (_command, args, _options, callback) => {
+        calls.push(args);
+        if (args[1] === "status") {
+          statusCalls += 1;
+          callback(
+            null,
+            JSON.stringify({
+              ok: true,
+              state: "healthy",
+              upstreamBackends: {
+                details: {
+                  backends: [
+                    {
+                      id: "team-vps",
+                      credential: {
+                        status: statusCalls === 1 ? "unknown" : "configured"
+                      }
+                    }
+                  ]
+                }
+              }
+            }),
+            ""
+          );
+          return;
+        }
+        callback(null, JSON.stringify({ ok: true, state: "exchanged" }), "");
+      },
+      spawn: () => childProcess() as never,
+      openExternal: async () => undefined
+    });
+
+    await expect(manager.handlers.status!()).resolves.toMatchObject({
+      upstreamBackends: {
+        details: {
+          backends: [{ id: "team-vps", credential: { status: "unknown" } }]
+        }
+      }
+    });
+    await waitFor(() =>
+      calls.some((args) => args.includes("enroll") && args.includes("status"))
+    );
+    await expect(manager.handlers.status!()).resolves.toMatchObject({
+      upstreamBackends: {
+        details: {
+          backends: [{ id: "team-vps", credential: { status: "configured" } }]
+        }
+      }
+    });
+    expect(calls).toEqual([
+      ["/repo/cli.js", "status", "--json"],
+      [
+        "/repo/cli.js",
+        "upstream",
+        "enroll",
+        "status",
+        "--id",
+        "team-vps",
+        "--json"
+      ],
+      ["/repo/cli.js", "status", "--json"]
+    ]);
+  });
+
+  it("returns status while one slow enrollment reconciliation remains in flight", async () => {
+    const calls: string[][] = [];
+    let completeEnrollment: (() => void) | null = null;
+    const manager = createKoedServerManager({
+      repoRoot: "/repo",
+      cliPath: "/repo/cli.js",
+      environment: {},
+      createCliInvocation: (args) => ({
+        command: "/node",
+        args: ["/repo/cli.js", ...args],
+        env: { KOED_REPO_ROOT: "/repo" }
+      }),
+      existsSync: () => true,
+      execFile: (_command, args, _options, callback) => {
+        calls.push(args);
+        if (args[1] === "status") {
+          callback(
+            null,
+            JSON.stringify({
+              ok: true,
+              state: "healthy",
+              upstreamBackends: {
+                details: {
+                  backends: [
+                    { id: "team-vps", credential: { status: "unknown" } }
+                  ]
+                }
+              }
+            }),
+            ""
+          );
+          return;
+        }
+        completeEnrollment = () =>
+          callback(null, JSON.stringify({ ok: true, state: "pending" }), "");
+      },
+      spawn: () => childProcess() as never,
+      openExternal: async () => undefined
+    });
+
+    await expect(manager.handlers.status!()).resolves.toMatchObject({
+      state: "healthy"
+    });
+    await waitFor(() => completeEnrollment !== null);
+    await expect(manager.handlers.status!()).resolves.toMatchObject({
+      state: "healthy"
+    });
+    expect(
+      calls.filter((args) => args.includes("enroll") && args.includes("status"))
+    ).toHaveLength(1);
+    completeEnrollment!();
   });
 
   it("runs explicit runtime install through koed-server", async () => {
@@ -541,6 +681,56 @@ describe("Koed server desktop manager", () => {
     expect(opened).toEqual([
       "https://team.example.test/device-enrollment/challenge-1"
     ]);
+  });
+
+  it("returns the activation URL without waiting for the system browser", async () => {
+    const manager = createKoedServerManager({
+      repoRoot: "/repo",
+      cliPath: "/repo/cli.js",
+      environment: {},
+      createCliInvocation: (args) => ({
+        command: "/node",
+        args: ["/repo/cli.js", ...args],
+        env: { KOED_REPO_ROOT: "/repo" }
+      }),
+      existsSync: () => true,
+      execFile: (_command, args, _options, callback) => {
+        if (args.includes("register")) {
+          callback(
+            null,
+            JSON.stringify({ ok: true, backend: { id: "team-vps" } }),
+            ""
+          );
+          return;
+        }
+        if (args.includes("start")) {
+          callback(
+            null,
+            JSON.stringify({
+              ok: true,
+              state: "pending",
+              enrollment: {
+                activationUrl:
+                  "https://team.example.test/device-enrollment/challenge-1"
+              }
+            }),
+            ""
+          );
+          return;
+        }
+        callback(null, JSON.stringify({ ok: true }), "");
+      },
+      spawn: () => childProcess() as never,
+      openExternal: () => new Promise(() => undefined)
+    });
+
+    await expect(
+      manager.handlers.upstream_connect!({ url: "https://team.example.test" })
+    ).resolves.toMatchObject({
+      ok: true,
+      browserOpenRequested: true,
+      activationUrl: "https://team.example.test/device-enrollment/challenge-1"
+    });
   });
 
   it("does not report a revoked enrollment as a new browser challenge", async () => {

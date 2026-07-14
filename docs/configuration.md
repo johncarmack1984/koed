@@ -145,13 +145,19 @@ metadata. `upstream enroll start` creates a short-lived browser approval
 challenge on the upstream backend and prints the activation URL. After the user
 approves the challenge in a browser session, `upstream enroll status` validates
 the scoped device credential with the upstream backend and marks the local
-backend credential configured. API Tokens remain personal AI-client
+backend credential configured. Koed Desktop performs that reconciliation
+automatically during its normal bounded status refresh cycle. The CLI command
+remains available for headless operation and diagnostics. Desktop also displays
+the activation URL so Linux/WSL Users can open it manually if host-browser
+integration is delayed or unavailable. API Tokens remain personal AI-client
 compatibility credentials. Team Workspace recall through MCP uses a distinct
 Local-Edge Client Credential scoped to the selected backend and
 `team_workspace_read`. The local edge validates that credential, then uses the
 separate enrolled upstream device credential without exposing it to MCP. A
 Personal API Token alone is rejected from Team, Share Grant, sync, and admin
-operation families.
+operation families. Enrollment status, replacement, cancellation, and disconnect
+mutations are serialized per backend across CLI processes; remote requests run
+before lock acquisition, and each mutation rereads current state while locked.
 
 ## KOED_HOME Layout
 

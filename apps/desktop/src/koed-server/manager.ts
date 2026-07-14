@@ -497,6 +497,29 @@ const resultState = (value: unknown): string | null =>
     ? (value as { state: string }).state
     : null;
 
+const pendingEnrollmentBackendIds = (value: unknown): string[] => {
+  if (!value || typeof value !== "object") return [];
+  const upstreamBackends = (value as { upstreamBackends?: unknown })
+    .upstreamBackends;
+  if (!upstreamBackends || typeof upstreamBackends !== "object") return [];
+  const details = (upstreamBackends as { details?: unknown }).details;
+  if (!details || typeof details !== "object") return [];
+  const backends = (details as { backends?: unknown }).backends;
+  if (!Array.isArray(backends)) return [];
+  return backends.flatMap((backend) => {
+    if (!backend || typeof backend !== "object") return [];
+    const id = (backend as { id?: unknown }).id;
+    const credential = (backend as { credential?: unknown }).credential;
+    const credentialStatus =
+      credential && typeof credential === "object"
+        ? (credential as { status?: unknown }).status
+        : null;
+    return typeof id === "string" && id.trim() && credentialStatus === "unknown"
+      ? [id.trim()]
+      : [];
+  });
+};
+
 const bundledLocalDatabaseUrl = (environment: NodeJS.ProcessEnv): string => {
   const ports = readDesktopPorts(environment);
   const user = environment.POSTGRES_USER ?? "koed";
@@ -572,6 +595,7 @@ export const createKoedServerManager = ({
   openPath
 }: KoedServerManagerOptions): KoedServerManager => {
   let serverProcess: ChildProcess | null = null;
+  let enrollmentReconciliation: Promise<void> | null = null;
   const startOutputLines: string[] = [];
   void environment;
 
@@ -720,6 +744,35 @@ export const createKoedServerManager = ({
         resolveServerPackageInstallPlan(environment)
       )
     };
+  };
+
+  const scheduleEnrollmentReconciliation = (current: unknown): void => {
+    const backendIds = pendingEnrollmentBackendIds(current);
+    if (backendIds.length === 0 || enrollmentReconciliation) {
+      return;
+    }
+    const reconciliation = (async () => {
+      for (const backendId of backendIds) {
+        await runJson(
+          ["upstream", "enroll", "status", "--id", backendId],
+          15_000
+        );
+      }
+    })();
+    enrollmentReconciliation = reconciliation;
+    void reconciliation
+      .catch(() => undefined)
+      .finally(() => {
+        if (enrollmentReconciliation === reconciliation) {
+          enrollmentReconciliation = null;
+        }
+      });
+  };
+
+  const statusWithEnrollmentReconciliation = async (): Promise<unknown> => {
+    const current = await runJson(["status"], 10_000);
+    scheduleEnrollmentReconciliation(current);
+    return withPackageComponent(current);
   };
 
   const pollUntilReady = async () => {
@@ -941,11 +994,16 @@ export const createKoedServerManager = ({
           "Team Backend enrollment did not return a new pending browser approval challenge."
       };
     }
-    await openExternal(activationUrl);
+    try {
+      void openExternal(activationUrl).catch(() => undefined);
+    } catch {
+      // The approval URL remains available when the platform cannot launch it.
+    }
     return {
       ok: true,
       backendId,
       activationUrl,
+      browserOpenRequested: true,
       register: registerResult,
       refresh: refreshResult,
       policy: policyResult,
@@ -1000,7 +1058,7 @@ export const createKoedServerManager = ({
     handlers: {
       status: async () =>
         withDesktopStartLog(
-          await withPackageComponent(await runJson(["status"])),
+          await statusWithEnrollmentReconciliation(),
           startOutputLines
         ),
       doctor: () => runJson(["doctor"], 45_000),
