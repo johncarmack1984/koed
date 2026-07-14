@@ -19810,7 +19810,7 @@ describeDb("memory repository visibility", () => {
     );
   });
 
-  it("does not admit an oversized first atomic unit past hard caps", async () => {
+  it("enforces hard byte caps without changing row-bounded unit admission", async () => {
     const alice = await repo.createUser({
       email: `alice-oversized-first-${randomUUID()}@example.com`
     });
@@ -19859,9 +19859,9 @@ describeDb("memory repository visibility", () => {
       "select projection_status from conversation_items order by source_sequence"
     );
 
-    expect(projection.rawItemsProjected).toBe(0);
+    expect(projection.rawItemsProjected).toBe(1);
     expect(rowCappedStatuses.rows.map((row) => row.projection_status)).toEqual([
-      "pending",
+      "projected",
       "pending"
     ]);
 

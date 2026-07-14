@@ -66,6 +66,10 @@ export interface CapturedSessionRepository {
   ): Promise<CapturedSessionRecord | null>;
 }
 
+export interface CapturedSessionRepositoryOptions {
+  transactionClient?: pg.PoolClient;
+}
+
 type CapturedSessionRow = {
   id: string;
   owner_user_id: string | null;
@@ -306,12 +310,16 @@ const resolveWorkspaceForeignKey = async (
 };
 
 export const createCapturedSessionRepository = (
-  pool: pg.Pool
+  pool: pg.Pool,
+  options: CapturedSessionRepositoryOptions = {}
 ): CapturedSessionRepository => ({
   async createCapturedSession(actor, input) {
-    const client = await pool.connect();
+    const ownsTransaction = !options.transactionClient;
+    const client = options.transactionClient ?? (await pool.connect());
     try {
-      await client.query("begin");
+      if (ownsTransaction) {
+        await client.query("begin");
+      }
       if (input.externalSessionId) {
         await client.query(
           "select pg_advisory_xact_lock(hashtextextended($1, 0))",
@@ -368,15 +376,11 @@ export const createCapturedSessionRepository = (
                 else captured_project
               end,
               import_observed_at = coalesce(import_observed_at, $10),
-              captured_project_provenance = case
-                when $11::boolean then $12::jsonb
-                else captured_project_provenance
-              end,
-              automatic_project_id = case when $11::boolean then $13 else automatic_project_id end,
-              automatic_project_name = case when $11::boolean then $14 else automatic_project_name end,
-              automatic_project_path = case when $11::boolean then $15 else automatic_project_path end,
+              automatic_project_id = case when $11::boolean then $12 else automatic_project_id end,
+              automatic_project_name = case when $11::boolean then $13 else automatic_project_name end,
+              automatic_project_path = case when $11::boolean then $14 else automatic_project_path end,
               automatic_project_detected_at = case
-                when $11::boolean and $13::text is not null then now()
+                when $11::boolean and $12::text is not null then now()
                 when $11::boolean then null
                 else automatic_project_detected_at
               end
@@ -405,7 +409,6 @@ export const createCapturedSessionRepository = (
             input.capturedProject ?? {},
             input.importObservedAt ?? null,
             detectedProjectInputProvided,
-            capturedProjectProvenance,
             automaticProject?.id ?? null,
             automaticProject?.name ?? null,
             automaticProject?.path ?? null
@@ -413,7 +416,9 @@ export const createCapturedSessionRepository = (
         );
         const convergedRow = converged.rows[0];
         if (convergedRow) {
-          await client.query("commit");
+          if (ownsTransaction) {
+            await client.query("commit");
+          }
           return mapCapturedSession(convergedRow);
         }
       }
@@ -582,13 +587,19 @@ export const createCapturedSessionRepository = (
           { statusCode: 409 }
         );
       }
-      await client.query("commit");
+      if (ownsTransaction) {
+        await client.query("commit");
+      }
       return mapCapturedSession(row);
     } catch (error) {
-      await client.query("rollback").catch(() => undefined);
+      if (ownsTransaction) {
+        await client.query("rollback").catch(() => undefined);
+      }
       throw error;
     } finally {
-      client.release();
+      if (ownsTransaction) {
+        client.release();
+      }
     }
   },
 

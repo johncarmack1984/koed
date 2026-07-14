@@ -105,6 +105,11 @@ Hook capture and historical import also converge on the same active Personal
 Captured Session when owning User and source session ID match. Session creation
 is serialized for that owner/source pair, so import-first, Hook-first, and
 concurrent observations do not split later raw items across duplicate sessions.
+The same convergence and live-priority promotion apply to
+`sourceTransport=transcript`, providing the ingestion seam for the continuous
+append-only transcript tailer tracked in KOE-343. This PR does not start or
+operate that watcher; it supplies the shared identity, append-safe parser and
+checkpoint behavior, and canonical Projection path the watcher must reuse.
 
 The experimental Koed-managed conversation adapter uses
 `sourceAdapterVersion=codex-app-server-conversation-v1` and

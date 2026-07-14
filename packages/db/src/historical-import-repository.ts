@@ -500,13 +500,15 @@ const requireImportPolicy = async (
 };
 
 const createImportedSession = (
-  pool: pg.Pool,
+  client: pg.PoolClient,
   actor: ActorContext,
   source: HistoricalImportSourceRecord,
   capturedProject: Record<string, unknown>,
   observedAt: string
 ) =>
-  createCapturedSessionRepository(pool).createCapturedSession(actor, {
+  createCapturedSessionRepository(client as unknown as pg.Pool, {
+    transactionClient: client
+  }).createCapturedSession(actor, {
     externalSessionId: source.sourceSessionId,
     sourceRuntime: "codex",
     captureMethod: "api",
@@ -563,7 +565,7 @@ const createImportedConversationItems = async (
   const capturedProject = capturedProjectProvenance(source.detectedProject);
   const pool = client as unknown as pg.Pool;
   const session = await createImportedSession(
-    pool,
+    client,
     actor,
     source,
     capturedProject,

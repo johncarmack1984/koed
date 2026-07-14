@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   adaptCodexTranscriptV1,
@@ -5,7 +8,11 @@ import {
   legacyCodexTranscriptItemKey,
   type CodexTranscriptObservation
 } from "../src/codex-transcript-adapter.js";
-import { buildCodexTranscriptConversationItems } from "../src/codex-transcript-parser.js";
+import {
+  buildCodexTranscriptConversationItems,
+  parseTranscriptFileRecords,
+  type CodexTranscriptCheckpointState
+} from "../src/codex-transcript-parser.js";
 
 const record = {
   timestamp: "2026-07-01T12:00:00.000Z",
@@ -39,6 +46,53 @@ const observation: CodexTranscriptObservation = {
 };
 
 describe("codex-transcript-v1 adapter", () => {
+  it("exposes append-safe checkpoint reads for future transcript tailers", () => {
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "koed-transcript-parser-")
+    );
+    const transcriptPath = path.join(directory, "session.jsonl");
+    const first = `${JSON.stringify(record)}\n`;
+    const second = `${JSON.stringify({
+      ...record,
+      timestamp: "2026-07-01T12:00:01.000Z",
+      payload: { type: "agent_message", message: "Captured from append" }
+    })}\n`;
+    fs.writeFileSync(transcriptPath, first);
+    const initialSize = Buffer.byteLength(first);
+    fs.appendFileSync(transcriptPath, second);
+    const state: CodexTranscriptCheckpointState = {
+      seen: {},
+      rawSeen: {},
+      transcriptOffsets: {
+        [`watcher:${transcriptPath}`]: {
+          offset: initialSize,
+          lineCount: 1,
+          size: initialSize
+        }
+      }
+    };
+
+    try {
+      const result = parseTranscriptFileRecords({
+        transcriptPath,
+        state,
+        stateScope: "watcher"
+      });
+
+      expect(result.records).toHaveLength(1);
+      expect(JSON.stringify(result.records[0])).toContain(
+        "Captured from append"
+      );
+      expect(result.checkpoint).toMatchObject({
+        offset: Buffer.byteLength(first + second),
+        lineCount: 2,
+        size: Buffer.byteLength(first + second)
+      });
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("keeps canonical identity transport and path independent", () => {
     const common = {
       observations: [observation],
@@ -56,9 +110,16 @@ describe("codex-transcript-v1 adapter", () => {
       localSourcePath: "/Users/bob/moved/session.jsonl",
       sourceFingerprint: "a".repeat(64)
     })[0]!;
+    const watched = adaptCodexTranscriptV1({
+      ...common,
+      sourceTransport: "transcript",
+      localSourcePath: "/Users/alice/.codex/session.jsonl"
+    })[0]!;
 
     expect(imported.idempotencyKey).toBe(hook.idempotencyKey);
+    expect(watched.idempotencyKey).toBe(hook.idempotencyKey);
     expect(imported.sourceHash).toBe(hook.sourceHash);
+    expect(watched.sourceHash).toBe(hook.sourceHash);
     expect(imported.sourceHash).toHaveLength(64);
     expect(imported.metadata).toMatchObject({
       transcriptItemDiscriminator: "primary:codex_transcript_user"
@@ -66,6 +127,7 @@ describe("codex-transcript-v1 adapter", () => {
     expect(codexTranscriptRecordHash(record)).toHaveLength(64);
     expect(imported.sourcePath).toBeUndefined();
     expect(hook.sourcePath).toBe("/Users/alice/.codex/session.jsonl");
+    expect(watched.sourcePath).toBe("/Users/alice/.codex/session.jsonl");
     expect(imported.metadata).toMatchObject({
       transcriptByteOffset: 512,
       transcriptItemDiscriminator: "primary:codex_transcript_user",

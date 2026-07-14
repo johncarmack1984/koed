@@ -17,7 +17,7 @@ const fingerprint = (value: string) => value.padEnd(64, "0").slice(0, 64);
 
 const transcriptItem = (input: {
   sessionId: string;
-  transport: "hook" | "historical_import";
+  transport: "hook" | "transcript" | "historical_import";
   path?: string;
 }): ConversationItemInput => ({
   sessionId: input.sessionId,
@@ -221,8 +221,19 @@ describeDb("durable historical import repository", () => {
         { userId: owner.id },
         importFirst ? hookInput : importedInput
       );
+      const watched = await repo.createCapturedSession(
+        { userId: owner.id },
+        {
+          externalSessionId,
+          captureMethod: "api",
+          idempotencyKey: `watcher-${randomUUID()}`,
+          codexTranscriptPath: `/private/${externalSessionId}.jsonl`,
+          metadata: { sourceTransport: "transcript" }
+        }
+      );
 
       expect(second.id).toBe(first.id);
+      expect(watched.id).toBe(first.id);
       expect(second.importObservedAt).toBe("2026-07-02T00:00:00.000Z");
       const stored = await pool.query<{
         codex_transcript_path: string | null;
@@ -243,7 +254,7 @@ describeDb("durable historical import repository", () => {
     const session = await repo.createCapturedSession(
       { userId: owner.id },
       {
-        externalSessionId: `legacy-identity-${randomUUID()}`,
+        externalSessionId: "codex-source-session",
         idempotencyKey: `session-${randomUUID()}`
       }
     );
@@ -284,7 +295,7 @@ describeDb("durable historical import repository", () => {
     const session = await repo.createCapturedSession(
       { userId: owner.id },
       {
-        externalSessionId: `inactive-backlog-${randomUUID()}`,
+        externalSessionId: "codex-source-session",
         idempotencyKey: `session-${randomUUID()}`
       }
     );
@@ -535,6 +546,28 @@ describeDb("durable historical import repository", () => {
         ]
       }
     );
+    const watched = await repo.createConversationItems(
+      { userId: owner.id },
+      {
+        items: [
+          transcriptItem({
+            sessionId: session.id,
+            transport: "transcript",
+            path: "/watched/local/path.jsonl"
+          })
+        ]
+      }
+    );
+    expect(watched[0]?.id).toBe(imported[0]?.id);
+    const watcherPromoted = await pool.query<{
+      projection_work_class: string;
+    }>("select projection_work_class from conversation_items where id = $1", [
+      imported[0]?.id
+    ]);
+    expect(watcherPromoted.rows[0]?.projection_work_class).toBe(
+      "live_capture_projection"
+    );
+
     const live = await repo.createConversationItems(
       { userId: owner.id },
       {
@@ -570,6 +603,19 @@ describeDb("durable historical import repository", () => {
       }
     );
     expect(otherItem[0]?.id).not.toBe(imported[0]?.id);
+
+    const observations = await pool.query<{ source_transport: string }>(
+      `select source_transport
+       from conversation_item_observations
+       where owner_user_id = $1 and conversation_item_id = $2
+       order by source_transport`,
+      [owner.id, imported[0]?.id]
+    );
+    expect(observations.rows.map((row) => row.source_transport)).toEqual([
+      "historical_import",
+      "hook",
+      "transcript"
+    ]);
 
     const raw = await pool.query<{
       count: string;
