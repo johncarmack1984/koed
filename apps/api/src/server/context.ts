@@ -1,6 +1,9 @@
 import type { Visibility } from "@koed/core";
 import type { MemorySourceRepository } from "@koed/db";
-import type { EnvelopeEncryptionProvider } from "@koed/shared";
+import type {
+  DeviceIdentityInspection,
+  EnvelopeEncryptionProvider
+} from "@koed/shared";
 import type { AuthHelpers } from "../auth/session.js";
 import type { CacheProvider } from "../infra/cache.js";
 import type { RateLimitHandler, RateLimitName } from "../infra/rate-limit.js";
@@ -55,6 +58,9 @@ export interface ApiRouteContext {
       input: { workspaceId?: string; sessionId?: string; threadId?: string }
     ): Promise<CapturePolicy>;
     rejectUnsupportedCapturePolicy(policy: { visibility: Visibility }): void;
+  };
+  deploymentIdentity: {
+    inspect(): DeviceIdentityInspection;
   };
   localEdge: {
     upstreamBackendsPath: string;

@@ -657,6 +657,9 @@ const inspectDeviceIdentity = async (
     deploymentId: identity.deploymentId,
     deviceInstanceId: identity.deviceInstanceId,
     remoteOperationsAllowed: identity.remoteOperationsAllowed,
+    ...(identity.pendingRemoteRevocation
+      ? { pendingRemoteRevocation: true as const }
+      : {}),
     platformProtection: identity.platformProtection
   };
 };
