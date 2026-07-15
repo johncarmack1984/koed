@@ -704,9 +704,18 @@ export const registerOperationalRoutes = (
           options.envelopeEncryptionProvider
         ),
         crossIdentitySync: await crossIdentitySyncCapability(),
-        personalDeviceSync: context.personalDeviceSync.authoritySigner
-          ? "available"
-          : "unavailable"
+        personalDeviceSync:
+          context.personalDeviceSync.authoritySigner &&
+          (() => {
+            try {
+              context.requireRepository();
+              return true;
+            } catch {
+              return false;
+            }
+          })()
+            ? "available"
+            : "unavailable"
       },
       "public"
     )
@@ -753,9 +762,18 @@ export const registerOperationalRoutes = (
           options.envelopeEncryptionProvider
         ),
         crossIdentitySync: await crossIdentitySyncCapability(),
-        personalDeviceSync: context.personalDeviceSync.authoritySigner
-          ? "available"
-          : "unavailable"
+        personalDeviceSync:
+          context.personalDeviceSync.authoritySigner &&
+          (() => {
+            try {
+              context.requireRepository();
+              return true;
+            } catch {
+              return false;
+            }
+          })()
+            ? "available"
+            : "unavailable"
       },
       "authenticated",
       entitlement,
