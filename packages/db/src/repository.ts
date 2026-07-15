@@ -39,6 +39,7 @@ import { createMemoryNodeRepository } from "./memory-node-repository.js";
 import { createMemoryQuestionRepository } from "./memory-question-repository.js";
 import { createPersonalDeviceSyncRepository } from "./personal-device-sync-repository.js";
 import { createPersonalDeviceSyncLocalRepository } from "./personal-device-sync-local-repository.js";
+import { createPersonalDeviceSyncLifecycleRepository } from "./personal-device-sync-lifecycle-repository.js";
 import { createPersonalDeviceSyncRelayRepository } from "./personal-device-sync-relay-repository.js";
 import { createSettingsRepository } from "./settings-repository.js";
 import { createTeamAccessRepository } from "./team-access-repository.js";
@@ -3872,6 +3873,7 @@ export const createMemorySourceRepository = (
     }),
     ...createPersonalDeviceSyncRepository(pool),
     ...createPersonalDeviceSyncLocalRepository(pool),
+    ...createPersonalDeviceSyncLifecycleRepository(pool),
     ...createPersonalDeviceSyncRelayRepository(pool),
     ...curatedMemoryRepository,
     ...encryptedPayloadRepository,
