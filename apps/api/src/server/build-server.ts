@@ -58,8 +58,7 @@ import {
   type EnvelopeEncryptionProvider,
   lcmCompactQueueName,
   memoryEmbedQueueName,
-  resolveSupportedEmbeddingModelConfig,
-  pdsEd25519PrivateKey
+  resolveSupportedEmbeddingModelConfig
 } from "@koed/shared";
 import { registerTeamRoutes } from "../team/index.js";
 import { registerCrossIdentitySyncRoutes } from "../cross-identity-sync/index.js";
@@ -70,6 +69,7 @@ import {
   type PdsRemoteAccountLinkVerifier
 } from "../personal-device-sync/index.js";
 import type { PdsSecureKeyProvider } from "../personal-device-sync/local-source.js";
+import { createPdsSecureRuntimeFromEnvironment } from "../personal-device-sync/secure-runtime.js";
 import { resolveApiServerConfig } from "./config.js";
 import {
   apiLogSchemaVersion,
@@ -155,26 +155,6 @@ const normalizeUpstreamAuthorization = (
   return `Koed-Device ${trimmed}`;
 };
 
-const resolvePdsAuthoritySigner = (
-  config: ReturnType<typeof resolveApiServerConfig>
-): PdsAuthoritySigner | null => {
-  const authority = config.personalDeviceSyncAuthority;
-  if (!authority.keyId || !authority.publicKey || !authority.secretSeed)
-    return null;
-  try {
-    return {
-      keyId: authority.keyId,
-      publicKey: authority.publicKey,
-      privateKey: pdsEd25519PrivateKey(
-        authority.secretSeed,
-        authority.publicKey
-      )
-    };
-  } catch {
-    return null;
-  }
-};
-
 const createDefaultResolveUpstreamAuthorization =
   (
     koedHome: string
@@ -200,6 +180,8 @@ const createDefaultResolveUpstreamAuthorization =
 
 export const buildServer = async (options: BuildServerOptions = {}) => {
   const config = resolveApiServerConfig();
+  // Only configured secret references can enable PDS. No raw environment-key fallback.
+  const pdsRuntime = await createPdsSecureRuntimeFromEnvironment();
 
   if (config.test) {
     resetMemoryRateLimitStore();
@@ -492,10 +474,10 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
         createWorkosAuthKitClient(config.workos, options.fetch)
     },
     personalDeviceSync: {
-      authoritySigner:
-        options.pdsAuthoritySigner ?? resolvePdsAuthoritySigner(config),
+      authoritySigner: options.pdsAuthoritySigner ?? pdsRuntime.authoritySigner,
       remoteAccountLinkVerifier: options.pdsRemoteAccountLinkVerifier ?? null,
-      secureKeyProvider: options.pdsSecureKeyProvider ?? null
+      secureKeyProvider:
+        options.pdsSecureKeyProvider ?? pdsRuntime.secureKeyProvider
     }
   };
   graphStreamService = await createGraphStreamService({

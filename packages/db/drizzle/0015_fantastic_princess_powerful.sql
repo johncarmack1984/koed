@@ -1,4 +1,5 @@
 ALTER TABLE "personal_sync_policies" ADD COLUMN "enabled_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "personal_sync_policies" ADD COLUMN "publication_paused" boolean DEFAULT false NOT NULL;--> statement-breakpoint
 UPDATE "personal_sync_policies" SET "enabled_at" = "updated_at" WHERE "enabled" = true;--> statement-breakpoint
 CREATE TABLE "pds_conflicts" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
@@ -207,6 +208,15 @@ ALTER TABLE "pds_worker_heartbeats" ADD CONSTRAINT "pds_worker_heartbeats_group_
 CREATE INDEX "pds_inbox_claim_idx" ON "pds_inbox_entries" USING btree ("state","retry_at");--> statement-breakpoint
 CREATE INDEX "pds_logical_replica_recall_idx" ON "pds_logical_replicas" USING btree ("owner_user_id","materialization_state");--> statement-breakpoint
 CREATE INDEX "pds_outbox_claim_idx" ON "pds_outbox_entries" USING btree ("state","retry_at");--> statement-breakpoint
+CREATE OR REPLACE FUNCTION pds_session_recall_ready(session_uuid uuid) RETURNS boolean AS $$
+  SELECT session_uuid IS NULL OR NOT EXISTS (
+    SELECT 1 FROM pds_source_item_mappings m
+    JOIN pds_logical_replicas r ON r.id=m.replica_id
+    WHERE m.conversation_item_id IN (
+      SELECT ci.id FROM conversation_items ci WHERE ci.session_id=session_uuid
+    ) AND r.materialization_state <> 'ready'
+  );
+$$ LANGUAGE sql STABLE;--> statement-breakpoint
 CREATE OR REPLACE FUNCTION pds_set_policy_enabled_at() RETURNS trigger AS $$
 BEGIN
   IF NEW.enabled AND NOT OLD.enabled THEN NEW.enabled_at = now(); END IF;
@@ -240,6 +250,9 @@ BEGIN
     END IF;
   END IF;
   IF TG_OP = 'INSERT' THEN
+    -- Close path holds same lock while snapshotting. Insert either wins before
+    -- snapshot or waits and is rejected after immutable closure commits.
+    PERFORM pg_advisory_xact_lock(hashtext('pds-session:' || NEW.session_id::text));
     IF EXISTS (SELECT 1 FROM pds_session_closures c WHERE c.source_session_id = NEW.session_id AND c.state = 'ready') THEN
       RAISE EXCEPTION 'PDS closed source Session cannot accept later items';
     END IF;

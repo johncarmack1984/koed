@@ -3594,7 +3594,7 @@ const invalidateSemanticMemoryForDisplayEvent = async (
         where mes.conversation_item_id = any($1::uuid[])
           and me.visibility = 'personal'
           and me.owner_user_id = $2
-          and me.invalidated_at is null and me.personal_deleted_at is null
+          and me.invalidated_at is null and pds_session_recall_ready(me.session_id) and me.personal_deleted_at is null
       )
       update memory_events me
       set
@@ -4463,14 +4463,7 @@ export const createMemorySourceRepository = (
               )
             )
             and ci.owner_user_id = $1
-            and not exists (
-              select 1
-              from pds_source_item_mappings pds_source
-              join pds_logical_replicas pds_replica
-                on pds_replica.id = pds_source.replica_id
-              where pds_source.conversation_item_id = ci.id
-                and pds_replica.materialization_state <> 'ready'
-            )
+            and pds_session_recall_ready(ci.session_id)
         ),
         selected_boundaries as (
           select
@@ -5863,6 +5856,7 @@ export const createMemorySourceRepository = (
               and me.owner_user_id is not null
               and ($2::uuid is null or me.owner_user_id = $2)
               and me.invalidated_at is null
+            and pds_session_recall_ready(me.session_id)
               and me.personal_deleted_at is null
               and me.include_in_lcm = true
               and not exists (
@@ -7825,7 +7819,7 @@ export const createMemorySourceRepository = (
             end as text,
             me.captured_at as created_at
           from memory_events me
-          where me.invalidated_at is null and me.personal_deleted_at is null
+          where me.invalidated_at is null and pds_session_recall_ready(me.session_id) and me.personal_deleted_at is null
         )
         select source_type, source_id, owner_user_id, visibility, source_hash, text
         from sources s
@@ -8026,7 +8020,7 @@ export const createMemorySourceRepository = (
               )
             end as text
           from memory_events me
-          where me.invalidated_at is null and me.personal_deleted_at is null
+          where me.invalidated_at is null and pds_session_recall_ready(me.session_id) and me.personal_deleted_at is null
         )
         select source_type, source_id, owner_user_id, visibility, source_hash, text
         from sources
@@ -9784,6 +9778,7 @@ export const createMemorySourceRepository = (
             from memory_events me
             left join sessions me_session on me_session.id = me.session_id
             where me.invalidated_at is null
+            and pds_session_recall_ready(me.session_id)
               and me.visibility = 'personal'
               and sync_session_recall_ready(me.session_id)
               and (
@@ -11235,7 +11230,7 @@ export const createMemorySourceRepository = (
             me.payload,
             me.captured_at
           from memory_events me
-          where me.invalidated_at is null and me.personal_deleted_at is null
+          where me.invalidated_at is null and pds_session_recall_ready(me.session_id) and me.personal_deleted_at is null
             and me.visibility = $1
             and me.owner_user_id = $2
             and me.include_in_lcm = true
@@ -11848,6 +11843,7 @@ export const createMemorySourceRepository = (
         left join sessions source_session on source_session.id = me.session_id
         where mns.memory_node_id = $1
           and me.invalidated_at is null
+            and pds_session_recall_ready(me.session_id)
           and me.visibility = 'personal'
           and (
             ($8::uuid is null and me.owner_user_id = $2 and me.personal_deleted_at is null)
