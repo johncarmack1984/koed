@@ -1138,6 +1138,27 @@ export const routeIdentityContracts = [
   ),
   route(
     "GET",
+    "/v1/personal-device-sync/relay/certificate",
+    "pds_relay_proof",
+    "personal_memory",
+    "Device-signed current-head membership certificate refresh; active prior-head certificate allowed only here."
+  ),
+  route(
+    "GET",
+    "/v1/personal-device-sync/relay/lifecycle",
+    "pds_relay_proof",
+    "personal_memory",
+    "Device-signed paginated Authority-proven lifecycle controls and opaque deletion floors."
+  ),
+  route(
+    "POST",
+    "/v1/personal-device-sync/relay/tombstone-acks",
+    "pds_relay_proof",
+    "personal_memory",
+    "Device-signed tombstone acknowledgement after durable lifecycle application."
+  ),
+  route(
+    "GET",
     "/v1/personal-device-sync/relay/cursors",
     "pds_relay_proof",
     "personal_memory",
@@ -1173,6 +1194,20 @@ export const routeIdentityContracts = [
   ),
   route(
     "POST",
+    "/v1/personal-device-sync/groups/{groupId}/tombstones",
+    "session",
+    "personal_memory",
+    "Submit authenticated Personal Device Group tombstone governance record."
+  ),
+  route(
+    "POST",
+    "/v1/personal-device-sync/groups/{groupId}/conflict-resolutions",
+    "session",
+    "personal_memory",
+    "Submit authenticated Personal Device Group conflict-resolution governance record."
+  ),
+  route(
+    "POST",
     "/v1/personal-device-sync/groups/{groupId}/epoch-acks",
     "session",
     "personal_memory",
@@ -1191,6 +1226,13 @@ export const routeIdentityContracts = [
     "session",
     "personal_memory",
     "Retrieve scoped pending or active Personal Device Group key bundle."
+  ),
+  route(
+    "POST",
+    "/v1/personal-device-sync/groups/{groupId}/certificates/refresh",
+    "session",
+    "personal_memory",
+    "Reissue current-epoch Authority-signed certificates bound to current group head."
   ),
   route(
     "GET",
