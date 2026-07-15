@@ -417,7 +417,10 @@ These values are copied into the AI Client configuration and are not consumed au
   template placeholders fail loudly. Prompt overrides can adjust wording and
   add optional content, but code still owns required placeholders, JSON schemas,
   parser validation, source serialization, authorization, redaction, and
-  retrieval boundaries. MCP builds carry the bundled defaults inside the
+  retrieval boundaries. Output following the previous bundled
+  `lcm-structured-summary-v1` contract is accepted at the LCM worker boundary
+  and immediately normalized to the current minimal semantic-summary contract;
+  unknown output contracts still fail validation. MCP builds carry the bundled defaults inside the
   deployed runtime. `pnpm codex:bootstrap` resolves relative override paths
   against the Koed checkout and writes an absolute directory into the persistent
   MCP environment, so opening Codex from a different Project does not change
@@ -486,6 +489,10 @@ Configure Codex to run the Supported Capture Hook for `SessionStart`, `UserPromp
 Koed relies on the connected AI Client for Synthesis; backend LLM provider configuration and server-side synthesis are unsupported in this build.
 The MCP-local memory processing service is enabled by default in this build. It generates captured-session titles and LCM summaries through local Codex app-server mode. Failures are reported as diagnostics and pending summaries remain searchable as degraded evidence.
 MCP Memory Answer and LCM Summary model, reasoning, timeout, and attempt settings can be edited in the Explorer Settings panel. The API stores those user settings and the local MCP/bridge reads them at execution time. `.env` values are bootstrap defaults only; precedence is API user setting, then `.env`, then code default.
+
+LCM summary prompt-version changes are forward-only. Existing completed
+summaries are not automatically regenerated; new prompts apply to new or
+naturally invalidated LCM nodes.
 
 Manual Memory Question settings selected in the Explorer composer are stored on the question row so retry and background catch-up use the same model, reasoning effort, timeout, and attempts. If Codex app-server cannot be started, local Synthesis fails visibly instead of falling back to a backend LLM path.
 
