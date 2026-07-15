@@ -69,6 +69,7 @@ import {
   type PdsAuthoritySigner,
   type PdsRemoteAccountLinkVerifier
 } from "../personal-device-sync/index.js";
+import type { PdsSecureKeyProvider } from "../personal-device-sync/local-source.js";
 import { resolveApiServerConfig } from "./config.js";
 import {
   apiLogSchemaVersion,
@@ -106,6 +107,8 @@ interface BuildServerOptions {
   pdsAuthoritySigner?: PdsAuthoritySigner | null;
   /** Test/deployment injection; absent verifier fails Remote Account Link closed. */
   pdsRemoteAccountLinkVerifier?: PdsRemoteAccountLinkVerifier | null;
+  /** Secure PDS key/group-secret provider. Never populated from environment config. */
+  pdsSecureKeyProvider?: PdsSecureKeyProvider | null;
 }
 
 const normalizeOrigin = (value: string): string => value.replace(/\/+$/, "");
@@ -491,7 +494,8 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     personalDeviceSync: {
       authoritySigner:
         options.pdsAuthoritySigner ?? resolvePdsAuthoritySigner(config),
-      remoteAccountLinkVerifier: options.pdsRemoteAccountLinkVerifier ?? null
+      remoteAccountLinkVerifier: options.pdsRemoteAccountLinkVerifier ?? null,
+      secureKeyProvider: options.pdsSecureKeyProvider ?? null
     }
   };
   graphStreamService = await createGraphStreamService({

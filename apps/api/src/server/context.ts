@@ -14,6 +14,7 @@ import type {
   PdsAuthoritySigner,
   PdsRemoteAccountLinkVerifier
 } from "../personal-device-sync/index.js";
+import type { PdsSecureKeyProvider } from "../personal-device-sync/local-source.js";
 
 export type CapturePolicy = Awaited<
   ReturnType<MemorySourceRepository["getEffectiveCapturePolicy"]>
@@ -82,5 +83,7 @@ export interface ApiRouteContext {
     /** Missing or malformed signer keeps all PDS governance routes unavailable. */
     authoritySigner: PdsAuthoritySigner | null;
     remoteAccountLinkVerifier: PdsRemoteAccountLinkVerifier | null;
+    /** Optional secure runtime integration. Absence disables PDS publication only. */
+    secureKeyProvider: PdsSecureKeyProvider | null;
   };
 }

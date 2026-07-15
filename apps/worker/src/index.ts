@@ -29,6 +29,10 @@ import {
 import { createWorkerLogger } from "./logging.js";
 import { createRawProjectionService } from "./raw-projection-service.js";
 import { createCrossIdentitySyncService } from "./cross-identity-sync-service.js";
+import {
+  createPdsLocalSyncService,
+  getInstalledPdsWorkerSecureRuntime
+} from "./personal-device-sync-service.js";
 
 loadWorkerEnv();
 
@@ -177,6 +181,20 @@ const crossIdentitySyncService =
     : null;
 crossIdentitySyncService?.start();
 
+// Runtime only starts after bootstrap injected complete secure key/relay path.
+// Missing provider leaves local capture and Recall untouched.
+const pdsSecureRuntime = getInstalledPdsWorkerSecureRuntime();
+const pdsLocalSyncService =
+  repository && envelopeEncryptionProvider && pdsSecureRuntime
+    ? createPdsLocalSyncService({
+        repository,
+        secureRuntime: pdsSecureRuntime,
+        intervalMs: workerEnv.pdsLocalSyncIntervalMs,
+        logger
+      })
+    : null;
+pdsLocalSyncService?.start();
+
 const shutdown = async () => {
   logger.info(
     {
@@ -189,6 +207,7 @@ const shutdown = async () => {
   );
   rawProjectionService?.stop();
   crossIdentitySyncService?.stop();
+  pdsLocalSyncService?.stop();
   await Promise.all([
     queueRuntime.close(),
     memoryEmbedQueue.close(),
