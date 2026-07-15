@@ -96,4 +96,13 @@ ALTER TABLE "pds_replica_lifecycle_state" ADD CONSTRAINT "pds_replica_lifecycle_
 ALTER TABLE "pds_restore_reconciliations" ADD CONSTRAINT "pds_restore_reconciliations_group_id_personal_device_groups_id_fk" FOREIGN KEY ("group_id") REFERENCES "public"."personal_device_groups"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "pds_conflict_resolution_records" ADD CONSTRAINT "pds_conflict_resolution_records_group_id_personal_device_groups_id_fk" FOREIGN KEY ("group_id") REFERENCES "public"."personal_device_groups"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "pds_tombstone_ledger_retention_idx" ON "pds_tombstone_ledger" USING btree ("retain_until");--> statement-breakpoint
-CREATE INDEX "pds_restore_reconciliation_group_created_idx" ON "pds_restore_reconciliations" USING btree ("group_id","created_at");
+CREATE INDEX "pds_restore_reconciliation_group_created_idx" ON "pds_restore_reconciliations" USING btree ("group_id","created_at");--> statement-breakpoint
+ALTER TABLE "pds_tombstone_ledger" DROP CONSTRAINT "pds_tombstone_ledger_sequence_check";--> statement-breakpoint
+ALTER TABLE "pds_conflict_resolution_records" ADD COLUMN "statement_sequence" text NOT NULL;--> statement-breakpoint
+ALTER TABLE "pds_retained_packages" ADD COLUMN "source_fingerprint" text;--> statement-breakpoint
+ALTER TABLE "pds_retained_packages" ADD COLUMN "source_closure_hash" text;--> statement-breakpoint
+ALTER TABLE "pds_tombstone_ledger" ADD COLUMN "canonical_record" text NOT NULL;--> statement-breakpoint
+ALTER TABLE "pds_tombstone_ledger" ADD COLUMN "statement_sequence" text NOT NULL;--> statement-breakpoint
+CREATE INDEX "pds_conflict_resolution_control_idx" ON "pds_conflict_resolution_records" USING btree ("group_id","statement_sequence");--> statement-breakpoint
+CREATE INDEX "pds_tombstone_ledger_control_idx" ON "pds_tombstone_ledger" USING btree ("group_id","statement_sequence");--> statement-breakpoint
+ALTER TABLE "pds_tombstone_ledger" ADD CONSTRAINT "pds_tombstone_ledger_sequence_check" CHECK ("pds_tombstone_ledger"."tombstone_sequence" ~ '^(0|[1-9][0-9]*)$' and "pds_tombstone_ledger"."statement_sequence" ~ '^(0|[1-9][0-9]*)$');
