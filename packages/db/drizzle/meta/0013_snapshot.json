@@ -7702,6 +7702,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "browser_subject_id": {
+          "name": "browser_subject_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "browser_deployment_id": {
+          "name": "browser_deployment_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "challenge_hash": {
           "name": "challenge_hash",
           "type": "text",
@@ -7776,6 +7788,93 @@
         "personal_device_enrollment_challenge_hash_check": {
           "name": "personal_device_enrollment_challenge_hash_check",
           "value": "length(\"personal_device_enrollment_challenges\".\"challenge_hash\") = 64"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.personal_device_epoch_acks": {
+      "name": "personal_device_epoch_acks",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "group_id": {
+          "name": "group_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "member_id": {
+          "name": "member_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "epoch": {
+          "name": "epoch",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "canonical_ack": {
+          "name": "canonical_ack",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "acknowledged_at": {
+          "name": "acknowledged_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "personal_device_epoch_acks_group_id_personal_device_groups_id_fk": {
+          "name": "personal_device_epoch_acks_group_id_personal_device_groups_id_fk",
+          "tableFrom": "personal_device_epoch_acks",
+          "tableTo": "personal_device_groups",
+          "columnsFrom": ["group_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "personal_device_epoch_acks_member_id_personal_device_group_members_id_fk": {
+          "name": "personal_device_epoch_acks_member_id_personal_device_group_members_id_fk",
+          "tableFrom": "personal_device_epoch_acks",
+          "tableTo": "personal_device_group_members",
+          "columnsFrom": ["member_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "personal_device_epoch_ack_unique": {
+          "name": "personal_device_epoch_ack_unique",
+          "nullsNotDistinct": false,
+          "columns": ["group_id", "member_id", "epoch"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "personal_device_epoch_ack_epoch_check": {
+          "name": "personal_device_epoch_ack_epoch_check",
+          "value": "\"personal_device_epoch_acks\".\"epoch\" ~ '^(0|[1-9][0-9]*)$'"
         }
       },
       "isRLSEnabled": false
@@ -7968,7 +8067,7 @@
           "name": "user_subject_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "device_id": {
           "name": "device_id",
@@ -8086,7 +8185,7 @@
           "tableTo": "personal_device_group_user_subjects",
           "columnsFrom": ["user_subject_id"],
           "columnsTo": ["id"],
-          "onDelete": "set null",
+          "onDelete": "restrict",
           "onUpdate": "no action"
         }
       },
@@ -8252,6 +8351,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "deployment_id": {
+          "name": "deployment_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -8299,7 +8404,7 @@
       "checkConstraints": {
         "personal_device_group_subject_not_empty_check": {
           "name": "personal_device_group_subject_not_empty_check",
-          "value": "length(trim(\"personal_device_group_user_subjects\".\"subject_id\")) > 0"
+          "value": "length(trim(\"personal_device_group_user_subjects\".\"subject_id\")) > 0 and length(trim(\"personal_device_group_user_subjects\".\"deployment_id\")) > 0"
         }
       },
       "isRLSEnabled": false
@@ -8374,6 +8479,30 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "pending_epoch": {
+          "name": "pending_epoch",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pending_statement_sequence": {
+          "name": "pending_statement_sequence",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pending_statement_hash": {
+          "name": "pending_statement_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pending_bundle_hash": {
+          "name": "pending_bundle_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "head_sequence": {
           "name": "head_sequence",
@@ -8585,6 +8714,79 @@
           "value": "\"personal_device_membership_certificates\".\"epoch\" ~ '^(0|[1-9][0-9]*)$'"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.personal_device_remote_link_nonces": {
+      "name": "personal_device_remote_link_nonces",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "group_id": {
+          "name": "group_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "issuer_deployment_id": {
+          "name": "issuer_deployment_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "nonce_hash": {
+          "name": "nonce_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "consumed_at": {
+          "name": "consumed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "personal_device_remote_link_nonces_group_id_personal_device_groups_id_fk": {
+          "name": "personal_device_remote_link_nonces_group_id_personal_device_groups_id_fk",
+          "tableFrom": "personal_device_remote_link_nonces",
+          "tableTo": "personal_device_groups",
+          "columnsFrom": ["group_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "personal_device_remote_link_nonce_unique": {
+          "name": "personal_device_remote_link_nonce_unique",
+          "nullsNotDistinct": false,
+          "columns": ["issuer_deployment_id", "nonce_hash"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.personal_sync_policies": {
@@ -8906,6 +9108,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "remote_issuer": {
+          "name": "remote_issuer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "remote_deployment_id": {
           "name": "remote_deployment_id",
           "type": "text",
@@ -8918,9 +9126,15 @@
           "primaryKey": false,
           "notNull": true
         },
-        "remote_proof_reference": {
-          "name": "remote_proof_reference",
+        "proof_nonce_hash": {
+          "name": "proof_nonce_hash",
           "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "proof_expires_at": {
+          "name": "proof_expires_at",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true
         },
@@ -8978,9 +9192,9 @@
       },
       "policies": {},
       "checkConstraints": {
-        "remote_account_links_proof_check": {
-          "name": "remote_account_links_proof_check",
-          "value": "length(trim(\"remote_account_links\".\"remote_proof_reference\")) > 0"
+        "remote_account_links_issuer_check": {
+          "name": "remote_account_links_issuer_check",
+          "value": "length(trim(\"remote_account_links\".\"remote_issuer\")) > 0"
         },
         "remote_account_links_no_implicit_sync_check": {
           "name": "remote_account_links_no_implicit_sync_check",
