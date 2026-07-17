@@ -228,13 +228,14 @@ describeDb("durable historical import repository", () => {
       email: `import-outsider-${randomUUID()}@example.com`
     });
     const run = await repo.createHistoricalImportRun({ userId: owner.id });
+    const sourceSessionId = `session-${randomUUID()}`;
     const source = await repo.createHistoricalImportSource(
       { userId: owner.id },
       {
         runId: run.id,
         aiClient: "codex",
         sourceKind: "codex",
-        sourceSessionId: `session-${randomUUID()}`,
+        sourceSessionId,
         sourceFingerprint: fingerprint("a"),
         registrationFrontierOffset: 100,
         registrationPrefixHash: "1".repeat(64),
@@ -250,6 +251,27 @@ describeDb("durable historical import repository", () => {
     ).toBeNull();
     expect(
       await repo.getHistoricalImportSource({ userId: outsider.id }, source!.id)
+    ).toBeNull();
+    const identity = {
+      aiClient: "codex",
+      sourceKind: "codex",
+      sourceSessionId
+    };
+    expect(
+      await repo.getHistoricalImportSourceByIdentity(
+        { userId: owner.id },
+        identity
+      )
+    ).toMatchObject({
+      id: source!.id,
+      localSourcePath: source!.localSourcePath,
+      updatedAt: source!.updatedAt
+    });
+    expect(
+      await repo.getHistoricalImportSourceByIdentity(
+        { userId: outsider.id },
+        identity
+      )
     ).toBeNull();
 
     await repo.transitionHistoricalImportSource(
@@ -274,9 +296,9 @@ describeDb("durable historical import repository", () => {
     );
 
     const restarted = createHistoricalImportRepository(pool);
-    const resumed = await restarted.getHistoricalImportSource(
+    const resumed = await restarted.getHistoricalImportSourceByIdentity(
       { userId: owner.id },
-      source!.id
+      identity
     );
     expect(resumed).toMatchObject({
       state: "importing",

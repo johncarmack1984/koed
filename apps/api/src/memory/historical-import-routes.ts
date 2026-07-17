@@ -11,6 +11,7 @@ import {
   historicalImportBatchSchema,
   historicalImportRunListSchema,
   historicalImportRunParamsSchema,
+  historicalImportSourceLookupSchema,
   historicalImportSourceParamsSchema,
   historicalImportTransitionSchema,
   liveTranscriptCursorSchema
@@ -200,6 +201,30 @@ const registerCreateSourceRoute = (
   );
 };
 
+const registerSourceLookupRoute = (
+  app: FastifyInstance,
+  context: ApiRouteContext
+): void => {
+  app.get(
+    "/v1/historical-import-sources/lookup",
+    { preHandler: context.rateLimit.memoryRead },
+    async (request) => {
+      requireLocalImportSurface(context);
+      const user = await context.auth.authenticate(request);
+      const identity = historicalImportSourceLookupSchema.parse(request.query);
+      const source = await context
+        .requireRepository()
+        .getHistoricalImportSourceByIdentity({ userId: user.id }, identity);
+      if (!source) {
+        throw Object.assign(new Error("Historical import source not found"), {
+          statusCode: 404
+        });
+      }
+      return { source: presentSource(source) };
+    }
+  );
+};
+
 const registerRunTransitionRoute = (
   app: FastifyInstance,
   context: ApiRouteContext
@@ -348,6 +373,7 @@ export const registerHistoricalImportRoutes = (
   registerListRunsRoute(app, context);
   registerGetRunRoute(app, context);
   registerCreateSourceRoute(app, context);
+  registerSourceLookupRoute(app, context);
   registerRunTransitionRoute(app, context);
   registerSourceTransitionRoute(app, context);
   registerBatchRoute(app, context);
