@@ -1,0 +1,1012 @@
+import { createHash } from "node:crypto";
+import fs, {
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  watch,
+  writeFileSync,
+  type Dir,
+  type FSWatcher,
+  type Stats
+} from "node:fs";
+import { lstat, opendir, stat } from "node:fs/promises";
+import os from "node:os";
+import { performance } from "node:perf_hooks";
+import path from "node:path";
+
+import { MemoryApiClient, MemoryApiError, defaultConfig } from "./index.js";
+import { logger } from "./logger.js";
+import { rawConversationItemBatches } from "./raw-conversation-items.js";
+import {
+  buildCodexTranscriptConversationItems,
+  extractTranscriptSessionMetadata,
+  parseTranscriptFileRecords,
+  type CodexTranscriptCheckpointState,
+  type TranscriptContext
+} from "./codex-transcript-parser.js";
+import type { RawConversationItemRequest } from "./conversation-source-types.js";
+
+export {
+  signalCodexTranscriptWatcher,
+  watcherWakePath
+} from "./codex-transcript-watcher-signal.js";
+
+const WATCHER_VERSION = 1;
+const EMPTY_SHA256 = createHash("sha256").digest("hex");
+const TRANSCRIPT_PATTERN = /^rollout-.*\.jsonl$/;
+
+export interface CodexTranscriptWatcherConfig {
+  roots: string[];
+  koedHome: string;
+  rescanIntervalMs: number;
+  debounceMs: number;
+  maxEntriesPerScan: number;
+  maxFilesPerScan: number;
+  maxBytesPerBatch: number;
+}
+
+interface HistoricalSource {
+  id: string;
+  runId: string;
+  sourceSessionId: string;
+  sourceFingerprint: string;
+  registrationFrontierOffset: number;
+  registrationPrefixHash: string;
+  liveCursorOffset: number;
+  liveCursorLine: number;
+  liveCursorHash: string | null;
+  sourceSizeBytes: number | null;
+  sourceModifiedAt: string | null;
+  detectedProject: Record<string, unknown>;
+}
+
+interface WatcherSnapshot {
+  state: "starting" | "running" | "stopped";
+  startedAt: string;
+  lastScanAt: string | null;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  lastErrorCode: string | null;
+  scans: number;
+  filesDiscovered: number;
+  sourcesRegistered: number;
+  batchesIngested: number;
+  recordsIngested: number;
+  bytesAdvanced: number;
+}
+
+export interface CodexTranscriptWatcherClient {
+  accessCheck(): Promise<unknown>;
+  createHistoricalImportRun(): Promise<Record<string, unknown>>;
+  lookupHistoricalImportSource(input: {
+    aiClient: "codex";
+    sourceKind: "codex";
+    sourceSessionId: string;
+  }): Promise<Record<string, unknown>>;
+  createHistoricalImportSource(
+    input: Record<string, unknown>
+  ): Promise<Record<string, unknown>>;
+  advanceLiveTranscriptCursor(
+    sourceId: string,
+    input: Record<string, unknown>
+  ): Promise<Record<string, unknown>>;
+  effectiveCapturePolicy(input: {
+    projectId?: string;
+    threadId?: string;
+    sessionId?: string;
+  }): Promise<Record<string, unknown>>;
+  createSession(input: Record<string, unknown>): Promise<{
+    session?: { id: string };
+    skipped?: boolean;
+  }>;
+  createConversationItems(
+    input: Record<string, unknown>
+  ): Promise<Record<string, unknown>>;
+  projectConversationItems(
+    input?: Record<string, unknown>
+  ): Promise<Record<string, unknown>>;
+}
+
+export interface CodexTranscriptWatcherHandle {
+  scanNow(): Promise<void>;
+  wake(): void;
+  stop(): Promise<void>;
+  snapshot(): WatcherSnapshot;
+}
+
+const positiveInt = (
+  env: NodeJS.ProcessEnv,
+  name: string,
+  fallback: number,
+  maximum: number
+): number => {
+  const parsed = Number.parseInt(env[name] ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.min(parsed, maximum)
+    : fallback;
+};
+
+const uniqueAbsoluteRoots = (values: string[]): string[] => [
+  ...new Set(values.map((value) => path.resolve(value)))
+];
+
+export const resolveCodexTranscriptWatcherConfig = (
+  env: NodeJS.ProcessEnv = process.env
+): CodexTranscriptWatcherConfig => {
+  const codexHome = path.resolve(
+    env.CODEX_HOME ?? path.join(os.homedir(), ".codex")
+  );
+  const configuredRoots = env.MEMORY_CODEX_TRANSCRIPT_ROOTS?.split(
+    path.delimiter
+  )
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return {
+    roots: uniqueAbsoluteRoots(
+      configuredRoots?.length
+        ? configuredRoots
+        : [path.join(codexHome, "sessions")]
+    ),
+    koedHome: path.resolve(env.KOED_HOME ?? path.join(os.homedir(), ".koed")),
+    rescanIntervalMs: positiveInt(
+      env,
+      "MEMORY_CODEX_TRANSCRIPT_RESCAN_INTERVAL_MS",
+      15_000,
+      300_000
+    ),
+    debounceMs: positiveInt(
+      env,
+      "MEMORY_CODEX_TRANSCRIPT_DEBOUNCE_MS",
+      200,
+      10_000
+    ),
+    maxEntriesPerScan: positiveInt(
+      env,
+      "MEMORY_CODEX_TRANSCRIPT_MAX_ENTRIES_PER_SCAN",
+      4_000,
+      100_000
+    ),
+    maxFilesPerScan: positiveInt(
+      env,
+      "MEMORY_CODEX_TRANSCRIPT_MAX_FILES_PER_SCAN",
+      200,
+      5_000
+    ),
+    maxBytesPerBatch: positiveInt(
+      env,
+      "MEMORY_CODEX_TRANSCRIPT_MAX_BYTES_PER_BATCH",
+      1_048_576,
+      16_777_216
+    )
+  };
+};
+
+const sha256 = (value: string): string =>
+  createHash("sha256").update(value).digest("hex");
+
+export const hashFilePrefix = async (
+  transcriptPath: string,
+  offset: number
+): Promise<string> => {
+  if (offset === 0) return EMPTY_SHA256;
+  const digest = createHash("sha256");
+  const stream = createReadStream(transcriptPath, {
+    start: 0,
+    end: offset - 1,
+    highWaterMark: 64 * 1024
+  });
+  for await (const chunk of stream) digest.update(chunk as Buffer);
+  return digest.digest("hex");
+};
+
+export const completeTranscriptBoundary = (
+  transcriptPath: string,
+  maxRecordBytes = 16 * 1024 * 1024
+): number => {
+  const size = statSync(transcriptPath).size;
+  if (size === 0) return 0;
+  const length = Math.min(size, maxRecordBytes + 1);
+  const start = size - length;
+  const descriptor = fs.openSync(transcriptPath, "r");
+  const buffer = Buffer.allocUnsafe(length);
+  try {
+    fs.readSync(descriptor, buffer, 0, length, start);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  const newline = buffer.lastIndexOf(0x0a);
+  const trailing = buffer.subarray(newline + 1).toString("utf8");
+  if (!trailing.trim()) return size;
+  try {
+    JSON.parse(trailing);
+    return size;
+  } catch {
+    if (newline < 0) {
+      if (size > maxRecordBytes) {
+        throw new Error("transcript_record_too_large");
+      }
+      return 0;
+    }
+    return start + newline + 1;
+  }
+};
+
+const watcherStatePath = (config: CodexTranscriptWatcherConfig): string =>
+  path.join(config.koedHome, "state", "codex-transcript-watcher.json");
+
+const activationTime = (
+  config: CodexTranscriptWatcherConfig
+): number | null => {
+  const statePath = watcherStatePath(config);
+  try {
+    const parsed = JSON.parse(readFileSync(statePath, "utf8")) as {
+      version?: number;
+      activatedAt?: string;
+      activatedAtMs?: number;
+    };
+    const activatedAt =
+      parsed.activatedAtMs ?? Date.parse(parsed.activatedAt ?? "");
+    if (parsed.version === WATCHER_VERSION && Number.isFinite(activatedAt)) {
+      return activatedAt;
+    }
+  } catch {
+    // First activation completes after one bounded full discovery cycle.
+  }
+  return null;
+};
+
+const persistActivationTime = (
+  config: CodexTranscriptWatcherConfig
+): number => {
+  const statePath = watcherStatePath(config);
+  const activatedAtMs = performance.timeOrigin + performance.now();
+  const activatedAt = new Date(activatedAtMs).toISOString();
+  mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
+  const temporary = `${statePath}.${process.pid}.tmp`;
+  writeFileSync(
+    temporary,
+    `${JSON.stringify({ version: WATCHER_VERSION, activatedAt, activatedAtMs })}\n`,
+    { mode: 0o600 }
+  );
+  renameSync(temporary, statePath);
+  return activatedAtMs;
+};
+
+class BoundedTranscriptDiscovery {
+  private directories: string[] = [];
+  private current?: { path: string; handle: Dir };
+
+  constructor(private readonly config: CodexTranscriptWatcherConfig) {}
+
+  async scan(): Promise<{ files: string[]; cycleComplete: boolean }> {
+    if (!this.current && this.directories.length === 0) {
+      this.directories.push(...this.config.roots);
+    }
+    const files: string[] = [];
+    let entries = 0;
+    while (
+      entries < this.config.maxEntriesPerScan &&
+      files.length < this.config.maxFilesPerScan
+    ) {
+      if (!this.current && !(await this.openNextDirectory())) break;
+      let child;
+      try {
+        child = await this.current!.handle.read();
+      } catch {
+        await this.closeCurrent();
+        continue;
+      }
+      if (!child) {
+        await this.closeCurrent();
+        continue;
+      }
+      entries += 1;
+      if (child.isSymbolicLink()) continue;
+      const childPath = path.join(this.current!.path, child.name);
+      if (child.isDirectory()) this.directories.push(childPath);
+      else if (child.isFile() && TRANSCRIPT_PATTERN.test(child.name)) {
+        files.push(childPath);
+      }
+    }
+    return {
+      files,
+      cycleComplete: !this.current && this.directories.length === 0
+    };
+  }
+
+  async close(): Promise<void> {
+    await this.closeCurrent();
+  }
+
+  private async openNextDirectory(): Promise<boolean> {
+    while (this.directories.length > 0) {
+      const directory = this.directories.shift()!;
+      try {
+        this.current = { path: directory, handle: await opendir(directory) };
+        return true;
+      } catch {
+        // Missing/inaccessible supported roots are retried next full cycle.
+      }
+    }
+    return false;
+  }
+
+  private async closeCurrent(): Promise<void> {
+    const current = this.current;
+    this.current = undefined;
+    if (current) await current.handle.close().catch(() => undefined);
+  }
+}
+
+export const discoverCodexTranscripts = async (
+  config: CodexTranscriptWatcherConfig
+): Promise<string[]> => {
+  const discovery = new BoundedTranscriptDiscovery(config);
+  try {
+    return (await discovery.scan()).files;
+  } finally {
+    await discovery.close();
+  }
+};
+
+const responseValue = <T>(
+  response: Record<string, unknown>,
+  key: string
+): T => {
+  const value = response[key];
+  if (!value || typeof value !== "object") {
+    throw new Error(`watcher_api_response_missing_${key}`);
+  }
+  return value as T;
+};
+
+const sourceIdentity = (
+  transcriptPath: string,
+  boundary: number,
+  maxBytes: number
+): { sessionId: string; context: TranscriptContext } | null => {
+  if (boundary === 0) return null;
+  const state: CodexTranscriptCheckpointState = { seen: {}, rawSeen: {} };
+  const parsed = parseTranscriptFileRecords({
+    transcriptPath,
+    state,
+    stateScope: "watcher-identity",
+    maxBytes: Math.min(maxBytes, 1),
+    readThroughOffset: boundary,
+    strictJsonLines: true
+  });
+  const context = extractTranscriptSessionMetadata(parsed.records);
+  return context.transcriptSessionId
+    ? { sessionId: context.transcriptSessionId, context }
+    : null;
+};
+
+const projectFromContext = (
+  context: TranscriptContext
+): Record<string, unknown> => {
+  const cwd = context.transcriptMetadata.cwd;
+  if (typeof cwd !== "string" || !cwd.trim()) return {};
+  return {
+    name: path.basename(cwd),
+    path: cwd,
+    cwd,
+    fingerprint: sha256(`codex-project:${cwd}`)
+  };
+};
+
+const sourceProjectId = (
+  source: HistoricalSource,
+  context: TranscriptContext
+): string | undefined => {
+  for (const value of [
+    source.detectedProject.projectId,
+    source.detectedProject.path,
+    source.detectedProject.cwd,
+    context.transcriptMetadata.cwd
+  ]) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
+};
+
+const captureAllowed = async (
+  client: CodexTranscriptWatcherClient,
+  source: HistoricalSource,
+  context: TranscriptContext,
+  sessionId?: string
+): Promise<boolean> => {
+  const response = await client.effectiveCapturePolicy({
+    projectId: sourceProjectId(source, context),
+    threadId: source.sourceSessionId,
+    sessionId
+  });
+  const policy = response.policy as
+    | { captureState?: string; visibility?: string; paused?: boolean }
+    | undefined;
+  return (
+    policy?.captureState === "enabled" &&
+    policy.visibility === "personal" &&
+    policy.paused !== true
+  );
+};
+
+const lookupSource = async (
+  client: CodexTranscriptWatcherClient,
+  sourceSessionId: string
+): Promise<HistoricalSource | null> => {
+  try {
+    const response = await client.lookupHistoricalImportSource({
+      aiClient: "codex",
+      sourceKind: "codex",
+      sourceSessionId
+    });
+    return responseValue<HistoricalSource>(response, "source");
+  } catch (error) {
+    if (error instanceof MemoryApiError && error.status === 404) return null;
+    throw error;
+  }
+};
+
+class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
+  private readonly config: CodexTranscriptWatcherConfig;
+  private readonly client: CodexTranscriptWatcherClient;
+  private activatedAt: number | null;
+  private readonly discovery: BoundedTranscriptDiscovery;
+  private readonly watchers: FSWatcher[] = [];
+  private readonly processing = new Set<string>();
+  private readonly identities = new Map<
+    string,
+    { sessionId: string; context: TranscriptContext; fileKey: string }
+  >();
+  private readonly parserStates = new Map<
+    string,
+    { transcriptPath: string; state: CodexTranscriptCheckpointState }
+  >();
+  private readonly sourcePaths = new Map<string, string>();
+  private readonly metrics: WatcherSnapshot;
+  private runId?: string;
+  private failureCount = 0;
+  private scanPromise: Promise<void> | null = null;
+  private scanRequested = false;
+  private debounceTimer?: NodeJS.Timeout;
+  private rescanTimer?: NodeJS.Timeout;
+  private stopped = false;
+
+  constructor(
+    client: CodexTranscriptWatcherClient,
+    config: CodexTranscriptWatcherConfig
+  ) {
+    this.client = client;
+    this.config = config;
+    this.activatedAt = activationTime(config);
+    this.discovery = new BoundedTranscriptDiscovery(config);
+    this.metrics = {
+      state: "starting",
+      startedAt: new Date().toISOString(),
+      lastScanAt: null,
+      lastSuccessAt: null,
+      lastFailureAt: null,
+      lastErrorCode: null,
+      scans: 0,
+      filesDiscovered: 0,
+      sourcesRegistered: 0,
+      batchesIngested: 0,
+      recordsIngested: 0,
+      bytesAdvanced: 0
+    };
+  }
+
+  start(): void {
+    this.installFilesystemHints();
+    this.rescanTimer = setInterval(
+      () => this.wake(),
+      this.config.rescanIntervalMs
+    );
+    this.rescanTimer.unref();
+    if (this.activatedAt !== null) this.metrics.state = "running";
+    this.wake();
+  }
+
+  snapshot(): WatcherSnapshot {
+    return { ...this.metrics };
+  }
+
+  wake(): void {
+    if (this.stopped) return;
+    this.scanRequested = true;
+    if (this.scanPromise || this.debounceTimer) return;
+    this.debounceTimer = setTimeout(() => {
+      this.debounceTimer = undefined;
+      void this.scanNow();
+    }, this.config.debounceMs);
+    this.debounceTimer.unref();
+  }
+
+  async scanNow(): Promise<void> {
+    if (this.stopped) return;
+    if (this.scanPromise) return this.scanPromise;
+    this.scanRequested = false;
+    this.scanPromise = this.runScan().finally(() => {
+      this.scanPromise = null;
+      if (this.scanRequested) this.wake();
+    });
+    return this.scanPromise;
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    if (this.debounceTimer) clearTimeout(this.debounceTimer);
+    if (this.rescanTimer) clearInterval(this.rescanTimer);
+    for (const watcher of this.watchers) watcher.close();
+    await this.scanPromise;
+    await this.discovery.close();
+    this.metrics.state = "stopped";
+    this.writeStatus();
+  }
+
+  private installFilesystemHints(): void {
+    const watched = [
+      ...this.config.roots,
+      path.join(this.config.koedHome, "run")
+    ];
+    for (const root of watched) {
+      if (!existsSync(root)) continue;
+      try {
+        this.watchers.push(watch(root, { recursive: true }, () => this.wake()));
+      } catch {
+        try {
+          this.watchers.push(watch(root, () => this.wake()));
+        } catch {
+          // Periodic rescan recovers unsupported or unavailable notifications.
+        }
+      }
+    }
+  }
+
+  private async runScan(): Promise<void> {
+    this.metrics.scans += 1;
+    this.metrics.lastScanAt = new Date().toISOString();
+    const failuresBefore = this.failureCount;
+    try {
+      await this.client.accessCheck();
+      const discovery = await this.discovery.scan();
+      this.metrics.filesDiscovered += discovery.files.length;
+      for (const transcriptPath of discovery.files) {
+        if (this.stopped) break;
+        await this.processPathOnce(transcriptPath);
+      }
+      if (this.activatedAt === null && discovery.cycleComplete) {
+        this.activatedAt = persistActivationTime(this.config);
+        this.metrics.state = "running";
+      }
+      if (this.failureCount === failuresBefore) {
+        this.metrics.lastSuccessAt = new Date().toISOString();
+        this.metrics.lastErrorCode = null;
+      }
+    } catch (error) {
+      this.recordFailure(error);
+    } finally {
+      this.writeStatus();
+    }
+  }
+
+  private async processPathOnce(transcriptPath: string): Promise<void> {
+    if (this.processing.has(transcriptPath)) return;
+    this.processing.add(transcriptPath);
+    try {
+      await this.processTranscript(transcriptPath);
+    } catch (error) {
+      this.recordFailure(error);
+    } finally {
+      this.processing.delete(transcriptPath);
+    }
+  }
+
+  private async processTranscript(transcriptPath: string): Promise<void> {
+    const linkState = await lstat(transcriptPath);
+    if (linkState.isSymbolicLink() || !linkState.isFile()) return;
+    const before = await stat(transcriptPath);
+    if (!before.isFile()) return;
+    const boundary = completeTranscriptBoundary(transcriptPath);
+    const fileKey = `${before.dev}:${before.ino}`;
+    const cachedIdentity = this.identities.get(transcriptPath);
+    const parsedIdentity =
+      cachedIdentity?.fileKey === fileKey
+        ? cachedIdentity
+        : sourceIdentity(
+            transcriptPath,
+            boundary,
+            this.config.maxBytesPerBatch
+          );
+    if (!parsedIdentity) return;
+    const identity = {
+      sessionId: parsedIdentity.sessionId,
+      context: parsedIdentity.context
+    };
+    this.rememberIdentity(transcriptPath, { ...identity, fileKey });
+    let source = await lookupSource(this.client, identity.sessionId);
+    if (source) {
+      const firstPathObservation =
+        this.sourcePaths.get(source.id) !== transcriptPath;
+      const sourceChanged =
+        source.sourceSizeBytes !== before.size ||
+        source.sourceModifiedAt !== before.mtime.toISOString();
+      if (firstPathObservation || sourceChanged) {
+        await this.verifyCursorPrefix(source, transcriptPath, before.size);
+        source = await this.refreshSourcePath(
+          source,
+          transcriptPath,
+          before,
+          identity.context
+        );
+      }
+    } else {
+      source = await this.registerSource(
+        transcriptPath,
+        before,
+        boundary,
+        identity
+      );
+    }
+    this.rememberSourcePath(source.id, transcriptPath);
+    if (boundary <= source.liveCursorOffset) return;
+    await this.ingestPage(source, transcriptPath, identity.context, boundary);
+  }
+
+  private rememberIdentity(
+    transcriptPath: string,
+    identity: { sessionId: string; context: TranscriptContext; fileKey: string }
+  ): void {
+    this.identities.delete(transcriptPath);
+    this.identities.set(transcriptPath, identity);
+    const maximum = Math.max(this.config.maxFilesPerScan * 10, 100);
+    while (this.identities.size > maximum) {
+      const oldest = this.identities.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.identities.delete(oldest);
+    }
+  }
+
+  private rememberSourcePath(sourceId: string, transcriptPath: string): void {
+    this.sourcePaths.delete(sourceId);
+    this.sourcePaths.set(sourceId, transcriptPath);
+    const maximum = Math.max(this.config.maxFilesPerScan * 10, 100);
+    while (this.sourcePaths.size > maximum) {
+      const oldest = this.sourcePaths.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.sourcePaths.delete(oldest);
+      this.parserStates.delete(oldest);
+    }
+  }
+
+  private async ensureRunId(): Promise<string> {
+    if (this.runId) return this.runId;
+    const response = await this.client.createHistoricalImportRun();
+    this.runId = responseValue<{ id: string }>(response, "run").id;
+    return this.runId;
+  }
+
+  private async registerSource(
+    transcriptPath: string,
+    file: Stats,
+    boundary: number,
+    identity: { sessionId: string; context: TranscriptContext }
+  ): Promise<HistoricalSource> {
+    const frontier =
+      this.activatedAt === null || file.birthtimeMs <= this.activatedAt
+        ? boundary
+        : 0;
+    const prefixHash = await hashFilePrefix(transcriptPath, frontier);
+    const response = await this.client.createHistoricalImportSource({
+      runId: await this.ensureRunId(),
+      aiClient: "codex",
+      sourceKind: "codex",
+      sourceSessionId: identity.sessionId,
+      sourceFingerprint: sha256(`codex-transcript-v1:${identity.sessionId}`),
+      registrationFrontierOffset: frontier,
+      registrationPrefixHash: prefixHash,
+      localSourcePath: transcriptPath,
+      sourceSizeBytes: file.size,
+      sourceModifiedAt: file.mtime.toISOString(),
+      detectedProject: projectFromContext(identity.context)
+    });
+    this.metrics.sourcesRegistered += 1;
+    return responseValue<HistoricalSource>(response, "source");
+  }
+
+  private async refreshSourcePath(
+    source: HistoricalSource,
+    transcriptPath: string,
+    file: Stats,
+    context: TranscriptContext
+  ): Promise<HistoricalSource> {
+    const response = await this.client.createHistoricalImportSource({
+      runId: source.runId,
+      aiClient: "codex",
+      sourceKind: "codex",
+      sourceSessionId: source.sourceSessionId,
+      sourceFingerprint: source.sourceFingerprint,
+      registrationFrontierOffset: source.registrationFrontierOffset,
+      registrationPrefixHash: source.registrationPrefixHash,
+      localSourcePath: transcriptPath,
+      sourceSizeBytes: file.size,
+      sourceModifiedAt: file.mtime.toISOString(),
+      detectedProject: Object.keys(source.detectedProject).length
+        ? source.detectedProject
+        : projectFromContext(context)
+    });
+    return responseValue<HistoricalSource>(response, "source");
+  }
+
+  private async verifyCursorPrefix(
+    source: HistoricalSource,
+    transcriptPath: string,
+    size: number
+  ): Promise<void> {
+    if (size < source.liveCursorOffset) throw new Error("transcript_truncated");
+    if (source.liveCursorOffset === 0) {
+      if (source.liveCursorHash !== null)
+        throw new Error("cursor_hash_invalid");
+      return;
+    }
+    const prefixHash = await hashFilePrefix(
+      transcriptPath,
+      source.liveCursorOffset
+    );
+    if (prefixHash !== source.liveCursorHash) {
+      throw new Error("transcript_prefix_mutated");
+    }
+  }
+
+  private applyParserCheckpoint(
+    state: CodexTranscriptCheckpointState,
+    checkpoint: NonNullable<
+      ReturnType<typeof parseTranscriptFileRecords>["checkpoint"]
+    >
+  ): void {
+    state.transcriptOffsets = {
+      ...(state.transcriptOffsets ?? {}),
+      [checkpoint.key]: {
+        offset: checkpoint.offset,
+        lineCount: checkpoint.lineCount,
+        size: checkpoint.size,
+        ...(checkpoint.lastEventTime
+          ? { lastEventTime: checkpoint.lastEventTime }
+          : {}),
+        ...(checkpoint.activeTurnId
+          ? { activeTurnId: checkpoint.activeTurnId }
+          : {}),
+        ...(checkpoint.assistantMessagePreference
+          ? {
+              assistantMessagePreference: checkpoint.assistantMessagePreference
+            }
+          : {})
+      }
+    };
+  }
+
+  private parserStateAtCursor(
+    source: HistoricalSource,
+    transcriptPath: string
+  ): CodexTranscriptCheckpointState | null {
+    let entry = this.parserStates.get(source.id);
+    if (!entry || entry.transcriptPath !== transcriptPath) {
+      entry = {
+        transcriptPath,
+        state: { seen: {}, rawSeen: {} }
+      };
+      this.parserStates.set(source.id, entry);
+    }
+    const key = `watcher:${transcriptPath}`;
+    const offset = entry.state.transcriptOffsets?.[key]?.offset ?? 0;
+    if (offset === source.liveCursorOffset) return entry.state;
+    if (offset > source.liveCursorOffset) {
+      entry.state = { seen: {}, rawSeen: {} };
+    }
+    const parsed = parseTranscriptFileRecords({
+      transcriptPath,
+      state: entry.state,
+      stateScope: "watcher",
+      maxBytes: this.config.maxBytesPerBatch,
+      readThroughOffset: source.liveCursorOffset,
+      strictJsonLines: false
+    });
+    if (!parsed.checkpoint) return null;
+    this.applyParserCheckpoint(entry.state, parsed.checkpoint);
+    if (parsed.checkpoint.offset < source.liveCursorOffset) {
+      this.scanRequested = true;
+      return null;
+    }
+    if (parsed.checkpoint.offset !== source.liveCursorOffset) {
+      throw new Error("cursor_rehydration_conflict");
+    }
+    return entry.state;
+  }
+
+  private async ingestPage(
+    source: HistoricalSource,
+    transcriptPath: string,
+    context: TranscriptContext,
+    boundary: number
+  ): Promise<void> {
+    const state = this.parserStateAtCursor(source, transcriptPath);
+    if (!state) return;
+    const parsed = parseTranscriptFileRecords({
+      transcriptPath,
+      state,
+      stateScope: "watcher",
+      maxBytes: this.config.maxBytesPerBatch,
+      readThroughOffset: boundary,
+      deferPageEndingAssistantEvent: true,
+      strictJsonLines: true
+    });
+    const checkpoint = parsed.checkpoint;
+    if (!checkpoint || checkpoint.offset <= source.liveCursorOffset) return;
+    const cursorHash = await hashFilePrefix(transcriptPath, checkpoint.offset);
+    const session = await this.ensureSession(source, transcriptPath, context);
+    const items = buildCodexTranscriptConversationItems({
+      records: parsed.records,
+      indexOffset: parsed.indexOffset,
+      sessionId: session.id,
+      sourceSessionId: source.sourceSessionId,
+      sourceTransport: "transcript",
+      localSourcePath: transcriptPath,
+      sourceFingerprint: source.sourceFingerprint,
+      threadKind: context.threadKind,
+      parentThreadId: context.parentThreadId
+    });
+    const persisted = await this.persistBatches(
+      source,
+      context,
+      session.id,
+      items
+    );
+    await this.projectItems(persisted);
+    await this.verifyCursorPrefix(source, transcriptPath, checkpoint.size);
+    const currentCursorHash = await hashFilePrefix(
+      transcriptPath,
+      checkpoint.offset
+    );
+    if (currentCursorHash !== cursorHash) {
+      throw new Error("transcript_mutated_during_batch");
+    }
+    const current = await stat(transcriptPath);
+    if (current.size < checkpoint.offset)
+      throw new Error("transcript_truncated");
+    await this.client.advanceLiveTranscriptCursor(source.id, {
+      expectedCursorOffset: source.liveCursorOffset,
+      expectedCursorHash: source.liveCursorHash,
+      cursorOffset: checkpoint.offset,
+      cursorLine: checkpoint.lineCount,
+      cursorHash,
+      sourceSizeBytes: current.size
+    });
+    this.applyParserCheckpoint(state, checkpoint);
+    this.metrics.batchesIngested += 1;
+    this.metrics.recordsIngested += parsed.records.length;
+    this.metrics.bytesAdvanced += checkpoint.offset - source.liveCursorOffset;
+    if (checkpoint.offset < boundary) this.scanRequested = true;
+  }
+
+  private async ensureSession(
+    source: HistoricalSource,
+    transcriptPath: string,
+    context: TranscriptContext
+  ): Promise<{ id: string }> {
+    if (!(await captureAllowed(this.client, source, context))) {
+      throw new Error("capture_policy_blocked");
+    }
+    const cwd = sourceProjectId(source, context);
+    const response = await this.client.createSession({
+      externalSessionId: source.sourceSessionId,
+      sourceRuntime: "codex-cli",
+      captureMethod: "api",
+      cwd,
+      codexTranscriptPath: transcriptPath,
+      idempotencyKey: sha256(`watcher-session:${source.sourceSessionId}`),
+      metadata: {
+        ...context.transcriptMetadata,
+        sourceTransport: "transcript",
+        sourceAdapterVersion: "codex-transcript-v1",
+        observedViaTranscript: true
+      }
+    });
+    if (response.skipped || !response.session) {
+      throw new Error("capture_policy_blocked");
+    }
+    return response.session;
+  }
+
+  private async persistBatches(
+    source: HistoricalSource,
+    context: TranscriptContext,
+    sessionId: string,
+    items: RawConversationItemRequest[]
+  ): Promise<Array<{ id?: string }>> {
+    const persisted: Array<{ id?: string }> = [];
+    for (const batch of rawConversationItemBatches(items)) {
+      if (!(await captureAllowed(this.client, source, context, sessionId))) {
+        throw new Error("capture_policy_blocked");
+      }
+      const response = await this.client.createConversationItems({
+        items: batch
+      });
+      const accepted = response.items;
+      if (Array.isArray(accepted))
+        persisted.push(...(accepted as Array<{ id?: string }>));
+    }
+    return persisted;
+  }
+
+  private async projectItems(items: Array<{ id?: string }>): Promise<void> {
+    const ids = items
+      .map((item) => item.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    for (let index = 0; index < ids.length; index += 1_000) {
+      const conversationItemIds = ids.slice(index, index + 1_000);
+      await this.client.projectConversationItems({
+        conversationItemIds,
+        limit: conversationItemIds.length
+      });
+    }
+  }
+
+  private recordFailure(error: unknown): void {
+    this.failureCount += 1;
+    const code = watcherErrorCode(error);
+    this.metrics.lastFailureAt = new Date().toISOString();
+    this.metrics.lastErrorCode = code;
+    logger.warn({ code }, "Codex Transcript Watcher pass failed");
+  }
+
+  private writeStatus(): void {
+    const statusPath = path.join(
+      this.config.koedHome,
+      "status",
+      "codex-transcript-watcher.json"
+    );
+    try {
+      mkdirSync(path.dirname(statusPath), { recursive: true, mode: 0o700 });
+      const temporary = `${statusPath}.${process.pid}.tmp`;
+      writeFileSync(temporary, `${JSON.stringify(this.metrics)}\n`, {
+        mode: 0o600
+      });
+      renameSync(temporary, statusPath);
+    } catch {
+      // Status is diagnostic-only and never controls capture correctness.
+    }
+  }
+}
+
+const watcherErrorCode = (error: unknown): string => {
+  if (error instanceof MemoryApiError) {
+    if (error.status === 409 && /policy/i.test(error.message)) {
+      return "capture_policy_blocked";
+    }
+    return error.status
+      ? `memory_api_${error.status}`
+      : "memory_api_unavailable";
+  }
+  if (error instanceof Error && /^[a-z0-9_]+$/.test(error.message)) {
+    return error.message;
+  }
+  if (
+    error instanceof Error &&
+    /malformed complete JSONL record/.test(error.message)
+  ) {
+    return "transcript_malformed_record";
+  }
+  return "watcher_pass_failed";
+};
+
+export const startCodexTranscriptWatcher = (
+  client: CodexTranscriptWatcherClient = new MemoryApiClient(defaultConfig()),
+  config = resolveCodexTranscriptWatcherConfig()
+): CodexTranscriptWatcherHandle => {
+  const watcher = new CodexTranscriptWatcher(client, config);
+  watcher.start();
+  return watcher;
+};
