@@ -157,14 +157,16 @@ const rawProjectionService =
           sourceType,
           sourceId,
           dispatchKey,
-          workClass
+          workClass,
+          jobId
         ) =>
           enqueueSourceEmbedding(
             sourceType === "memory_node" ? lcmEmbedQueue : memoryEmbedQueue,
             sourceType,
             sourceId,
             dispatchKey,
-            workClass
+            workClass,
+            jobId
           ),
         getHistoricalAdmissionHealth: createHistoricalAdmissionHealth({
           apiReadyUrl: workerEnv.historicalImportApiReadyUrl,

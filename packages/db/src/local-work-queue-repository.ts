@@ -129,6 +129,10 @@ export const createLocalWorkQueueRepository = (
               when local_work_queue.status in ('failed', 'completed') then 0
               else local_work_queue.attempt_count
             end,
+            priority = case
+              when local_work_queue.status in ('failed', 'completed') then excluded.priority
+              else local_work_queue.priority
+            end,
             max_attempts = case
               when local_work_queue.status in ('failed', 'completed') then excluded.max_attempts
               else local_work_queue.max_attempts
