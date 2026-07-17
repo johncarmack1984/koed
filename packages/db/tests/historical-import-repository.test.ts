@@ -103,8 +103,8 @@ describeDb("durable historical import repository", () => {
     });
     const transitionTo = async (
       runId: string,
-      states: Array<
-        [
+      states: ReadonlyArray<
+        readonly [
           "discovered" | "eligible" | "queued" | "importing" | "paused",
           (
             | "eligible"
