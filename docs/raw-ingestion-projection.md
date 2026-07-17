@@ -262,12 +262,19 @@ and invalidating an old leaf creates a new dispatch generation.
 
 Koed assigns work to four ordered classes: interactive Recall/Memory Questions,
 live Capture Hook Projection, normal embedding/LCM work, and historical
-import/backfill. Lower numeric priority wins. Within one class, both queue
-backends preserve FIFO order. Historical rows use the canonical raw
-`source_transport=historical_import` marker and persist
-`projection_work_class=historical_import_backfill`; all other raw Projection
-rows persist `live_capture_projection`. Projection selection never infers this
-from source event time, insertion order, source path, or metadata.
+import/backfill. Lower numeric priority wins. FIFO is only the current
+within-class tie-breaker for both queue backends, not a final semantic ordering
+guarantee. A registered source classifies complete records before its immutable
+registration frontier as `historical_import_backfill`; records after the
+frontier, including recovery after downtime, are `live_capture_projection`. A
+source first discovered after registration has a zero frontier and is live from
+its first complete record. The coordinator persists that explicit
+classification on each raw row. Projection selection never infers it from
+source event time, insertion order, source path, or metadata.
+
+This fixed-class and bounded-admission foundation does not implement aging,
+token-cost fairness, per-User or tenant shares, reserved interactive serving
+capacity, or dynamic dispatch priority. KOE-355 owns those guarantees.
 
 The API's direct Projection endpoint is live-only, even when callers provide
 explicit row ids. Historical rows remain pending for Worker admission. The
@@ -303,8 +310,13 @@ byte counts, durations, and pause reasons. It must not contain transcript
 content, source paths, queries, credentials, or raw payloads.
 
 Durable `historical_import_runs` and `historical_import_sources` records own
-state transitions, bounded counters, retry/failure data, source ranges,
-checkpoints, checkpoint-prefix hashes, and lifecycle timestamps. Source records
+state transitions, bounded counters, retry/failure data, source ranges, and
+lifecycle timestamps. Registration immutably records source fingerprint,
+source-session identity, complete-record frontier offset, and prefix hash.
+Historical imported ranges/checkpoint and live-tail/recovery cursor are separate
+transactional streams; neither can advance, rewind, or overwrite the other.
+Source growth is accepted, while truncation, rotation/prefix mutation, and stale
+submissions fail visibly without changing either stream. Source records
 keep raw source paths and path-like detected Project fields only inside local
 Postgres state. Status and canonical raw/Captured Session provenance use only a
 basename-style redacted label, stable fingerprint, and path-free detected
@@ -318,11 +330,21 @@ pause, or non-personal visibility fails closed. Capture Policy mutation and
 batch persistence share an owner-scoped transaction lock, preventing a policy
 change from interleaving between evaluation and writes. Raw persistence,
 run/source counters, and checkpoint advancement commit in one transaction.
-Retries compare offset and checkpoint-prefix hash; exact completed retries are
-read-only replays, while stale, mutated, or truncated checkpoints fail. Source event time
+Retries compare offset and checkpoint-prefix hash; exact raw-ingestion retries
+are read-only replays, while stale, mutated, or truncated checkpoints fail.
+Source event time
 (`event_time`), API observation (`observed_at`), historical observation
 (`import_observed_at`), Projection (`projected_at`), and embedding timestamps
 remain separate.
+
+Raw-ingested, projected, embedding-eligible, embedded, semantic-ready, and
+LCM-complete counters/stages are persisted and exposed separately. The terminal
+`completed` import state requires semantic and LCM completion; reaching the
+historical frontier alone reports raw ingestion only. Historical ingestion and
+Projection remain chronological. The processing outbox persists source event
+time and recovers eligible historical Memory Event embedding work newest-first.
+KOE-354 owns throughput calibration and semantic-readiness ETA; KOE-355 owns the
+full cost-aware dynamic scheduler and aging/fairness policy.
 
 Detected Project data is immutable capture provenance on import source, raw row,
 and Captured Session records. It is not mutable Personal Project assignment,

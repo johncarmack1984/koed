@@ -104,6 +104,31 @@ describe("projection job scheduler", () => {
     ).not.toHaveBeenCalled();
   });
 
+  it("admits eligible historical Memory Event embeddings newest-first", async () => {
+    const { scheduler, embeddingQueue } = createScheduler();
+    await scheduler.enqueue({ userId: "user-1" }, [
+      {
+        ...historicalScope,
+        eventId: "oldest",
+        sourceEventTime: "2026-01-01T00:00:00.000Z"
+      },
+      {
+        ...historicalScope,
+        eventId: "newest",
+        sourceEventTime: "2026-07-01T00:00:00.000Z"
+      },
+      {
+        ...historicalScope,
+        eventId: "middle",
+        sourceEventTime: "2026-04-01T00:00:00.000Z"
+      }
+    ]);
+
+    expect(
+      embeddingQueue.add.mock.calls.map((call) => call[1].sourceId)
+    ).toEqual(["newest", "middle", "oldest"]);
+  });
+
   it("replays a bounded durable outbox batch after restart", async () => {
     const { scheduler, embeddingQueue, compactionQueue, repository } =
       createScheduler();

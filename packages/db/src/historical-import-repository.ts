@@ -11,7 +11,8 @@ import type {
   HistoricalImportRunDetail,
   HistoricalImportRunRecord,
   HistoricalImportSourceRecord,
-  HistoricalImportState
+  HistoricalImportState,
+  LiveTranscriptCursorAdvanceInput
 } from "./types.js";
 
 export interface HistoricalImportRepository {
@@ -42,6 +43,10 @@ export interface HistoricalImportRepository {
     actor: ActorContext,
     input: AdvanceHistoricalImportSourceInput
   ): Promise<HistoricalImportSourceRecord | null>;
+  advanceLiveTranscriptCursor(
+    actor: ActorContext,
+    input: LiveTranscriptCursorAdvanceInput
+  ): Promise<HistoricalImportSourceRecord>;
   ingestHistoricalImportBatch(
     actor: ActorContext,
     input: HistoricalImportBatchWriteInput
@@ -58,8 +63,10 @@ type CreateHistoricalImportSourceInput = {
   sourceKind: string;
   sourceSessionId: string;
   sourceFingerprint: string;
+  registrationFrontierOffset: number;
+  registrationPrefixHash: string;
   localSourcePath: string;
-  sourceSizeBytes?: number;
+  sourceSizeBytes: number;
   sourceModifiedAt?: string;
   sourceEventFrom?: string;
   sourceEventTo?: string;
@@ -135,11 +142,21 @@ type SourceRow = {
   source_kind: string;
   source_session_id: string;
   source_fingerprint: string;
+  registration_frontier_offset: string | number;
+  registration_prefix_hash: string;
   local_source_path: string;
   redacted_source_label: string;
   checkpoint_offset: string | number;
   checkpoint_line: number;
   checkpoint_hash: string | null;
+  historical_imported_ranges: Array<{
+    fromOffset: number;
+    toOffset: number;
+    checkpointHash: string;
+  }>;
+  live_cursor_offset: string | number;
+  live_cursor_line: number;
+  live_cursor_hash: string | null;
   source_size_bytes: string | number | null;
   source_modified_at: Date | null;
   source_event_from: Date | null;
@@ -148,6 +165,12 @@ type SourceRow = {
   imported_record_count: number;
   skipped_record_count: number;
   malformed_record_count: number;
+  raw_ingested_record_count: number;
+  projected_record_count: number;
+  embedding_eligible_event_count: number;
+  embedded_event_count: number;
+  lcm_eligible_event_count: number;
+  lcm_completed_event_count: number;
   retry_count: number;
   failure_reason: string | null;
   next_retry_at: Date | null;
@@ -204,11 +227,17 @@ const mapSource = (row: SourceRow): HistoricalImportSourceRecord => ({
   sourceKind: row.source_kind,
   sourceSessionId: row.source_session_id,
   sourceFingerprint: row.source_fingerprint,
+  registrationFrontierOffset: Number(row.registration_frontier_offset),
+  registrationPrefixHash: row.registration_prefix_hash,
   localSourcePath: row.local_source_path,
   redactedSourceLabel: row.redacted_source_label,
   checkpointOffset: Number(row.checkpoint_offset),
   checkpointLine: row.checkpoint_line,
   checkpointHash: row.checkpoint_hash,
+  historicalImportedRanges: row.historical_imported_ranges,
+  liveCursorOffset: Number(row.live_cursor_offset),
+  liveCursorLine: row.live_cursor_line,
+  liveCursorHash: row.live_cursor_hash,
   sourceSizeBytes:
     row.source_size_bytes === null ? null : Number(row.source_size_bytes),
   sourceModifiedAt: iso(row.source_modified_at),
@@ -218,6 +247,29 @@ const mapSource = (row: SourceRow): HistoricalImportSourceRecord => ({
   importedRecordCount: row.imported_record_count,
   skippedRecordCount: row.skipped_record_count,
   malformedRecordCount: row.malformed_record_count,
+  rawIngestedRecordCount: row.raw_ingested_record_count,
+  projectedRecordCount: row.projected_record_count,
+  embeddingEligibleEventCount: row.embedding_eligible_event_count,
+  embeddedEventCount: row.embedded_event_count,
+  lcmEligibleEventCount: row.lcm_eligible_event_count,
+  lcmCompletedEventCount: row.lcm_completed_event_count,
+  rawIngested:
+    Number(row.checkpoint_offset) === Number(row.registration_frontier_offset),
+  projected:
+    Number(row.checkpoint_offset) ===
+      Number(row.registration_frontier_offset) &&
+    row.projected_record_count >= row.raw_ingested_record_count,
+  partiallyEmbedded:
+    row.embedded_event_count > 0 &&
+    row.embedded_event_count < row.embedding_eligible_event_count,
+  fullyEmbedded:
+    row.embedding_eligible_event_count === row.embedded_event_count,
+  semanticReady:
+    Number(row.checkpoint_offset) ===
+      Number(row.registration_frontier_offset) &&
+    row.projected_record_count >= row.raw_ingested_record_count &&
+    row.embedding_eligible_event_count === row.embedded_event_count,
+  lcmComplete: row.lcm_eligible_event_count === row.lcm_completed_event_count,
   retryCount: row.retry_count,
   failureReason: row.failure_reason,
   nextRetryAt: iso(row.next_retry_at),
@@ -342,11 +394,100 @@ const getSource = async (
   actor: ActorContext,
   sourceId: string
 ): Promise<HistoricalImportSourceRecord | null> => {
+  await refreshSourceProgress(pool, actor.userId, sourceId);
   const result = await pool.query<SourceRow>(
     "select * from historical_import_sources where id = $2 and owner_user_id = $1",
     [actor.userId, sourceId]
   );
   return result.rows[0] ? mapSource(result.rows[0]) : null;
+};
+
+const refreshSourceProgress = async (
+  pool: pg.Pool,
+  ownerUserId: string,
+  sourceId: string
+): Promise<void> => {
+  await pool.query(
+    `with source as (
+       select id, owner_user_id, source_session_id, imported_record_count
+       from historical_import_sources where id = $2 and owner_user_id = $1
+     ), progress as (
+       select source.id, source.imported_record_count,
+         (select count(*)::int from conversation_items ci
+          join sessions s on s.id = ci.session_id
+          where s.owner_user_id = source.owner_user_id
+            and s.external_session_id = source.source_session_id
+            and exists (
+              select 1 from conversation_item_observations observation
+              where observation.conversation_item_id = ci.id
+                and observation.source_transport = 'historical_import'
+            )
+            and (ci.projected_at is not null or ci.projection_status = 'raw_only')) projected_count,
+         (select count(*)::int from memory_events me
+          join sessions s on s.id = me.session_id
+          where s.owner_user_id = source.owner_user_id
+            and s.external_session_id = source.source_session_id
+            and exists (
+              select 1 from memory_event_sources mes
+              join conversation_item_observations observation
+                on observation.conversation_item_id = mes.conversation_item_id
+              where mes.memory_event_id = me.id
+                and observation.source_transport = 'historical_import'
+            )
+            and me.invalidated_at is null and me.include_in_embedding) embedding_eligible_count,
+         (select count(distinct me.id)::int from memory_events me
+          join sessions s on s.id = me.session_id
+          join memory_embeddings emb on emb.memory_event_id = me.id
+            and emb.invalidated_at is null
+          where s.owner_user_id = source.owner_user_id
+            and s.external_session_id = source.source_session_id
+            and exists (
+              select 1 from memory_event_sources mes
+              join conversation_item_observations observation
+                on observation.conversation_item_id = mes.conversation_item_id
+              where mes.memory_event_id = me.id
+                and observation.source_transport = 'historical_import'
+            )
+            and me.invalidated_at is null and me.include_in_embedding) embedded_count,
+         (select count(*)::int from memory_events me
+          join sessions s on s.id = me.session_id
+          where s.owner_user_id = source.owner_user_id
+            and s.external_session_id = source.source_session_id
+            and exists (
+              select 1 from memory_event_sources mes
+              join conversation_item_observations observation
+                on observation.conversation_item_id = mes.conversation_item_id
+              where mes.memory_event_id = me.id
+                and observation.source_transport = 'historical_import'
+            )
+            and me.invalidated_at is null and me.include_in_lcm) lcm_eligible_count,
+         (select count(distinct me.id)::int from memory_events me
+          join sessions s on s.id = me.session_id
+          join memory_node_sources mns on mns.memory_event_id = me.id
+          join memory_nodes mn on mn.id = mns.memory_node_id
+            and mn.invalidated_at is null and mn.summary_model is not null
+          where s.owner_user_id = source.owner_user_id
+            and s.external_session_id = source.source_session_id
+            and exists (
+              select 1 from memory_event_sources mes
+              join conversation_item_observations observation
+                on observation.conversation_item_id = mes.conversation_item_id
+              where mes.memory_event_id = me.id
+                and observation.source_transport = 'historical_import'
+            )
+            and me.invalidated_at is null and me.include_in_lcm) lcm_completed_count
+       from source
+     )
+     update historical_import_sources his set
+       raw_ingested_record_count = progress.imported_record_count,
+       projected_record_count = progress.projected_count,
+       embedding_eligible_event_count = progress.embedding_eligible_count,
+       embedded_event_count = progress.embedded_count,
+       lcm_eligible_event_count = progress.lcm_eligible_count,
+       lcm_completed_event_count = progress.lcm_completed_count
+     from progress where his.id = progress.id`,
+    [ownerUserId, sourceId]
+  );
 };
 
 const transitionTimestampSql = `
@@ -469,7 +610,10 @@ const validateBatchCheckpoint = (
     input.checkpointLine < source.checkpointLine ||
     input.checkpointOffset <= input.expectedCheckpointOffset ||
     input.checkpointOffset > input.sourceSizeBytes ||
-    (source.sourceSizeBytes ?? 0) > input.sourceSizeBytes
+    input.checkpointOffset > source.registrationFrontierOffset ||
+    (input.checkpointOffset === source.registrationFrontierOffset &&
+      input.checkpointHash !== source.registrationPrefixHash) ||
+    input.sourceSizeBytes < source.liveCursorOffset
   ) {
     throw Object.assign(new Error("Historical import checkpoint conflict"), {
       statusCode: 409
@@ -587,15 +731,18 @@ const upsertSourceWithClient = (
   client.query<SourceRow>(
     `insert into historical_import_sources (
        run_id, owner_user_id, ai_client, source_kind, source_session_id,
-       source_fingerprint, local_source_path, redacted_source_label,
+       source_fingerprint, registration_frontier_offset,
+       registration_prefix_hash, live_cursor_offset, live_cursor_hash,
+       local_source_path, redacted_source_label,
        source_size_bytes, source_modified_at, source_event_from,
        source_event_to, discovered_record_count, detected_project
      )
-     select r.id, r.owner_user_id, $3, $4, $5, $6, $7, $8,
-       $9, $10, $11, $12, $13, $14
+     select r.id, r.owner_user_id, $3, $4, $5, $6, $7::bigint, $8::text,
+       $7::bigint, case when $7::bigint = 0 then null else $8::text end, $9, $10,
+       $11, $12, $13, $14, $15, $16
      from historical_import_runs r
      where r.id = $2 and r.owner_user_id = $1
-     on conflict (owner_user_id, ai_client, source_kind, source_session_id, source_fingerprint)
+     on conflict (owner_user_id, ai_client, source_kind, source_session_id)
      do update set
        local_source_path = excluded.local_source_path,
        redacted_source_label = excluded.redacted_source_label,
@@ -609,6 +756,14 @@ const upsertSourceWithClient = (
        ),
        last_observed_at = now(),
        updated_at = now()
+     where historical_import_sources.source_fingerprint = excluded.source_fingerprint
+       and historical_import_sources.registration_frontier_offset = excluded.registration_frontier_offset
+       and historical_import_sources.registration_prefix_hash = excluded.registration_prefix_hash
+       and excluded.source_size_bytes >= greatest(
+         historical_import_sources.checkpoint_offset,
+         historical_import_sources.live_cursor_offset,
+         historical_import_sources.registration_frontier_offset
+       )
      returning *`,
     [
       actor.userId,
@@ -617,6 +772,8 @@ const upsertSourceWithClient = (
       input.sourceKind,
       input.sourceSessionId,
       input.sourceFingerprint,
+      input.registrationFrontierOffset,
+      input.registrationPrefixHash,
       input.localSourcePath,
       sourceLabel(input.localSourcePath),
       input.sourceSizeBytes ?? null,
@@ -637,7 +794,13 @@ const advanceSourceWithClient = async (
     `update historical_import_sources set
        state = 'importing', checkpoint_offset = $4, checkpoint_line = $5,
        checkpoint_hash = $6, source_size_bytes = $7,
+       historical_imported_ranges = historical_imported_ranges ||
+         jsonb_build_array(jsonb_build_object(
+           'fromOffset', $3::bigint, 'toOffset', $4::bigint,
+           'checkpointHash', $6::text
+         )),
        imported_record_count = imported_record_count + $8,
+       raw_ingested_record_count = raw_ingested_record_count + $8,
        skipped_record_count = skipped_record_count + $9,
        malformed_record_count = malformed_record_count + $10,
        source_event_from = least(source_event_from, $11),
@@ -646,6 +809,9 @@ const advanceSourceWithClient = async (
        last_observed_at = now(), updated_at = now()
      where owner_user_id = $1 and id = $2 and checkpoint_offset = $3
        and checkpoint_hash is not distinct from $13
+       and $4 <= registration_frontier_offset
+       and ($4 < registration_frontier_offset or $6 = registration_prefix_hash)
+       and $7 >= live_cursor_offset
        and state in ('queued', 'importing') returning *`,
     [
       actor.userId,
@@ -697,6 +863,16 @@ const getRunDetail = async (
   if (!run) {
     return null;
   }
+  const sourceIds = await pool.query<{ id: string }>(
+    `select id from historical_import_sources
+     where run_id = $2 and owner_user_id = $1`,
+    [actor.userId, runId]
+  );
+  await Promise.all(
+    sourceIds.rows.map((source) =>
+      refreshSourceProgress(pool, actor.userId, source.id)
+    )
+  );
   const sources = await pool.query<SourceRow>(
     `select * from historical_import_sources
      where run_id = $2 and owner_user_id = $1 order by discovered_at, id`,
@@ -774,6 +950,13 @@ const transitionSourceRecord = (
   validateTransitionFailure(input);
   return withTransaction(pool, async (client) => {
     await lockImportOwner(client, actor.userId);
+    if (input.state === "completed") {
+      await refreshSourceProgress(
+        client as unknown as pg.Pool,
+        actor.userId,
+        input.sourceId
+      );
+    }
     const result = await client.query<SourceRow>(
       `update historical_import_sources set state = $4::historical_import_state,
          failure_reason = $5, next_retry_at = $6,
@@ -782,7 +965,10 @@ const transitionSourceRecord = (
          ${transitionTimestampSql}, updated_at = now()
        where owner_user_id = $1 and id = $2 and state = $3
          and ($4::text <> 'completed' or (
-           source_size_bytes is not null and checkpoint_offset = source_size_bytes
+           checkpoint_offset = registration_frontier_offset
+           and projected_record_count >= raw_ingested_record_count
+           and embedded_event_count = embedding_eligible_event_count
+           and lcm_completed_event_count = lcm_eligible_event_count
          ))
        returning *`,
       [
@@ -822,16 +1008,77 @@ const advanceSourceRecord = (
   return withTransaction(pool, async (client) => {
     await lockImportOwner(client, actor.userId);
     const source = await advanceSourceWithClient(client, actor, input);
-    if (source) {
-      await refreshRunCounters(
-        client as unknown as pg.Pool,
-        actor.userId,
-        source.runId
-      );
+    if (!source) {
+      throw Object.assign(new Error("Historical import checkpoint conflict"), {
+        statusCode: 409
+      });
     }
+    await refreshRunCounters(
+      client as unknown as pg.Pool,
+      actor.userId,
+      source.runId
+    );
     return source;
   });
 };
+
+const advanceLiveCursorRecord = (
+  pool: pg.Pool,
+  actor: ActorContext,
+  input: LiveTranscriptCursorAdvanceInput
+): Promise<HistoricalImportSourceRecord> =>
+  withTransaction(pool, async (client) => {
+    await lockImportOwner(client, actor.userId);
+    const source = await requireSourceForUpdate(client, actor, input.sourceId);
+    const expectedHash = input.expectedCursorHash ?? null;
+    if (
+      source.liveCursorOffset === input.cursorOffset &&
+      source.liveCursorLine === input.cursorLine &&
+      source.liveCursorHash === input.cursorHash &&
+      input.cursorOffset > input.expectedCursorOffset
+    ) {
+      return source;
+    }
+    if (
+      source.liveCursorOffset !== input.expectedCursorOffset ||
+      source.liveCursorHash !== expectedHash ||
+      input.cursorOffset <= input.expectedCursorOffset ||
+      input.cursorOffset < source.registrationFrontierOffset ||
+      input.cursorOffset > input.sourceSizeBytes ||
+      input.sourceSizeBytes < source.checkpointOffset
+    ) {
+      throw Object.assign(new Error("Live transcript cursor conflict"), {
+        statusCode: 409
+      });
+    }
+    const result = await client.query<SourceRow>(
+      `update historical_import_sources set
+         live_cursor_offset = $4, live_cursor_line = $5,
+         live_cursor_hash = $6, source_size_bytes = $7,
+         last_observed_at = now(), updated_at = now()
+       where owner_user_id = $1 and id = $2
+         and live_cursor_offset = $3
+         and live_cursor_hash is not distinct from $8
+         and checkpoint_offset <= $7
+       returning *`,
+      [
+        actor.userId,
+        input.sourceId,
+        input.expectedCursorOffset,
+        input.cursorOffset,
+        input.cursorLine,
+        input.cursorHash,
+        input.sourceSizeBytes,
+        expectedHash
+      ]
+    );
+    if (!result.rows[0]) {
+      throw Object.assign(new Error("Live transcript cursor conflict"), {
+        statusCode: 409
+      });
+    }
+    return mapSource(result.rows[0]);
+  });
 
 const batchSourceEventRange = (
   input: HistoricalImportBatchWriteInput
@@ -907,6 +1154,8 @@ export const createHistoricalImportRepository = (
     transitionSourceRecord(pool, actor, input),
   advanceHistoricalImportSource: (actor, input) =>
     advanceSourceRecord(pool, actor, input),
+  advanceLiveTranscriptCursor: (actor, input) =>
+    advanceLiveCursorRecord(pool, actor, input),
   ingestHistoricalImportBatch: (actor, input) =>
     ingestBatchRecord(pool, actor, input),
   getHistoricalImportSource: (actor, sourceId) =>

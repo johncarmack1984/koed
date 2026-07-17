@@ -518,9 +518,17 @@ they never contain source content or local paths. Historical backlog is shown
 only as redacted diagnostic counters in authenticated `/ops/status`; it is not
 part of `/ready` and does not make Koed unavailable.
 
-A historical source must set `source_transport=historical_import`. The raw-row
-repository persists its historical Projection class. Never label history from
-FIFO position, timestamp age, source path, or arbitrary metadata.
+FIFO is currently only the within-class tie-breaker. These fixed classes and
+bounded historical admission do not yet provide aging, token-cost fairness,
+per-User/tenant shares, reserved interactive capacity, or dynamic dispatch
+priority; KOE-355 owns that scheduler work.
+
+A coordinator registers each existing source with immutable fingerprint,
+source-session identity, complete-record frontier offset, and prefix hash.
+Pre-frontier rows receive the historical class. Post-frontier rows, including
+downtime catch-up, receive the live class. A source created after registration
+has a zero frontier and is live from its first complete record. Never label
+history from FIFO position, timestamp age, source path, or arbitrary metadata.
 
 Historical import control/status routes are enabled only when
 `KOED_DEPLOYMENT_PROFILE` resolves to `developer` or `local_personal`. They
@@ -532,10 +540,11 @@ Import coordinators persist source path through local-only source registration.
 Status and batch responses expose a redacted basename label and stable SHA-256
 fingerprint, never raw path or path-like detected Project fields. Coordinators
 must send transcript records through reusable `codex-transcript-v1` adapter and
-must use returned offset and SHA-256 checkpoint-prefix hash as next batch's
-expected checkpoint. Source growth is allowed; truncation, prefix mutation, and
-stale checkpoints fail explicitly. Exact completed retries return a read-only
-replay. Effective Capture Policy and Capture Pause are rechecked under the same
+must maintain the returned historical checkpoint/imported ranges separately
+from the live-tail/recovery cursor. Neither stream may derive from or update the
+other. Source growth is allowed; truncation, rotation/prefix mutation, and stale
+checkpoints fail explicitly. Exact retries return a read-only replay. Effective
+Capture Policy and Capture Pause are rechecked under the same
 owner-scoped transaction lock as each batch write.
 
 ## Data At Rest

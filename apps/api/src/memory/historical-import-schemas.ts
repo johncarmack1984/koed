@@ -76,8 +76,10 @@ export const createHistoricalImportSourceSchema = z
     sourceKind: z.literal("codex"),
     sourceSessionId: boundedText,
     sourceFingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+    registrationFrontierOffset: boundedBytes,
+    registrationPrefixHash: checkpointHash,
     localSourcePath: localPath,
-    sourceSizeBytes: boundedBytes.optional(),
+    sourceSizeBytes: boundedBytes,
     sourceModifiedAt: z.string().datetime({ offset: true }).optional(),
     sourceEventFrom: z.string().datetime({ offset: true }).optional(),
     sourceEventTo: z.string().datetime({ offset: true }).optional(),
@@ -85,6 +87,16 @@ export const createHistoricalImportSourceSchema = z
     detectedProject: detectedProjectSchema.optional()
   })
   .superRefine((value, context) => {
+    if (
+      value.sourceSizeBytes !== undefined &&
+      value.registrationFrontierOffset > value.sourceSizeBytes
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["registrationFrontierOffset"],
+        message: "Registration frontier exceeds source size"
+      });
+    }
     if (
       value.sourceEventFrom &&
       value.sourceEventTo &&
@@ -294,4 +306,36 @@ export const historicalImportBatchSchema =
     validateBatchItems(value, context);
     validateBatchCheckpoint(value, context);
     validateBatchEventRange(value, context);
+  });
+
+export const liveTranscriptCursorSchema = z
+  .object({
+    expectedCursorOffset: boundedBytes,
+    expectedCursorHash: checkpointHash.nullable().optional(),
+    cursorOffset: boundedBytes,
+    cursorLine: boundedCounter,
+    cursorHash: checkpointHash,
+    sourceSizeBytes: boundedBytes
+  })
+  .superRefine((value, context) => {
+    if (
+      value.cursorOffset <= value.expectedCursorOffset ||
+      value.cursorOffset > value.sourceSizeBytes
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["cursorOffset"],
+        message: "Live cursor must advance within current source size"
+      });
+    }
+    if (
+      (value.expectedCursorOffset === 0 && value.expectedCursorHash != null) ||
+      (value.expectedCursorOffset > 0 && !value.expectedCursorHash)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["expectedCursorHash"],
+        message: "Live cursor expected hash does not match its offset"
+      });
+    }
   });

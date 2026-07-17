@@ -2433,11 +2433,20 @@ const createFakeRepository = () => {
         sourceKind: input.sourceKind,
         sourceSessionId: input.sourceSessionId,
         sourceFingerprint: input.sourceFingerprint,
+        registrationFrontierOffset: input.registrationFrontierOffset,
+        registrationPrefixHash: input.registrationPrefixHash,
         localSourcePath: input.localSourcePath,
         redactedSourceLabel: `…/${basename || "Codex history"}`,
         checkpointOffset: 0,
         checkpointLine: 0,
         checkpointHash: null,
+        historicalImportedRanges: [],
+        liveCursorOffset: input.registrationFrontierOffset,
+        liveCursorLine: 0,
+        liveCursorHash:
+          input.registrationFrontierOffset === 0
+            ? null
+            : input.registrationPrefixHash,
         sourceSizeBytes: input.sourceSizeBytes ?? null,
         sourceModifiedAt: input.sourceModifiedAt ?? null,
         sourceEventFrom: input.sourceEventFrom ?? null,
@@ -2446,6 +2455,18 @@ const createFakeRepository = () => {
         importedRecordCount: 0,
         skippedRecordCount: 0,
         malformedRecordCount: 0,
+        rawIngestedRecordCount: 0,
+        projectedRecordCount: 0,
+        embeddingEligibleEventCount: 0,
+        embeddedEventCount: 0,
+        lcmEligibleEventCount: 0,
+        lcmCompletedEventCount: 0,
+        rawIngested: input.registrationFrontierOffset === 0,
+        projected: input.registrationFrontierOffset === 0,
+        partiallyEmbedded: false,
+        fullyEmbedded: true,
+        semanticReady: input.registrationFrontierOffset === 0,
+        lcmComplete: true,
         retryCount: 0,
         failureReason: null,
         nextRetryAt: null,
@@ -2530,12 +2551,47 @@ const createFakeRepository = () => {
           source.skippedRecordCount + (input.skippedRecordCount ?? 0),
         malformedRecordCount:
           source.malformedRecordCount + (input.malformedRecordCount ?? 0),
+        historicalImportedRanges: [
+          ...source.historicalImportedRanges,
+          {
+            fromOffset: input.expectedCheckpointOffset,
+            toOffset: input.checkpointOffset,
+            checkpointHash: input.checkpointHash
+          }
+        ],
+        rawIngestedRecordCount:
+          source.rawIngestedRecordCount + input.importedRecordCount,
+        rawIngested:
+          input.checkpointOffset === source.registrationFrontierOffset,
         sourceEventFrom:
           source.sourceEventFrom ?? input.sourceEventFrom ?? null,
         sourceEventTo: input.sourceEventTo ?? source.sourceEventTo,
         importStartedAt: source.importStartedAt ?? now,
         lastObservedAt: now,
         updatedAt: now
+      };
+      historicalImportSources.set(source.id, updated);
+      return updated;
+    },
+    async advanceLiveTranscriptCursor(actor, input) {
+      const source = historicalImportSources.get(input.sourceId);
+      if (
+        !source ||
+        source.ownerUserId !== actor.userId ||
+        source.liveCursorOffset !== input.expectedCursorOffset ||
+        source.liveCursorHash !== (input.expectedCursorHash ?? null)
+      ) {
+        throw Object.assign(new Error("Live transcript cursor conflict"), {
+          statusCode: 409
+        });
+      }
+      const updated = {
+        ...source,
+        liveCursorOffset: input.cursorOffset,
+        liveCursorLine: input.cursorLine,
+        liveCursorHash: input.cursorHash,
+        sourceSizeBytes: input.sourceSizeBytes,
+        updatedAt: new Date().toISOString()
       };
       historicalImportSources.set(source.id, updated);
       return updated;
@@ -10800,8 +10856,10 @@ describe("account and access flows", () => {
         sourceKind: "codex",
         sourceSessionId: "historical-session",
         sourceFingerprint: "a".repeat(64),
+        registrationFrontierOffset: 100,
+        registrationPrefixHash: "f".repeat(64),
         localSourcePath: "/Users/alice/.codex/sessions/private.jsonl",
-        sourceSizeBytes: 0,
+        sourceSizeBytes: 100,
         detectedProject: {
           name: "Koed",
           path: "/Users/alice/private/koed",
@@ -10842,6 +10900,15 @@ describe("account and access flows", () => {
     ).toEqual([
       expect.objectContaining({
         sourceLabel: "…/private.jsonl",
+        registrationFrontierOffset: 100,
+        checkpointOffset: 0,
+        liveCursorOffset: 100,
+        rawIngested: false,
+        projected: false,
+        partiallyEmbedded: false,
+        fullyEmbedded: true,
+        semanticReady: false,
+        lcmComplete: true,
         detectedProject: { name: "Koed", branch: "main" }
       })
     ]);

@@ -28,6 +28,7 @@ interface ProjectionScope {
   workClass: KoedWorkClass;
   includeInEmbedding: boolean;
   includeInLcm: boolean;
+  sourceEventTime?: string | null;
 }
 
 interface ProjectionDispatchGroup {
@@ -126,10 +127,24 @@ const scheduleScopes = async (
   scopes: ProjectionScope[]
 ): Promise<void> => {
   if (scopes.length === 0) return;
-  await mapWithConcurrency(
-    scopes.filter((scope) => scope.includeInEmbedding),
-    10,
-    (scope) => enqueueEmbedding(config, scope)
+  const embeddingScopes = scopes
+    .filter((scope) => scope.includeInEmbedding)
+    .sort((left, right) => {
+      if (
+        left.workClass !== "historical_import_backfill" ||
+        right.workClass !== "historical_import_backfill"
+      ) {
+        return 0;
+      }
+      const rightTime = Date.parse(right.sourceEventTime ?? "");
+      const leftTime = Date.parse(left.sourceEventTime ?? "");
+      return (
+        (Number.isNaN(rightTime) ? 0 : rightTime) -
+        (Number.isNaN(leftTime) ? 0 : leftTime)
+      );
+    });
+  await mapWithConcurrency(embeddingScopes, 10, (scope) =>
+    enqueueEmbedding(config, scope)
   );
   await enqueueCompactions(config, actor, scopes);
   await config.repository.markConversationProjectionProcessingDispatched(

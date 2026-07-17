@@ -1975,6 +1975,12 @@ export const historicalImportSources = pgTable(
     sourceKind: text("source_kind").notNull(),
     sourceSessionId: text("source_session_id").notNull(),
     sourceFingerprint: text("source_fingerprint").notNull(),
+    registrationFrontierOffset: bigint("registration_frontier_offset", {
+      mode: "number"
+    })
+      .notNull()
+      .default(0),
+    registrationPrefixHash: text("registration_prefix_hash").notNull(),
     localSourcePath: text("local_source_path").notNull(),
     redactedSourceLabel: text("redacted_source_label").notNull(),
     checkpointOffset: bigint("checkpoint_offset", { mode: "number" })
@@ -1982,6 +1988,17 @@ export const historicalImportSources = pgTable(
       .default(0),
     checkpointLine: integer("checkpoint_line").notNull().default(0),
     checkpointHash: text("checkpoint_hash"),
+    historicalImportedRanges: jsonb("historical_imported_ranges")
+      .$type<
+        Array<{ fromOffset: number; toOffset: number; checkpointHash: string }>
+      >()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    liveCursorOffset: bigint("live_cursor_offset", { mode: "number" })
+      .notNull()
+      .default(0),
+    liveCursorLine: integer("live_cursor_line").notNull().default(0),
+    liveCursorHash: text("live_cursor_hash"),
     sourceSizeBytes: bigint("source_size_bytes", { mode: "number" }),
     sourceModifiedAt: timestamp("source_modified_at", { withTimezone: true }),
     sourceEventFrom: timestamp("source_event_from", { withTimezone: true }),
@@ -1992,6 +2009,22 @@ export const historicalImportSources = pgTable(
     importedRecordCount: integer("imported_record_count").notNull().default(0),
     skippedRecordCount: integer("skipped_record_count").notNull().default(0),
     malformedRecordCount: integer("malformed_record_count")
+      .notNull()
+      .default(0),
+    rawIngestedRecordCount: integer("raw_ingested_record_count")
+      .notNull()
+      .default(0),
+    projectedRecordCount: integer("projected_record_count")
+      .notNull()
+      .default(0),
+    embeddingEligibleEventCount: integer("embedding_eligible_event_count")
+      .notNull()
+      .default(0),
+    embeddedEventCount: integer("embedded_event_count").notNull().default(0),
+    lcmEligibleEventCount: integer("lcm_eligible_event_count")
+      .notNull()
+      .default(0),
+    lcmCompletedEventCount: integer("lcm_completed_event_count")
       .notNull()
       .default(0),
     retryCount: integer("retry_count").notNull().default(0),
@@ -2028,8 +2061,7 @@ export const historicalImportSources = pgTable(
       table.ownerUserId,
       table.aiClient,
       table.sourceKind,
-      table.sourceSessionId,
-      table.sourceFingerprint
+      table.sourceSessionId
     ),
     index("historical_import_sources_run_state_idx").on(
       table.runId,
@@ -2038,11 +2070,11 @@ export const historicalImportSources = pgTable(
     ),
     check(
       "historical_import_sources_fingerprint_check",
-      sql`${table.sourceFingerprint} ~ '^[0-9a-f]{64}$'`
+      sql`${table.sourceFingerprint} ~ '^[0-9a-f]{64}$' and ${table.registrationPrefixHash} ~ '^[0-9a-f]{64}$'`
     ),
     check(
       "historical_import_sources_counters_check",
-      sql`${table.checkpointOffset} >= 0 and ${table.checkpointLine} >= 0 and (${table.checkpointHash} is null or ${table.checkpointHash} ~ '^[0-9a-f]{64}$') and (${table.sourceSizeBytes} is null or ${table.sourceSizeBytes} >= 0) and ${table.discoveredRecordCount} >= 0 and ${table.importedRecordCount} >= 0 and ${table.skippedRecordCount} >= 0 and ${table.malformedRecordCount} >= 0 and ${table.retryCount} between 0 and 1000`
+      sql`${table.registrationFrontierOffset} >= 0 and ${table.checkpointOffset} >= 0 and ${table.checkpointOffset} <= ${table.registrationFrontierOffset} and ${table.liveCursorOffset} >= ${table.registrationFrontierOffset} and ${table.checkpointLine} >= 0 and ${table.liveCursorLine} >= 0 and (${table.checkpointHash} is null or ${table.checkpointHash} ~ '^[0-9a-f]{64}$') and (${table.liveCursorHash} is null or ${table.liveCursorHash} ~ '^[0-9a-f]{64}$') and (${table.sourceSizeBytes} is null or ${table.sourceSizeBytes} >= greatest(${table.registrationFrontierOffset}, ${table.liveCursorOffset})) and ${table.discoveredRecordCount} >= 0 and ${table.importedRecordCount} >= 0 and ${table.skippedRecordCount} >= 0 and ${table.malformedRecordCount} >= 0 and ${table.rawIngestedRecordCount} >= 0 and ${table.projectedRecordCount} >= 0 and ${table.embeddingEligibleEventCount} >= 0 and ${table.embeddedEventCount} between 0 and ${table.embeddingEligibleEventCount} and ${table.lcmEligibleEventCount} >= 0 and ${table.lcmCompletedEventCount} between 0 and ${table.lcmEligibleEventCount} and ${table.retryCount} between 0 and 1000`
     ),
     check(
       "historical_import_sources_event_range_check",
@@ -3444,6 +3476,7 @@ export const conversationProjectionProcessingOutbox = pgTable(
     workClass: text("work_class").notNull(),
     includeInEmbedding: boolean("include_in_embedding").notNull(),
     includeInLcm: boolean("include_in_lcm").notNull(),
+    sourceEventTime: timestamp("source_event_time", { withTimezone: true }),
     createdAt: now(),
     dispatchedAt: timestamp("dispatched_at", { withTimezone: true })
   },

@@ -153,7 +153,9 @@ const observationMetadata = (input: {
   parentThreadId: input.adapter.parentThreadId,
   ...(input.adapter.sourceTransport === "historical_import"
     ? { observedViaHistoricalImport: true }
-    : { observedViaHook: true }),
+    : input.adapter.sourceTransport === "hook"
+      ? { observedViaHook: true }
+      : { observedViaTranscript: true }),
   ...(input.adapter.sourceFingerprint
     ? { sourceFingerprint: input.adapter.sourceFingerprint }
     : {})

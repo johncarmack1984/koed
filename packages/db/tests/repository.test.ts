@@ -20159,7 +20159,8 @@ describeDb("memory repository visibility", () => {
         visibility: "personal",
         workClass: "historical_import_backfill",
         includeInEmbedding: true,
-        includeInLcm: true
+        includeInLcm: true,
+        sourceEventTime: null
       }
     ]);
     await expect(

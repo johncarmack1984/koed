@@ -100,6 +100,8 @@ describeDb("durable historical import repository", () => {
         sourceKind: "codex",
         sourceSessionId: `session-${randomUUID()}`,
         sourceFingerprint: fingerprint("a"),
+        registrationFrontierOffset: 100,
+        registrationPrefixHash: "1".repeat(64),
         localSourcePath: "/Users/private/.codex/sessions/private.jsonl",
         sourceSizeBytes: 100,
         discoveredRecordCount: 3,
@@ -190,6 +192,147 @@ describeDb("durable historical import repository", () => {
     expect(
       await repo.getCapturedSession({ userId: secondOwner.id }, first.id)
     ).toBeNull();
+  });
+
+  it("keeps immutable registration frontier, historical checkpoint, and live cursor independent", async () => {
+    const repo = createMemorySourceRepository(pool);
+    const owner = await repo.createUser({
+      email: `frontier-owner-${randomUUID()}@example.com`
+    });
+    const run = await repo.createHistoricalImportRun({ userId: owner.id });
+    const sourceSessionId = `frontier-session-${randomUUID()}`;
+    const prefixHash = "3".repeat(64);
+    const source = await repo.createHistoricalImportSource(
+      { userId: owner.id },
+      {
+        runId: run.id,
+        aiClient: "codex",
+        sourceKind: "codex",
+        sourceSessionId,
+        sourceFingerprint: "4".repeat(64),
+        registrationFrontierOffset: 100,
+        registrationPrefixHash: prefixHash,
+        localSourcePath: "/private/original.jsonl",
+        sourceSizeBytes: 150
+      }
+    );
+    await repo.transitionHistoricalImportSource(
+      { userId: owner.id },
+      { sourceId: source!.id, expectedState: "discovered", state: "eligible" }
+    );
+    await repo.transitionHistoricalImportSource(
+      { userId: owner.id },
+      { sourceId: source!.id, expectedState: "eligible", state: "queued" }
+    );
+    await repo.advanceHistoricalImportSource(
+      { userId: owner.id },
+      {
+        sourceId: source!.id,
+        expectedCheckpointOffset: 0,
+        checkpointOffset: 60,
+        checkpointLine: 2,
+        checkpointHash: "5".repeat(64),
+        sourceSizeBytes: 150,
+        importedRecordCount: 2
+      }
+    );
+    await repo.advanceLiveTranscriptCursor(
+      { userId: owner.id },
+      {
+        sourceId: source!.id,
+        expectedCursorOffset: 100,
+        expectedCursorHash: prefixHash,
+        cursorOffset: 150,
+        cursorLine: 5,
+        cursorHash: "6".repeat(64),
+        sourceSizeBytes: 150
+      }
+    );
+    const restarted = createHistoricalImportRepository(pool);
+    expect(
+      await restarted.getHistoricalImportSource(
+        { userId: owner.id },
+        source!.id
+      )
+    ).toMatchObject({
+      registrationFrontierOffset: 100,
+      registrationPrefixHash: prefixHash,
+      checkpointOffset: 60,
+      liveCursorOffset: 150,
+      historicalImportedRanges: [
+        {
+          fromOffset: 0,
+          toOffset: 60,
+          checkpointHash: "5".repeat(64)
+        }
+      ]
+    });
+    await expect(
+      repo.advanceHistoricalImportSource(
+        { userId: owner.id },
+        {
+          sourceId: source!.id,
+          expectedCheckpointOffset: 60,
+          expectedCheckpointHash: "5".repeat(64),
+          checkpointOffset: 110,
+          checkpointLine: 4,
+          checkpointHash: "7".repeat(64),
+          sourceSizeBytes: 150,
+          importedRecordCount: 1
+        }
+      )
+    ).rejects.toThrow("conflict");
+    await expect(
+      repo.advanceLiveTranscriptCursor(
+        { userId: owner.id },
+        {
+          sourceId: source!.id,
+          expectedCursorOffset: 150,
+          expectedCursorHash: "6".repeat(64),
+          cursorOffset: 160,
+          cursorLine: 6,
+          cursorHash: "8".repeat(64),
+          sourceSizeBytes: 90
+        }
+      )
+    ).rejects.toThrow("conflict");
+    expect(
+      await repo.createHistoricalImportSource(
+        { userId: owner.id },
+        {
+          runId: run.id,
+          aiClient: "codex",
+          sourceKind: "codex",
+          sourceSessionId,
+          sourceFingerprint: "9".repeat(64),
+          registrationFrontierOffset: 100,
+          registrationPrefixHash: "a".repeat(64),
+          localSourcePath: "/private/mutated.jsonl",
+          sourceSizeBytes: 160
+        }
+      )
+    ).toBeNull();
+    const newSource = await repo.createHistoricalImportSource(
+      { userId: owner.id },
+      {
+        runId: run.id,
+        aiClient: "codex",
+        sourceKind: "codex",
+        sourceSessionId: `new-${randomUUID()}`,
+        sourceFingerprint: "b".repeat(64),
+        registrationFrontierOffset: 0,
+        registrationPrefixHash:
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        localSourcePath: "/private/new.jsonl",
+        sourceSizeBytes: 0
+      }
+    );
+    expect(newSource).toMatchObject({
+      registrationFrontierOffset: 0,
+      checkpointOffset: 0,
+      liveCursorOffset: 0,
+      rawIngested: true
+    });
   });
 
   it("converges import and Hook Captured Sessions by owner and source session", async () => {
@@ -331,6 +474,8 @@ describeDb("durable historical import repository", () => {
         sourceKind: "codex",
         sourceSessionId: `batch-session-${randomUUID()}`,
         sourceFingerprint: "d".repeat(64),
+        registrationFrontierOffset: 100,
+        registrationPrefixHash: "e".repeat(64),
         localSourcePath: "/Users/private/.codex/sessions/batch.jsonl",
         sourceSizeBytes: 100,
         detectedProject: {
@@ -499,13 +644,21 @@ describeDb("durable historical import repository", () => {
           state: "completed"
         }
       )
-    ).not.toBeNull();
+    ).toBeNull();
+    expect(
+      await repo.getHistoricalImportSource({ userId: owner.id }, source!.id)
+    ).toMatchObject({
+      rawIngested: true,
+      rawIngestedRecordCount: 1,
+      semanticReady: false,
+      lcmComplete: true
+    });
     expect(
       await repo.transitionHistoricalImportRun(
         { userId: owner.id },
         { runId: run.id, expectedState: "importing", state: "completed" }
       )
-    ).not.toBeNull();
+    ).toBeNull();
     await expect(
       repo.ingestHistoricalImportBatch({ userId: owner.id }, batch)
     ).resolves.toMatchObject({ replayed: true, items: [] });
@@ -663,5 +816,71 @@ describeDb("durable historical import repository", () => {
       [owner.id]
     );
     expect(teamArtifacts.rows[0]).toEqual({ grants: "0", access: "0" });
+  });
+
+  it("converges Hook-first, watcher-first, and historical-first item observations with immutable provenance", async () => {
+    const repo = createMemorySourceRepository(pool);
+    const owner = await repo.createUser({
+      email: `transport-order-${randomUUID()}@example.com`
+    });
+    for (const order of [
+      ["hook", "transcript", "historical_import"],
+      ["transcript", "historical_import", "hook"],
+      ["historical_import", "hook", "transcript"]
+    ] as const) {
+      const externalSessionId = `transport-${randomUUID()}`;
+      const session = await repo.createCapturedSession(
+        { userId: owner.id },
+        {
+          externalSessionId,
+          idempotencyKey: `session-${externalSessionId}`
+        }
+      );
+      const canonicalKey = `conversation-item:${randomUUID()}`;
+      const ids: string[] = [];
+      for (const transport of order) {
+        const [item] = await repo.createConversationItems(
+          { userId: owner.id },
+          {
+            items: [
+              {
+                ...transcriptItem({
+                  sessionId: session.id,
+                  transport,
+                  path:
+                    transport === "historical_import"
+                      ? undefined
+                      : `/private/${transport}.jsonl`
+                }),
+                externalSessionId,
+                externalThreadId: externalSessionId,
+                idempotencyKey: canonicalKey,
+                metadata: {
+                  transcriptByteOffset: 128,
+                  transcriptItemDiscriminator: "primary:codex_transcript_user",
+                  ...(transport === "hook"
+                    ? { observedViaHook: true }
+                    : transport === "transcript"
+                      ? { observedViaTranscript: true }
+                      : { observedViaHistoricalImport: true })
+                }
+              }
+            ]
+          }
+        );
+        ids.push(item!.id);
+      }
+      expect(new Set(ids).size).toBe(1);
+      const observations = await pool.query<{ source_transport: string }>(
+        `select source_transport from conversation_item_observations
+         where conversation_item_id = $1 order by source_transport`,
+        [ids[0]]
+      );
+      expect(observations.rows.map((row) => row.source_transport)).toEqual([
+        "historical_import",
+        "hook",
+        "transcript"
+      ]);
+    }
   });
 });

@@ -216,4 +216,76 @@ describe("codex-transcript-v1 adapter", () => {
     expect(items[0]?.idempotencyKey).not.toBe(items[1]?.idempotencyKey);
     expect(items.map((item) => item.sourceSequence)).toEqual([1024, 1025]);
   });
+
+  it("keeps response_item user, assistant, synthetic-turn, and observation identities path independent", () => {
+    const records = [
+      {
+        timestamp: "2026-07-01T12:00:00.000Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Moved transcript" }]
+        }
+      },
+      {
+        timestamp: "2026-07-01T12:00:01.000Z",
+        type: "response_item",
+        payload: {
+          id: "assistant-item-1",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Same canonical answer" }]
+        }
+      }
+    ];
+    const common = {
+      records,
+      sourceSessionId: "response-session-1",
+      threadKind: "conversation" as const
+    };
+    const first = buildCodexTranscriptConversationItems({
+      ...common,
+      sourceTransport: "hook",
+      localSourcePath: "/private/first/session.jsonl"
+    });
+    const moved = buildCodexTranscriptConversationItems({
+      ...common,
+      sourceTransport: "transcript",
+      localSourcePath: "/private/moved/session.jsonl"
+    });
+    const imported = buildCodexTranscriptConversationItems({
+      ...common,
+      sourceTransport: "historical_import",
+      localSourcePath: "/private/import/session.jsonl"
+    });
+
+    expect(moved.map((item) => item.idempotencyKey)).toEqual(
+      first.map((item) => item.idempotencyKey)
+    );
+    expect(imported.map((item) => item.idempotencyKey)).toEqual(
+      first.map((item) => item.idempotencyKey)
+    );
+    expect(moved.map((item) => item.externalTurnId)).toEqual(
+      first.map((item) => item.externalTurnId)
+    );
+    expect(imported.map((item) => item.externalTurnId)).toEqual(
+      first.map((item) => item.externalTurnId)
+    );
+    expect(first.every((item) => item.metadata.observedViaHook === true)).toBe(
+      true
+    );
+    expect(
+      moved.every(
+        (item) =>
+          item.metadata.observedViaTranscript === true &&
+          item.metadata.observedViaHook === undefined
+      )
+    ).toBe(true);
+    expect(
+      imported.every(
+        (item) => item.metadata.observedViaHistoricalImport === true
+      )
+    ).toBe(true);
+  });
 });

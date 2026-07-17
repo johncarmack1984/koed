@@ -12,7 +12,8 @@ import {
   historicalImportRunListSchema,
   historicalImportRunParamsSchema,
   historicalImportSourceParamsSchema,
-  historicalImportTransitionSchema
+  historicalImportTransitionSchema,
+  liveTranscriptCursorSchema
 } from "./historical-import-schemas.js";
 
 const localProfiles = new Set(["developer", "local_personal"]);
@@ -314,6 +315,31 @@ const registerBatchRoute = (
   );
 };
 
+const registerLiveCursorRoute = (
+  app: FastifyInstance,
+  context: ApiRouteContext
+): void => {
+  app.post(
+    "/v1/historical-import-sources/:sourceId/live-cursor",
+    { preHandler: context.rateLimit.memoryWrite },
+    async (request) => {
+      requireLocalImportSurface(context);
+      const user = await context.auth.authenticate(request);
+      const { sourceId } = historicalImportSourceParamsSchema.parse(
+        request.params
+      );
+      const input = liveTranscriptCursorSchema.parse(request.body);
+      const source = await context
+        .requireRepository()
+        .advanceLiveTranscriptCursor(
+          { userId: user.id },
+          { sourceId, ...input }
+        );
+      return { source: presentSource(source) };
+    }
+  );
+};
+
 export const registerHistoricalImportRoutes = (
   app: FastifyInstance,
   context: ApiRouteContext
@@ -325,4 +351,5 @@ export const registerHistoricalImportRoutes = (
   registerRunTransitionRoute(app, context);
   registerSourceTransitionRoute(app, context);
   registerBatchRoute(app, context);
+  registerLiveCursorRoute(app, context);
 };

@@ -2089,12 +2089,10 @@ const transcriptRecordCompletesTurn = (record: unknown): boolean => {
 
 const semanticTurnIdForUserPrompt = (input: {
   externalSessionId?: string;
-  transcriptPath?: string;
   sourceSequence: number;
 }): string =>
   `transcript-user-turn:${hash({
     externalSessionId: input.externalSessionId,
-    transcriptPath: input.transcriptPath,
     sourceSequence: input.sourceSequence
   })}`;
 
@@ -2518,35 +2516,6 @@ const rawText = (record: unknown): string | undefined => {
   );
 };
 
-const sourceObservationIdentityForRawRecord = (input: {
-  externalSessionId?: string;
-  transcriptPath?: string;
-  sourceLineNumber: number;
-  transcriptByteOffset?: number;
-  record: unknown;
-  itemDiscriminator?: string;
-}): string =>
-  hash({
-    adapter: "codex-transcript-v1",
-    externalSessionId: input.externalSessionId,
-    transcriptPath: input.transcriptPath,
-    sourcePosition:
-      input.transcriptByteOffset ?? `line:${input.sourceLineNumber}`,
-    itemDiscriminator: input.itemDiscriminator,
-    sourceRecordType: rawRecordType(input.record),
-    sourceEventType: rawEventType(input.record)
-  });
-
-const sourceContentHashForRawRecord = (input: {
-  record: unknown;
-  itemDiscriminator?: string;
-}): string =>
-  hash({
-    adapter: "codex-transcript-v1",
-    itemDiscriminator: input.itemDiscriminator,
-    record: input.record
-  });
-
 const buildRawHookConversationItem = (input: {
   sessionId?: string;
   effectiveContext: EffectiveCaptureContext;
@@ -2692,46 +2661,45 @@ export const buildRawTranscriptConversationItems = (input: {
       : {})
   };
 
+  const observations: CodexTranscriptObservation[] = input.records.map(
+    (record, index) => {
+      const sourceLineNumber =
+        transcriptRecordLineIndex(record) ?? index + (input.indexOffset ?? 0);
+      return {
+        record,
+        sourceLineNumber,
+        transcriptByteOffset: transcriptRecordPosition(record),
+        explicitTurnId:
+          transcriptAssignedTurnId(record) ?? transcriptTurnId(record),
+        startsTurn: transcriptRecordStartsTurn(record),
+        completesTurn: transcriptRecordCompletesTurn(record),
+        externalItemId: rawExternalItemId(record),
+        sourceRecordType: rawRecordType(record),
+        sourceEventType: rawEventType(record),
+        eventTime: effectiveRawEventTime(record),
+        eventTimeAccuracy: rawEventTimeAccuracy(record),
+        fallbackRawText: rawText(record),
+        parsedItems: extractTranscriptItems(record, sourceLineNumber, {
+          preferEventMessages,
+          preferStableResponseItems: preferProviderResponseItems,
+          context
+        })
+      };
+    }
+  );
+  const adaptedItems = adaptCodexTranscriptV1({
+    observations,
+    sessionId: input.sessionId,
+    sourceSessionId: input.effectiveContext.externalSessionId,
+    sourceTransport: input.sourceTransport ?? "hook",
+    localSourcePath: input.transcriptPath,
+    sourceFingerprint: input.sourceFingerprint,
+    hookEventName: input.payload.hook_event_name,
+    threadKind: input.effectiveContext.isSubagent ? "subagent" : "conversation",
+    parentThreadId: input.effectiveContext.parentThreadId
+  });
   if (!preferProviderResponseItems) {
-    const observations: CodexTranscriptObservation[] = input.records.map(
-      (record, index) => {
-        const sourceLineNumber =
-          transcriptRecordLineIndex(record) ?? index + (input.indexOffset ?? 0);
-        return {
-          record,
-          sourceLineNumber,
-          transcriptByteOffset: transcriptRecordPosition(record),
-          explicitTurnId:
-            transcriptAssignedTurnId(record) ?? transcriptTurnId(record),
-          startsTurn: transcriptRecordStartsTurn(record),
-          completesTurn: transcriptRecordCompletesTurn(record),
-          externalItemId: rawExternalItemId(record),
-          sourceRecordType: rawRecordType(record),
-          sourceEventType: rawEventType(record),
-          eventTime: effectiveRawEventTime(record),
-          eventTimeAccuracy: rawEventTimeAccuracy(record),
-          fallbackRawText: rawText(record),
-          parsedItems: extractTranscriptItems(record, sourceLineNumber, {
-            preferEventMessages,
-            preferStableResponseItems: false,
-            context
-          })
-        };
-      }
-    );
-    return adaptCodexTranscriptV1({
-      observations,
-      sessionId: input.sessionId,
-      sourceSessionId: input.effectiveContext.externalSessionId,
-      sourceTransport: input.sourceTransport ?? "hook",
-      localSourcePath: input.transcriptPath,
-      sourceFingerprint: input.sourceFingerprint,
-      hookEventName: input.payload.hook_event_name,
-      threadKind: input.effectiveContext.isSubagent
-        ? "subagent"
-        : "conversation",
-      parentThreadId: input.effectiveContext.parentThreadId
-    });
+    return adaptedItems;
   }
 
   const items: RawConversationItemRequest[] = [];
@@ -2768,12 +2736,9 @@ export const buildRawTranscriptConversationItems = (input: {
               sourceOffset: 0
             }
           ];
-    const needsItemDiscriminator = rawItems.length > 1;
-
     if (hasLogicalUserPrompt && !explicitTurnId && !activeTranscriptTurnId) {
       activeSemanticTurnId = semanticTurnIdForUserPrompt({
         externalSessionId: input.effectiveContext.externalSessionId,
-        transcriptPath: input.transcriptPath,
         sourceSequence: sourceSequenceBase
       });
     }
@@ -2787,21 +2752,14 @@ export const buildRawTranscriptConversationItems = (input: {
       const sourceSequence = safeSourceSequence(
         sourceSequenceBase + parsedItem.sourceOffset
       );
-      const itemDiscriminator = needsItemDiscriminator
-        ? parsedItem.itemDiscriminator
-        : undefined;
-      const sourceHash = sourceContentHashForRawRecord({
-        record,
-        itemDiscriminator
-      });
-      const sourceIdempotencyKey = sourceObservationIdentityForRawRecord({
-        externalSessionId: input.effectiveContext.externalSessionId,
-        transcriptPath: input.transcriptPath,
-        sourceLineNumber,
-        transcriptByteOffset,
-        record,
-        itemDiscriminator
-      });
+      const adaptedItem = adaptedItems.find(
+        (candidate) => candidate.sourceSequence === sourceSequence
+      );
+      if (!adaptedItem) {
+        throw new Error("Shared transcript adapter omitted a response item");
+      }
+      const sourceHash = adaptedItem.sourceHash;
+      const sourceIdempotencyKey = adaptedItem.idempotencyKey;
       const transcriptType = asString(parsedItem.item?.metadata.transcriptType);
       const managedTurnComplete =
         input.preferStableResponseItems &&
@@ -2907,6 +2865,7 @@ export const buildRawTranscriptConversationItems = (input: {
         rawText: parsedItem.item?.content ?? rawText(record),
         sourceHash,
         idempotencyKey: sourceIdempotencyKey,
+        legacyIdempotencyKeys: adaptedItem.legacyIdempotencyKeys,
         ...(unlinkedObservation ? { observationOnly: true } : {}),
         ...(canonicalItemKey ? { canonicalItemKey } : {}),
         ...(canonicalItemKey && stableItemId
@@ -2959,7 +2918,9 @@ export const buildRawTranscriptConversationItems = (input: {
           parentThreadId: input.effectiveContext.parentThreadId,
           ...(input.sourceTransport === "historical_import"
             ? { observedViaHistoricalImport: true }
-            : { observedViaHook: true }),
+            : (input.sourceTransport ?? "hook") === "hook"
+              ? { observedViaHook: true }
+              : { observedViaTranscript: true }),
           ...(input.sourceFingerprint
             ? { sourceFingerprint: input.sourceFingerprint }
             : {})

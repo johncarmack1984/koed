@@ -120,6 +120,13 @@
       "when": 1784016763538,
       "tag": "0016_wandering_gauntlet",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1784273756990,
+      "tag": "0017_slippery_the_fury",
+      "breakpoints": true
     }
   ]
 }

@@ -577,8 +577,10 @@ remains a later integration on top of this durable seat lifecycle state.
 12. Local historical import state uses authenticated
     `/v1/historical-imports` and `/v1/historical-import-sources` routes. These
     routes exist only on developer/local-personal edges. Durable run/source
-    records validate transitions and retain checkpoint offset/prefix hash,
-    counters, retry/failure timestamps, source fingerprint/session ID, immutable
+    records validate transitions and retain an immutable complete-record
+    registration frontier (offset/prefix hash plus fingerprint/session ID),
+    separate historical imported ranges/checkpoint and live recovery cursor,
+    stage counters, retry/failure timestamps, immutable
     detected Project provenance, and local-only raw source path. Responses and
     canonical raw/Captured Session provenance remove raw path and path-like
     Project fields.
@@ -588,14 +590,19 @@ remains a later integration on top of this durable seat lifecycle state.
     against batch persistence. Batch writes use same `codex-transcript-v1`
     adapter and `conversation_items` path as hook capture; raw persistence,
     counters, and checkpoint advancement commit atomically. Offset/prefix-hash
-    retries distinguish exact replay from mutation or truncation. No Team,
+    retries distinguish exact replay from mutation, rotation, or truncation.
+    Pre-frontier records are historical; post-frontier/downtime-recovery records
+    are live. No Team,
     Workspace Access, or Share Grant mutation occurs.
 14. Worker consumes queued jobs from Redis/BullMQ or `local_work_queue`.
-    Both backends use lower-number-first priority and FIFO within a class, so
+    Both backends use lower-number-first priority and FIFO as the current
+    within-class tie-breaker, so
     live capture runs ahead of queued historical embedding/LCM work. Schema
     upgrades assign existing local jobs normal priority. Before BullMQ workers
     start, Koed assigns same normal priority to legacy waiting, paused, and
-    delayed jobs that have no stored priority.
+    delayed jobs that have no stored priority. Aging, token-cost fairness,
+    per-User/tenant shares, reserved interactive capacity, and dynamic dispatch
+    priority are deferred to KOE-355.
 15. Worker embeds Memory Events by calling Embedding Service and atomically
     replaces source's complete embedding chunk set.
 16. Worker schedules compaction, creating or updating LCM Placeholder Memory

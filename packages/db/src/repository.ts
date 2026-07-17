@@ -5018,9 +5018,9 @@ export const createMemorySourceRepository = (
                 `
                 insert into conversation_projection_processing_outbox (
                   event_id, owner_user_id, visibility, work_class,
-                  include_in_embedding, include_in_lcm
+                  include_in_embedding, include_in_lcm, source_event_time
                 )
-                values ($1, $2, $3, $4, $5, $6)
+                values ($1, $2, $3, $4, $5, $6, $7)
                 on conflict (event_id) do nothing
               `,
                 [
@@ -5029,7 +5029,8 @@ export const createMemorySourceRepository = (
                   first.row.visibility,
                   first.row.projection_work_class,
                   includeInEmbedding,
-                  includeInLcm
+                  includeInLcm,
+                  chunk.sourceEventTime?.toISOString() ?? null
                 ]
               );
               result.memoryEventsCreated += 1;
@@ -5039,7 +5040,8 @@ export const createMemorySourceRepository = (
                 visibility: first.row.visibility,
                 includeInEmbedding,
                 includeInLcm,
-                workClass: first.row.projection_work_class
+                workClass: first.row.projection_work_class,
+                sourceEventTime: chunk.sourceEventTime?.toISOString() ?? null
               });
             }
           }
@@ -6146,10 +6148,11 @@ export const createMemorySourceRepository = (
         work_class: KoedWorkClass;
         include_in_embedding: boolean;
         include_in_lcm: boolean;
+        source_event_time: Date | null;
       }>(
         `
         select event_id, owner_user_id, visibility, work_class,
-          include_in_embedding, include_in_lcm
+          include_in_embedding, include_in_lcm, source_event_time
         from conversation_projection_processing_outbox
         where dispatched_at is null
         order by
@@ -6158,7 +6161,10 @@ export const createMemorySourceRepository = (
             when 'normal_embedding_lcm' then 1
             else 2
           end,
-          created_at asc,
+          case when work_class = 'historical_import_backfill'
+            then source_event_time end desc nulls last,
+          case when work_class <> 'historical_import_backfill'
+            then created_at end asc,
           event_id asc
         limit $1
       `,
@@ -6170,7 +6176,8 @@ export const createMemorySourceRepository = (
         visibility: row.visibility,
         workClass: row.work_class,
         includeInEmbedding: row.include_in_embedding,
-        includeInLcm: row.include_in_lcm
+        includeInLcm: row.include_in_lcm,
+        sourceEventTime: row.source_event_time?.toISOString() ?? null
       }));
     },
 
@@ -6323,7 +6330,8 @@ export const createMemorySourceRepository = (
               visibility: event.visibility,
               includeInEmbedding: event.includeInEmbedding,
               includeInLcm: event.includeInLcm,
-              workClass: "normal_embedding_lcm" as const
+              workClass: "normal_embedding_lcm" as const,
+              sourceEventTime: null
             }))
           );
         } catch (error) {

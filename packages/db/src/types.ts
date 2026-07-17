@@ -570,16 +570,38 @@ export interface HistoricalImportSourceRecord extends HistoricalImportCounters {
   sourceKind: string;
   sourceSessionId: string;
   sourceFingerprint: string;
+  registrationFrontierOffset: number;
+  registrationPrefixHash: string;
   localSourcePath: string;
   redactedSourceLabel: string;
   checkpointOffset: number;
   checkpointLine: number;
   checkpointHash: string | null;
+  historicalImportedRanges: Array<{
+    fromOffset: number;
+    toOffset: number;
+    checkpointHash: string;
+  }>;
+  liveCursorOffset: number;
+  liveCursorLine: number;
+  liveCursorHash: string | null;
   sourceSizeBytes: number | null;
   sourceModifiedAt: string | null;
   sourceEventFrom: string | null;
   sourceEventTo: string | null;
   malformedRecordCount: number;
+  rawIngestedRecordCount: number;
+  projectedRecordCount: number;
+  embeddingEligibleEventCount: number;
+  embeddedEventCount: number;
+  lcmEligibleEventCount: number;
+  lcmCompletedEventCount: number;
+  rawIngested: boolean;
+  projected: boolean;
+  partiallyEmbedded: boolean;
+  fullyEmbedded: boolean;
+  semanticReady: boolean;
+  lcmComplete: boolean;
   retryCount: number;
   failureReason: string | null;
   nextRetryAt: string | null;
@@ -621,6 +643,16 @@ export interface HistoricalImportBatchWriteResult {
   source: HistoricalImportSourceRecord;
   policy: EffectiveCapturePolicy;
   replayed: boolean;
+}
+
+export interface LiveTranscriptCursorAdvanceInput {
+  sourceId: string;
+  expectedCursorOffset: number;
+  expectedCursorHash?: string | null;
+  cursorOffset: number;
+  cursorLine: number;
+  cursorHash: string;
+  sourceSizeBytes: number;
 }
 
 export interface UpsertCapturePolicyInput {
@@ -1055,6 +1087,7 @@ export interface ConversationProjectionResult {
     includeInEmbedding: boolean;
     includeInLcm: boolean;
     workClass: KoedWorkClass;
+    sourceEventTime?: string | null;
   }>;
 }
 
@@ -1065,6 +1098,7 @@ export interface ConversationProjectionProcessingRecord {
   workClass: KoedWorkClass;
   includeInEmbedding: boolean;
   includeInLcm: boolean;
+  sourceEventTime: string | null;
 }
 
 export interface HistoricalProjectionLease {
@@ -1111,6 +1145,7 @@ export interface SemanticMemoryRebuildResult {
     includeInEmbedding: boolean;
     includeInLcm: boolean;
     workClass: KoedWorkClass;
+    sourceEventTime?: string | null;
   }>;
 }
 
@@ -1737,8 +1772,10 @@ export interface MemorySourceRepository
       sourceKind: string;
       sourceSessionId: string;
       sourceFingerprint: string;
+      registrationFrontierOffset: number;
+      registrationPrefixHash: string;
       localSourcePath: string;
-      sourceSizeBytes?: number;
+      sourceSizeBytes: number;
       sourceModifiedAt?: string;
       sourceEventFrom?: string;
       sourceEventTo?: string;
@@ -1783,6 +1820,10 @@ export interface MemorySourceRepository
       sourceEventTo?: string;
     }
   ): Promise<HistoricalImportSourceRecord | null>;
+  advanceLiveTranscriptCursor(
+    actor: ActorContext,
+    input: LiveTranscriptCursorAdvanceInput
+  ): Promise<HistoricalImportSourceRecord>;
   ingestHistoricalImportBatch(
     actor: ActorContext,
     input: HistoricalImportBatchWriteInput

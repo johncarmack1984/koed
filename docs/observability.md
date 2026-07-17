@@ -58,7 +58,10 @@ Operational events use namespaced `event.name` values:
 - `worker.raw_projection.catchup.completed`
 
 Historical-import events include only admission state/reason and aggregate
-pending, scanned, projected, and byte counters. `/ops/status` reports matching
+raw-ingested, projected, embedding-eligible, embedded, semantic-ready,
+LCM-complete, pending, scanned, and byte counters. Source status also exposes
+registration frontier plus independent historical/live cursor offsets and
+prefix hashes, never transcript records. `/ops/status` reports matching
 `historicalImport` counters with `diagnosticOnly: true`. Historical backlog,
 missing historical telemetry, or a paused historical batch must not change
 `/ready` or readiness state. Logs, status, and metrics must not include
