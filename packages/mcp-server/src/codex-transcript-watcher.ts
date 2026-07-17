@@ -465,7 +465,10 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
     string,
     { transcriptPath: string; state: CodexTranscriptCheckpointState }
   >();
-  private readonly sourcePaths = new Map<string, string>();
+  private readonly sourcePaths = new Map<
+    string,
+    { transcriptPath: string; size: number; modifiedAt: string }
+  >();
   private readonly metrics: WatcherSnapshot;
   private runId?: string;
   private failureCount = 0;
@@ -629,19 +632,15 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
     this.rememberIdentity(transcriptPath, { ...identity, fileKey });
     let source = await lookupSource(this.client, identity.sessionId);
     if (source) {
+      const priorObservation = this.sourcePaths.get(source.id);
       const firstPathObservation =
-        this.sourcePaths.get(source.id) !== transcriptPath;
+        priorObservation?.transcriptPath !== transcriptPath;
       const sourceChanged =
         source.sourceSizeBytes !== before.size ||
-        source.sourceModifiedAt !== before.mtime.toISOString();
+        priorObservation?.size !== before.size ||
+        priorObservation?.modifiedAt !== before.mtime.toISOString();
       if (firstPathObservation || sourceChanged) {
         await this.verifyCursorPrefix(source, transcriptPath, before.size);
-        source = await this.refreshSourcePath(
-          source,
-          transcriptPath,
-          before,
-          identity.context
-        );
       }
     } else {
       source = await this.registerSource(
@@ -651,7 +650,7 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
         identity
       );
     }
-    this.rememberSourcePath(source.id, transcriptPath);
+    this.rememberSourcePath(source.id, transcriptPath, before);
     if (boundary <= source.liveCursorOffset) return;
     await this.ingestPage(source, transcriptPath, identity.context, boundary);
   }
@@ -670,9 +669,17 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
     }
   }
 
-  private rememberSourcePath(sourceId: string, transcriptPath: string): void {
+  private rememberSourcePath(
+    sourceId: string,
+    transcriptPath: string,
+    file: Stats
+  ): void {
     this.sourcePaths.delete(sourceId);
-    this.sourcePaths.set(sourceId, transcriptPath);
+    this.sourcePaths.set(sourceId, {
+      transcriptPath,
+      size: file.size,
+      modifiedAt: file.mtime.toISOString()
+    });
     const maximum = Math.max(this.config.maxFilesPerScan * 10, 100);
     while (this.sourcePaths.size > maximum) {
       const oldest = this.sourcePaths.keys().next().value;
@@ -714,30 +721,6 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
       detectedProject: projectFromContext(identity.context)
     });
     this.metrics.sourcesRegistered += 1;
-    return responseValue<HistoricalSource>(response, "source");
-  }
-
-  private async refreshSourcePath(
-    source: HistoricalSource,
-    transcriptPath: string,
-    file: Stats,
-    context: TranscriptContext
-  ): Promise<HistoricalSource> {
-    const response = await this.client.createHistoricalImportSource({
-      runId: source.runId,
-      aiClient: "codex",
-      sourceKind: "codex",
-      sourceSessionId: source.sourceSessionId,
-      sourceFingerprint: source.sourceFingerprint,
-      registrationFrontierOffset: source.registrationFrontierOffset,
-      registrationPrefixHash: source.registrationPrefixHash,
-      localSourcePath: transcriptPath,
-      sourceSizeBytes: file.size,
-      sourceModifiedAt: file.mtime.toISOString(),
-      detectedProject: Object.keys(source.detectedProject).length
-        ? source.detectedProject
-        : projectFromContext(context)
-    });
     return responseValue<HistoricalSource>(response, "source");
   }
 
