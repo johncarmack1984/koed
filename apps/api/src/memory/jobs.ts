@@ -2,7 +2,6 @@ import { scheduleCompaction, type Visibility } from "@koed/core";
 import type { MemorySourceRepository } from "@koed/db";
 import {
   embeddingQueueJobId,
-  lcmCompactionQueueJobId,
   lcmCompactQueueName,
   memoryEmbedQueueName,
   workClassPriority,
@@ -56,12 +55,14 @@ export const createMemoryJobScheduler = ({
   const runCompactionInline = async (
     repo: MemorySourceRepository,
     requesterContext: { userId: string },
-    visibility: Visibility
+    visibility: Visibility,
+    workClass: KoedWorkClass = "normal_embedding_lcm"
   ) =>
     scheduleCompaction({
       repository: repo,
       requesterContext,
-      visibility
+      visibility,
+      workClass
     });
 
   const enqueueEmbedding = async (
@@ -135,7 +136,8 @@ export const createMemoryJobScheduler = ({
       const compaction = await runCompactionInline(
         repo,
         requesterContext,
-        visibility
+        visibility,
+        workClass
       );
       return { queued: false, inline: true, compaction };
     }
@@ -162,7 +164,8 @@ export const createMemoryJobScheduler = ({
     try {
       const [dispatchScope] = await repo.listPendingLcmDispatchScopes({
         limit: 1,
-        ownerUserId: requesterContext.userId
+        ownerUserId: requesterContext.userId,
+        workClass
       });
       if (!dispatchScope || dispatchScope.visibility !== visibility) {
         return {
@@ -181,13 +184,7 @@ export const createMemoryJobScheduler = ({
             backoff: { type: "exponential", delay: 10_000 },
             removeOnComplete: 1000,
             removeOnFail: true,
-            jobId:
-              jobId ??
-              lcmCompactionQueueJobId(
-                requesterContext.userId,
-                visibility,
-                dispatchScope.dispatchKey
-              )
+            jobId: jobId ?? dispatchScope.jobId
           }
         ),
         750,
@@ -288,8 +285,7 @@ export const createMemoryJobScheduler = ({
           repo,
           requesterContext,
           scope.visibility,
-          scope.workClass,
-          `projection-compact-${[...scope.eventIds].sort()[0]}`
+          scope.workClass
         )
       )
     );

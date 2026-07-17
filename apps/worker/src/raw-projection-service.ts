@@ -39,7 +39,8 @@ export interface RawProjectionServiceConfig {
     requesterContext: { userId: string },
     visibility: Visibility,
     dispatchKey: string,
-    workClass?: KoedWorkClass
+    workClass?: KoedWorkClass,
+    jobId?: string
   ): Promise<unknown>;
   enqueueProjectedMemoryEventProcessing(
     actor: { userId: string },
@@ -51,7 +52,8 @@ export interface RawProjectionServiceConfig {
     sourceType: EmbeddableSourceType,
     sourceId: string,
     dispatchKey: string,
-    workClass?: KoedWorkClass
+    workClass?: KoedWorkClass,
+    jobId?: string
   ): Promise<unknown>;
   getHistoricalAdmissionHealth(): Promise<HistoricalAdmissionHealth>;
   recoverProjectedMemoryEventProcessing(): Promise<number>;
@@ -176,7 +178,9 @@ const reconcileLcmCompactionJobs = async (
       config.enqueueLcmCompaction(
         { userId: scope.ownerUserId },
         scope.visibility,
-        scope.dispatchKey
+        scope.dispatchKey,
+        scope.workClass,
+        scope.jobId
       )
     )
   );
@@ -217,7 +221,9 @@ const reconcileEmbeddingJobs = async (
       config.enqueueSourceEmbedding(
         source.sourceType,
         source.sourceId,
-        config.embeddingDispatchKey
+        config.embeddingDispatchKey,
+        source.workClass ?? "normal_embedding_lcm",
+        source.reconciliationJobId
       )
     )
   );

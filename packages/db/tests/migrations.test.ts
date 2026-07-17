@@ -69,4 +69,19 @@ describe("historical priority migration chain", () => {
     expect(foreignKey).toBeGreaterThan(uniqueConstraint);
     expect(migrationSql).toContain('ADD COLUMN "checkpoint_hash" text');
   });
+
+  it("persists and backfills explicit LCM node work-class lineage", async () => {
+    const migrationSql = await readDrizzleFile("0018_rainy_santa_claus.sql");
+
+    expect(migrationSql).toContain(
+      "ADD COLUMN \"work_class\" text DEFAULT 'normal_embedding_lcm' NOT NULL"
+    );
+    expect(migrationSql).toContain(
+      'JOIN "conversation_projection_processing_outbox" processing'
+    );
+    expect(migrationSql).toContain(
+      "HAVING min(processing.work_class) = max(processing.work_class)"
+    );
+    expect(migrationSql).toContain("memory_nodes_work_class_check");
+  });
 });

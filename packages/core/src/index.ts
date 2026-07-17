@@ -473,9 +473,16 @@ export interface SearchMemoryInput {
 
 export type AnswerMemoryInput = SearchMemoryInput;
 
+export type MemoryWorkClass =
+  | "interactive_recall_question"
+  | "live_capture_projection"
+  | "normal_embedding_lcm"
+  | "historical_import_backfill";
+
 export interface ScheduleCompactionInput {
   requesterContext: RequesterContext;
   visibility: Visibility;
+  workClass?: MemoryWorkClass;
 }
 
 export interface MemoryEventRecord {
@@ -618,7 +625,7 @@ export interface MemoryEngineRepository {
   }>;
   createLcmNodes(
     actor: RequesterContext,
-    input: { visibility: Visibility }
+    input: { visibility: Visibility; workClass?: MemoryWorkClass }
   ): Promise<CompactionResult>;
   expandMemoryNode(
     nodeId: string,

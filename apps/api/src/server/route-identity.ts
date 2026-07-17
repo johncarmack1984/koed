@@ -401,6 +401,16 @@ export const routeIdentityContracts = [
     "implemented",
     localEdgeDeploymentModes
   ),
+  route(
+    "POST",
+    "/v1/historical-import-sources/{sourceId}/live-cursor",
+    "session_or_api_token",
+    "capture",
+    "Advance the owner-scoped durable live transcript cursor without importing historical Memory.",
+    "none",
+    "implemented",
+    localEdgeDeploymentModes
+  ),
 
   route(
     "POST",

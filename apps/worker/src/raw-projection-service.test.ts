@@ -124,13 +124,25 @@ describe("raw projection service", () => {
         {
           ownerUserId: "user-1",
           visibility: "personal",
+          workClass: "live_capture_projection",
           pendingMemoryEventIds: ["both", "lcm-only"],
-          dispatchKey: "lcm-dispatch-user-1-v1"
+          dispatchKey: "lcm-dispatch-user-1-v1",
+          jobId: "projection-compact-both"
         }
       ]),
       listSourcesNeedingEmbeddings: vi.fn().mockResolvedValue([
-        { sourceType: "memory_event", sourceId: "embed-only" },
-        { sourceType: "memory_event", sourceId: "both" }
+        {
+          sourceType: "memory_event",
+          sourceId: "embed-only",
+          workClass: "live_capture_projection",
+          reconciliationJobId: "projection-embed-embed-only"
+        },
+        {
+          sourceType: "memory_event",
+          sourceId: "both",
+          workClass: "live_capture_projection",
+          reconciliationJobId: "projection-embed-both"
+        }
       ])
     });
     const options = serviceOptions(repository);
@@ -143,19 +155,25 @@ describe("raw projection service", () => {
       1,
       "memory_event",
       "embed-only",
-      "qwen-v1-1024"
+      "qwen-v1-1024",
+      "live_capture_projection",
+      "projection-embed-embed-only"
     );
     expect(options.enqueueSourceEmbedding).toHaveBeenNthCalledWith(
       2,
       "memory_event",
       "both",
-      "qwen-v1-1024"
+      "qwen-v1-1024",
+      "live_capture_projection",
+      "projection-embed-both"
     );
     expect(options.enqueueLcmCompaction).toHaveBeenCalledOnce();
     expect(options.enqueueLcmCompaction).toHaveBeenCalledWith(
       { userId: "user-1" },
       "personal",
-      "lcm-dispatch-user-1-v1"
+      "lcm-dispatch-user-1-v1",
+      "live_capture_projection",
+      "projection-compact-both"
     );
     expect(options.enqueueProjectedMemoryEventProcessing).toHaveBeenCalledWith(
       { userId: "user-1" },
@@ -182,11 +200,14 @@ describe("raw projection service", () => {
         ])
       ),
       listSemanticMemoryRebuildActors: vi.fn().mockResolvedValue([]),
-      listSourcesNeedingEmbeddings: vi
-        .fn()
-        .mockResolvedValue([
-          { sourceType: "memory_event", sourceId: "event-1" }
-        ])
+      listSourcesNeedingEmbeddings: vi.fn().mockResolvedValue([
+        {
+          sourceType: "memory_event",
+          sourceId: "event-1",
+          workClass: "live_capture_projection",
+          reconciliationJobId: "projection-embed-event-1"
+        }
+      ])
     });
     const options = serviceOptions(repository);
     options.enqueueSourceEmbedding
@@ -229,8 +250,10 @@ describe("raw projection service", () => {
         {
           ownerUserId: "user-2",
           visibility: "personal",
+          workClass: "normal_embedding_lcm",
           pendingMemoryEventIds: ["rebuilt-event-1"],
-          dispatchKey: "lcm-dispatch-user-2-v1"
+          dispatchKey: "lcm-dispatch-user-2-v1",
+          jobId: "projection-compact-rebuilt-event-1"
         }
       ])
     });

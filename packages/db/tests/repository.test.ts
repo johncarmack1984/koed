@@ -10178,6 +10178,153 @@ describeDb("memory repository visibility", () => {
     ]);
   });
 
+  it("keeps live and historical LCM compaction and derived embeddings class-isolated", async () => {
+    const alice = await repo.createUser({
+      email: `alice-lcm-work-class-${randomUUID()}@example.com`
+    });
+    const engine = createMemoryEngine(repo);
+    const workspaceId = randomUUID();
+    await pool.query(
+      `insert into workspaces (id, owner_user_id, visibility, name)
+       values ($1, $2, 'personal', 'LCM Work Class Project')`,
+      [workspaceId, alice.id]
+    );
+
+    const eventIdsByClass = new Map<string, string[]>();
+    for (const workClass of [
+      "live_capture_projection",
+      "historical_import_backfill"
+    ] as const) {
+      const eventIds: string[] = [];
+      for (let index = 0; index < 5; index += 1) {
+        const event = await captureUserEvent(engine, alice.id, {
+          workspaceId,
+          content: `${workClass} source ${index}`
+        });
+        eventIds.push(event.id);
+        await pool.query(
+          `insert into conversation_projection_processing_outbox (
+             event_id, owner_user_id, visibility, work_class,
+             include_in_embedding, include_in_lcm, source_event_time,
+             dispatched_at
+           ) values ($1, $2, 'personal', $3, true, true, $4, now())`,
+          [event.id, alice.id, workClass, `2026-01-01T00:00:0${index}.000Z`]
+        );
+      }
+      eventIdsByClass.set(workClass, eventIds);
+    }
+
+    const scopes = await repo.listPendingLcmDispatchScopes({
+      ownerUserId: alice.id
+    });
+    expect(scopes.map((scope) => scope.workClass)).toEqual([
+      "live_capture_projection",
+      "historical_import_backfill"
+    ]);
+
+    const live = await repo.createLcmNodes(
+      { userId: alice.id },
+      { visibility: "personal", workClass: "live_capture_projection" }
+    );
+    expect(live.leafNodeIds).toHaveLength(1);
+    const liveSources = await pool.query<{ memory_event_id: string }>(
+      `select memory_event_id from memory_node_sources
+       where memory_node_id = $1 order by source_order`,
+      [live.leafNodeIds[0]]
+    );
+    expect(liveSources.rows.map((row) => row.memory_event_id)).toEqual(
+      eventIdsByClass.get("live_capture_projection")
+    );
+
+    const historical = await repo.createLcmNodes(
+      { userId: alice.id },
+      { visibility: "personal", workClass: "historical_import_backfill" }
+    );
+    expect(historical.leafNodeIds).toHaveLength(1);
+    const historicalSources = await pool.query<{ memory_event_id: string }>(
+      `select memory_event_id from memory_node_sources
+       where memory_node_id = $1 order by source_order`,
+      [historical.leafNodeIds[0]]
+    );
+    expect(historicalSources.rows.map((row) => row.memory_event_id)).toEqual(
+      eventIdsByClass.get("historical_import_backfill")
+    );
+
+    const nodeLineage = await pool.query<{
+      id: string;
+      work_class: string;
+    }>(
+      `select id, work_class from memory_nodes
+       where id = any($1::uuid[]) order by work_class`,
+      [[live.leafNodeIds[0], historical.leafNodeIds[0]]]
+    );
+    expect(nodeLineage.rows).toEqual([
+      {
+        id: historical.leafNodeIds[0],
+        work_class: "historical_import_backfill"
+      },
+      { id: live.leafNodeIds[0], work_class: "live_capture_projection" }
+    ]);
+    const pendingNodeEmbeddings = (
+      await repo.listSourcesNeedingEmbeddings(100)
+    ).filter((source) =>
+      nodeLineage.rows.some((node) => node.id === source.sourceId)
+    );
+    const pendingEventEmbeddings = (
+      await repo.listSourcesNeedingEmbeddings(100)
+    ).filter((source) =>
+      [...eventIdsByClass.values()].flat().includes(source.sourceId)
+    );
+    expect(
+      pendingEventEmbeddings.map((source) => ({
+        id: source.sourceId,
+        workClass: source.workClass,
+        reconciliationJobId: source.reconciliationJobId
+      }))
+    ).toEqual(
+      expect.arrayContaining(
+        [...eventIdsByClass.entries()].flatMap(([workClass, eventIds]) =>
+          eventIds.map((eventId) => ({
+            id: eventId,
+            workClass,
+            reconciliationJobId: `projection-embed-${eventId}`
+          }))
+        )
+      )
+    );
+    expect(
+      pendingEventEmbeddings
+        .filter((source) => source.workClass === "historical_import_backfill")
+        .map((source) => source.sourceId)
+    ).toEqual(
+      [...eventIdsByClass.get("historical_import_backfill")!].reverse()
+    );
+    expect(
+      pendingNodeEmbeddings.map((source) => ({
+        id: source.sourceId,
+        workClass: source.workClass
+      }))
+    ).toEqual(
+      expect.arrayContaining([
+        {
+          id: live.leafNodeIds[0],
+          workClass: "live_capture_projection"
+        },
+        {
+          id: historical.leafNodeIds[0],
+          workClass: "historical_import_backfill"
+        }
+      ])
+    );
+
+    await expect(
+      repo.createLcmNodes(
+        { userId: alice.id },
+        { visibility: "personal", workClass: "live_capture_projection" }
+      )
+    ).resolves.toMatchObject({ leafNodeIds: [] });
+  });
+
   it("keeps LCM graph hydration working with encrypted Memory Event and Node fields present", async () => {
     const encryptedRepo = createEncryptedPayloadRepository(pool);
     const provider = createLocalTestKeyEnvelopeEncryptionProvider(
@@ -15707,7 +15854,7 @@ describeDb("memory repository visibility", () => {
     try {
       await repo.createLcmNodes(
         { userId: owner.id },
-        { visibility: "personal" }
+        { visibility: "personal", workClass: "live_capture_projection" }
       );
     } finally {
       if (previousLeafEventThreshold === undefined) {
@@ -16001,11 +16148,22 @@ describeDb("memory repository visibility", () => {
         process.env.MEMORY_LCM_LEAF_EVENT_THRESHOLD;
       process.env.MEMORY_LCM_LEAF_EVENT_THRESHOLD = "1";
       try {
-        const compacted = await repo.createLcmNodes(
-          { userId: owner.id },
-          { visibility: "personal" }
+        const compacted = await Promise.all(
+          ["live_capture_projection", "normal_embedding_lcm"].map((workClass) =>
+            repo.createLcmNodes(
+              { userId: owner.id },
+              {
+                visibility: "personal",
+                workClass: workClass as
+                  | "live_capture_projection"
+                  | "normal_embedding_lcm"
+              }
+            )
+          )
         );
-        expect(compacted.leafNodeIds).toHaveLength(2);
+        expect(compacted.flatMap((result) => result.leafNodeIds)).toHaveLength(
+          2
+        );
         const secondReset = await repo.resetConversationProjection(
           { userId: owner.id },
           { sessionId: session.id }
@@ -16017,11 +16175,22 @@ describeDb("memory repository visibility", () => {
             limit: 10
           }
         );
-        const compactedAgain = await repo.createLcmNodes(
-          { userId: owner.id },
-          { visibility: "personal" }
+        const compactedAgain = await Promise.all(
+          ["live_capture_projection", "normal_embedding_lcm"].map((workClass) =>
+            repo.createLcmNodes(
+              { userId: owner.id },
+              {
+                visibility: "personal",
+                workClass: workClass as
+                  | "live_capture_projection"
+                  | "normal_embedding_lcm"
+              }
+            )
+          )
         );
-        expect(compactedAgain.leafNodeIds).toHaveLength(1);
+        expect(
+          compactedAgain.flatMap((result) => result.leafNodeIds)
+        ).toHaveLength(1);
         const activeNodes = await pool.query<{ count: number }>(
           `
             select count(*)::int as count
@@ -18035,7 +18204,7 @@ describeDb("memory repository visibility", () => {
       const embeddable = await repo.listSourcesNeedingEmbeddings(20);
       const compacted = await repo.createLcmNodes(
         { userId: alice.id },
-        { visibility: "personal" }
+        { visibility: "personal", workClass: "live_capture_projection" }
       );
       const expandedLeaves = await Promise.all(
         compacted.leafNodeIds.map((nodeId) =>

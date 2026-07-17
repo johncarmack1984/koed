@@ -1623,7 +1623,8 @@ export const createConversationItemRepository = (
       const sourceIdempotencyKey = sanitizedItem.idempotencyKey;
       let item = withCanonicalConversationIdentity({
         ...sanitizedItem,
-        observationKind: observationKindFor(sanitizedItem)
+        observationKind:
+          sanitizedItem.observationKind ?? observationKindFor(sanitizedItem)
       });
       let canonicalItemKey = canonicalItemKeyFor(item);
       const legacyCanonicalItemKeys = [
@@ -2304,7 +2305,12 @@ export const createConversationItemRepository = (
           canonicalItemKey,
           canonicalItemKey,
           canonicalSourcePriority,
-          managedProjectionHold ? "held" : "pending",
+          managedProjectionHold
+            ? "held"
+            : item.sourceTransport === "historical_import" &&
+                item.projectionStatus === "raw_only"
+              ? "raw_only"
+              : "pending",
           projectionWorkClassForSourceTransport(item.sourceTransport),
           item.projectionVersion ?? null,
           item.projectionError ?? null,

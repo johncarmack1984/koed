@@ -21,8 +21,10 @@ const createScheduler = () => {
       {
         ownerUserId: "user-1",
         visibility: "personal",
+        workClass: "live_capture_projection",
         pendingMemoryEventIds: ["event-1"],
-        dispatchKey: "lcm-dispatch-user-1"
+        dispatchKey: "lcm-dispatch-user-1",
+        jobId: "compact-user-1-personal-live"
       }
     ]),
     markConversationProjectionProcessingDispatched: vi.fn().mockResolvedValue(1)
@@ -68,7 +70,7 @@ describe("memory job scheduler", () => {
       },
       expect.objectContaining({
         priority: 5,
-        jobId: "compact-user-1-personal-lcm-dispatch-user-1"
+        jobId: "compact-user-1-personal-live"
       })
     );
     const queuedPayloads = JSON.stringify([
@@ -88,8 +90,10 @@ describe("memory job scheduler", () => {
       {
         ownerUserId: "user-2",
         visibility: "personal",
+        workClass: "live_capture_projection",
         pendingMemoryEventIds: ["event-2"],
-        dispatchKey: "lcm-dispatch-user-2"
+        dispatchKey: "lcm-dispatch-user-2",
+        jobId: "compact-user-2-personal-live"
       }
     ]);
 
@@ -134,7 +138,7 @@ describe("memory job scheduler", () => {
     );
     expect(
       compactionQueue.add.mock.calls.map((call) => call[2]?.jobId)
-    ).toEqual(["projection-compact-event-2"]);
+    ).toEqual(["compact-user-2-personal-live"]);
     expect(
       repository.markConversationProjectionProcessingDispatched
     ).toHaveBeenCalledWith(["event-2", "event-3"]);

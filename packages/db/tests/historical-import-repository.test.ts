@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type pg from "pg";
+import { codexCanonicalConversationItemKey } from "@koed/shared";
 import {
   createDbPool,
   createHistoricalImportRepository,
@@ -81,6 +82,141 @@ describeDb("durable historical import repository", () => {
 
   afterAll(async () => {
     await pool?.end();
+  });
+
+  it("registers new sources only while the run can accept work", async () => {
+    const repo = createMemorySourceRepository(pool);
+    const owner = await repo.createUser({
+      email: `registration-state-${randomUUID()}@example.com`
+    });
+    const sourceInput = (runId: string, suffix: string) => ({
+      runId,
+      aiClient: "codex",
+      sourceKind: "codex",
+      sourceSessionId: `registration-${suffix}-${randomUUID()}`,
+      sourceFingerprint: createHash("sha256").update(suffix).digest("hex"),
+      registrationFrontierOffset: 0,
+      registrationPrefixHash:
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      localSourcePath: `/private/${suffix}.jsonl`,
+      sourceSizeBytes: 0
+    });
+    const transitionTo = async (
+      runId: string,
+      states: Array<
+        [
+          "discovered" | "eligible" | "queued" | "importing" | "paused",
+          (
+            | "eligible"
+            | "queued"
+            | "importing"
+            | "paused"
+            | "completed"
+            | "failed"
+            | "skipped"
+          )
+        ]
+      >
+    ) => {
+      for (const [expectedState, state] of states) {
+        expect(
+          await repo.transitionHistoricalImportRun(
+            { userId: owner.id },
+            {
+              runId,
+              expectedState,
+              state,
+              ...(state === "failed" ? { failureReason: "test.failure" } : {})
+            }
+          )
+        ).not.toBeNull();
+      }
+    };
+
+    for (const [name, states] of [
+      ["discovered", []],
+      ["eligible", [["discovered", "eligible"]]],
+      [
+        "queued",
+        [
+          ["discovered", "eligible"],
+          ["eligible", "queued"]
+        ]
+      ],
+      [
+        "importing",
+        [
+          ["discovered", "eligible"],
+          ["eligible", "queued"],
+          ["queued", "importing"]
+        ]
+      ],
+      ["paused", [["discovered", "paused"]]]
+    ] as const) {
+      const run = await repo.createHistoricalImportRun({ userId: owner.id });
+      await transitionTo(run.id, [...states]);
+      expect(
+        await repo.createHistoricalImportSource(
+          { userId: owner.id },
+          sourceInput(run.id, name)
+        )
+      ).not.toBeNull();
+    }
+
+    for (const [name, states] of [
+      [
+        "completed",
+        [
+          ["discovered", "eligible"],
+          ["eligible", "queued"],
+          ["queued", "importing"],
+          ["importing", "completed"]
+        ]
+      ],
+      ["failed", [["discovered", "failed"]]],
+      ["skipped", [["discovered", "skipped"]]]
+    ] as const) {
+      const run = await repo.createHistoricalImportRun({ userId: owner.id });
+      await transitionTo(run.id, [...states]);
+      expect(
+        await repo.createHistoricalImportSource(
+          { userId: owner.id },
+          sourceInput(run.id, name)
+        )
+      ).toBeNull();
+      expect(
+        await repo.getHistoricalImportRun({ userId: owner.id }, run.id)
+      ).toMatchObject({ sourceCount: 0, state: name });
+    }
+
+    const retryRun = await repo.createHistoricalImportRun({ userId: owner.id });
+    const immutable = sourceInput(retryRun.id, "retry");
+    const original = await repo.createHistoricalImportSource(
+      { userId: owner.id },
+      immutable
+    );
+    await transitionTo(retryRun.id, [["discovered", "failed"]]);
+    expect(
+      await repo.createHistoricalImportSource(
+        { userId: owner.id },
+        { ...immutable, localSourcePath: "/private/moved.jsonl" }
+      )
+    ).toBeNull();
+    expect(
+      await repo.transitionHistoricalImportRun(
+        { userId: owner.id },
+        { runId: retryRun.id, expectedState: "failed", state: "queued" }
+      )
+    ).not.toBeNull();
+    expect(
+      await repo.createHistoricalImportSource(
+        { userId: owner.id },
+        { ...immutable, localSourcePath: "/private/moved.jsonl" }
+      )
+    ).toMatchObject({
+      id: original!.id,
+      localSourcePath: "/private/moved.jsonl"
+    });
   });
 
   it("persists owner-scoped restart state, checkpoints, counters, and local path", async () => {
@@ -551,11 +687,108 @@ describeDb("durable historical import repository", () => {
       sourceEventTo: "2026-07-01T12:00:00.000Z",
       items: [
         {
-          ...transcriptItem({
-            sessionId: randomUUID(),
-            transport: "historical_import" as const
+          sessionId: undefined,
+          sourceKind: "codex",
+          sourceAdapterVersion: "codex-transcript-v1",
+          sourceTransport: "historical_import" as const,
+          externalSessionId: source!.sourceSessionId,
+          externalThreadId: source!.sourceSessionId,
+          externalTurnId: "turn-1",
+          externalItemId: "assistant-message-1",
+          sourceRecordType: "response_item",
+          sourceEventType: "message",
+          sourceLineNumber: 1,
+          sourceSequence: 1,
+          eventTime: "2026-07-01T12:00:00.000Z",
+          rawJson: {
+            type: "response_item",
+            payload: {
+              id: "assistant-message-1",
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Durable import memory" }]
+            }
+          },
+          rawText: "Durable import memory",
+          sourceHash: "response-item-source-hash",
+          idempotencyKey: "response-item-historical-observation",
+          canonicalItemKey: codexCanonicalConversationItemKey({
+            externalThreadId: source!.sourceSessionId,
+            externalTurnId: "turn-1",
+            stableItemId: "assistant-message-1",
+            component: "message"
           }),
-          sessionId: undefined
+          canonicalStableItemId: "assistant-message-1",
+          canonicalSourcePriority: 200,
+          observationKind: "reconciliation" as const,
+          observationComponent: "message",
+          projectionStatus: "pending" as const,
+          projectionVersion: "codex-transcript-v1",
+          metadata: {
+            transcriptByteOffset: 0,
+            transcriptItemDiscriminator: "primary:codex_response_message",
+            transcriptType: "message"
+          }
+        },
+        {
+          observationOnly: true,
+          sessionId: undefined,
+          sourceKind: "codex",
+          sourceAdapterVersion: "codex-transcript-v1",
+          sourceTransport: "historical_import" as const,
+          sourceRecordType: "event_msg",
+          sourceEventType: "agent_message",
+          sourceLineNumber: 2,
+          sourceSequence: 2,
+          eventTime: "2026-07-01T12:00:00.100Z",
+          rawJson: {
+            type: "event_msg",
+            payload: { type: "agent_message", message: "Durable import memory" }
+          },
+          rawText: "Durable import memory",
+          sourceHash: "duplicate-observation-source-hash",
+          idempotencyKey: "duplicate-historical-observation",
+          observationKind: "reconciliation" as const,
+          observationComponent: "message",
+          projectionStatus: "raw_only" as const,
+          projectionVersion: "codex-transcript-v1",
+          metadata: {
+            transcriptByteOffset: 1,
+            transcriptItemDiscriminator: "observation:duplicate_agent_message",
+            transcriptType: "agent_message"
+          }
+        },
+        {
+          sessionId: undefined,
+          sourceKind: "codex",
+          sourceAdapterVersion: "codex-transcript-v1",
+          sourceTransport: "historical_import" as const,
+          sourceRecordType: "response_item",
+          sourceEventType: "message",
+          sourceLineNumber: 3,
+          sourceSequence: 3,
+          eventTime: "2026-07-01T12:00:00.200Z",
+          rawJson: {
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "Injected context" }]
+            }
+          },
+          rawText: "Injected context",
+          sourceHash: "ambiguous-user-context-source-hash",
+          idempotencyKey: "ambiguous-user-context-observation",
+          observationKind: "snapshot" as const,
+          observationComponent: "message",
+          projectionStatus: "raw_only" as const,
+          projectionVersion: "codex-transcript-v1",
+          metadata: {
+            transcriptByteOffset: 2,
+            transcriptItemDiscriminator: "raw:ambiguous_user_context",
+            transcriptType: "message",
+            managedConversationSourceRole: "ambiguous_user_context_provenance"
+          }
         }
       ]
     };
@@ -610,15 +843,44 @@ describeDb("durable historical import repository", () => {
     const stored = await pool.query<{
       source_path: string | null;
       captured_project: Record<string, unknown>;
+      canonical_stable_item_id: string | null;
+      projection_status: string;
     }>(
-      `select source_path, captured_project from conversation_items
-       where owner_user_id = $1 and external_session_id = $2`,
+      `select source_path, captured_project, canonical_stable_item_id,
+         projection_status from conversation_items
+       where owner_user_id = $1 and external_session_id = $2
+       order by projection_status`,
       [owner.id, source!.sourceSessionId]
     );
     expect(stored.rows).toEqual([
       {
         source_path: null,
-        captured_project: { name: "Koed", branch: "audit" }
+        captured_project: { name: "Koed", branch: "audit" },
+        canonical_stable_item_id: "assistant-message-1",
+        projection_status: "pending"
+      },
+      {
+        source_path: null,
+        captured_project: { name: "Koed", branch: "audit" },
+        canonical_stable_item_id: null,
+        projection_status: "raw_only"
+      }
+    ]);
+    const rawOnlyObservation = await pool.query<{
+      observation_kind: string;
+      observation_component: string | null;
+      ingestion_status: string;
+    }>(
+      `select observation_kind, observation_component, ingestion_status
+       from conversation_item_observations
+       where source_idempotency_key = 'duplicate-historical-observation'`,
+      []
+    );
+    expect(rawOnlyObservation.rows).toEqual([
+      {
+        observation_kind: "reconciliation",
+        observation_component: "message",
+        ingestion_status: "identity_unresolved"
       }
     ]);
     const artifacts = await pool.query<{ shares: string; access: string }>(
@@ -633,7 +895,7 @@ describeDb("durable historical import repository", () => {
     ).toMatchObject({
       checkpointOffset: 100,
       checkpointHash: "e".repeat(64),
-      importedRecordCount: 1
+      importedRecordCount: 3
     });
     expect(
       await repo.transitionHistoricalImportSource(
@@ -649,7 +911,8 @@ describeDb("durable historical import repository", () => {
       await repo.getHistoricalImportSource({ userId: owner.id }, source!.id)
     ).toMatchObject({
       rawIngested: true,
-      rawIngestedRecordCount: 1,
+      rawIngestedRecordCount: 3,
+      projectedRecordCount: 2,
       semanticReady: false,
       lcmComplete: true
     });
@@ -816,6 +1079,98 @@ describeDb("durable historical import repository", () => {
       [owner.id]
     );
     expect(teamArtifacts.rows[0]).toEqual({ grants: "0", access: "0" });
+  });
+
+  it("converges realistic response_item observations across historical, Hook, and transcript ordering", async () => {
+    const repo = createMemorySourceRepository(pool);
+    const owner = await repo.createUser({
+      email: `response-convergence-${randomUUID()}@example.com`
+    });
+    for (const order of [
+      ["historical_import", "hook", "transcript"],
+      ["hook", "historical_import", "transcript"],
+      ["transcript", "hook", "historical_import"]
+    ] as const) {
+      const externalSessionId = `response-session-${randomUUID()}`;
+      const session = await repo.createCapturedSession(
+        { userId: owner.id },
+        {
+          externalSessionId,
+          idempotencyKey: `response-session:${externalSessionId}`
+        }
+      );
+      const canonicalItemKey = codexCanonicalConversationItemKey({
+        externalThreadId: externalSessionId,
+        externalTurnId: "turn-1",
+        stableItemId: "assistant-message-1",
+        component: "message"
+      });
+      const ids: string[] = [];
+      for (const transport of order) {
+        const [item] = await repo.createConversationItems(
+          { userId: owner.id },
+          {
+            items: [
+              {
+                sessionId: session.id,
+                sourceKind: "codex",
+                sourceAdapterVersion: "codex-transcript-v1",
+                sourceTransport: transport,
+                externalSessionId,
+                externalThreadId: externalSessionId,
+                externalTurnId: "turn-1",
+                externalItemId: "assistant-message-1",
+                sourceRecordType: "response_item",
+                sourceEventType: "message",
+                sourceLineNumber: 3,
+                sourceSequence: 3,
+                eventTime: "2026-07-01T12:00:00.000Z",
+                rawJson: {
+                  type: "response_item",
+                  payload: {
+                    id: "assistant-message-1",
+                    type: "message",
+                    role: "assistant",
+                    content: [{ type: "output_text", text: "Canonical answer" }]
+                  }
+                },
+                rawText: "Canonical answer",
+                sourceHash: "response-item-source-hash",
+                idempotencyKey: `response-item:${externalSessionId}:${transport}`,
+                canonicalItemKey,
+                canonicalStableItemId: "assistant-message-1",
+                canonicalSourcePriority: 200,
+                observationKind: "reconciliation",
+                observationComponent: "message",
+                projectionStatus: "pending",
+                projectionVersion: "codex-transcript-v1",
+                metadata: {
+                  transcriptByteOffset: 256,
+                  transcriptItemDiscriminator: "primary:codex_response_message",
+                  transcriptType: "message",
+                  canonicalConversationItemActor: "agent",
+                  canonicalConversationItemKind: "message"
+                }
+              }
+            ]
+          }
+        );
+        ids.push(item!.id);
+      }
+      expect(new Set(ids).size).toBe(1);
+      const projection = await repo.projectPendingConversationItems(
+        { userId: owner.id },
+        { limit: 10, workClass: "live_capture_projection" }
+      );
+      expect(projection.rawItemsProjected).toBe(1);
+      expect(
+        await pool.query(
+          `select 1 from conversation_items
+           where owner_user_id = $1 and canonical_item_key = $2`,
+          [owner.id, canonicalItemKey]
+        )
+      ).toHaveProperty("rowCount", 1);
+    }
   });
 
   it("converges Hook-first, watcher-first, and historical-first item observations with immutable provenance", async () => {

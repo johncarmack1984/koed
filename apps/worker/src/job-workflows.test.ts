@@ -126,4 +126,48 @@ describe("worker job workflows", () => {
       }
     );
   });
+
+  it("passes durable work class through compaction and derived node embedding retries", async () => {
+    const createLcmNodes = vi.fn().mockResolvedValue({
+      leafNodeIds: ["historical-leaf"],
+      rollupNodeId: null
+    });
+    const add = vi.fn().mockResolvedValue({ id: "historical-node-embedding" });
+    const workflow = createWorkerJobWorkflow({
+      embeddingDispatchKey: "embedding-v1",
+      embeddingWorkflow: {
+        embedSource: vi.fn(),
+        embedSources: vi.fn()
+      },
+      lcmEmbedQueue: {
+        add
+      } as unknown as KoedJobQueue<EmbeddingQueueJobData>,
+      repository: () =>
+        ({ createLcmNodes }) as unknown as MemorySourceRepository
+    });
+
+    await workflow("lcm-compact", {
+      userId: "user-1",
+      visibility: "personal",
+      workClass: "historical_import_backfill"
+    });
+
+    expect(createLcmNodes).toHaveBeenCalledWith(
+      { userId: "user-1" },
+      {
+        requesterContext: { userId: "user-1" },
+        visibility: "personal",
+        workClass: "historical_import_backfill"
+      }
+    );
+    expect(add).toHaveBeenCalledWith(
+      "embed-lcm-node",
+      {
+        sourceType: "memory_node",
+        sourceId: "historical-leaf",
+        workClass: "historical_import_backfill"
+      },
+      expect.objectContaining({ priority: 20 })
+    );
+  });
 });

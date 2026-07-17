@@ -571,9 +571,12 @@ remains a later integration on top of this durable seat lifecycle state.
 11. The Worker independently derives missing embedding jobs and pending LCM
     compaction scopes from PostgreSQL. Deterministic queue identities make this
     reconciliation idempotent, so outbox admission failure, exhausted retries,
-    or restart cannot permanently strand work. Embedding reconciliation accepts
-    only complete active chunk sets for current source version, and LCM dispatch
-    is bounded per owner.
+    or restart cannot permanently strand work or promote historical work into
+    the normal class. Embedding reconciliation accepts only complete active
+    chunk sets for current source version. LCM dispatch is bounded per owner and
+    work class; compaction selects only Memory Events with the requested durable
+    lineage. Created leaves and rollups persist that lineage, and derived node
+    embeddings retain it.
 12. Local historical import state uses authenticated
     `/v1/historical-imports` and `/v1/historical-import-sources` routes. These
     routes exist only on developer/local-personal edges. Durable run/source
@@ -583,13 +586,19 @@ remains a later integration on top of this durable seat lifecycle state.
     stage counters, retry/failure timestamps, immutable
     detected Project provenance, and local-only raw source path. Responses and
     canonical raw/Captured Session provenance remove raw path and path-like
-    Project fields.
+    Project fields. New sources can be registered only while a run is active or
+    paused; completed, failed, and skipped runs reject registration
+    transactionally. The owner-scoped `live-cursor` route is part of the same
+    local-only route identity and OpenAPI inventory.
 13. Before source eligibility/queueing and every import batch, API resolves
     owning User's effective Capture Policy and Capture Pause. Disabled, ask,
     paused, or non-personal results fail closed. Policy mutation is serialized
-    against batch persistence. Batch writes use same `codex-transcript-v1`
-    adapter and `conversation_items` path as hook capture; raw persistence,
-    counters, and checkpoint advancement commit atomically. Offset/prefix-hash
+    against batch persistence. Batch writes use the same
+    `codex-transcript-v1` adapter and `conversation_items` path as Hook capture.
+    The boundary accepts canonical response-item identity, immutable observation
+    fields, observation-only records, and raw-only classifications without
+    rewriting them; raw persistence, counters, and checkpoint advancement
+    commit atomically. Offset/prefix-hash
     retries distinguish exact replay from mutation, rotation, or truncation.
     Pre-frontier records are historical; post-frontier/downtime-recovery records
     are live. No Team,

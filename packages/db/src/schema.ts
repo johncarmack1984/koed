@@ -869,6 +869,7 @@ export const memoryNodes = pgTable(
     visibility: visibilityScope("visibility").notNull(),
     kind: text("kind").notNull(),
     depth: integer("depth").notNull().default(0),
+    workClass: text("work_class").notNull().default("normal_embedding_lcm"),
     title: text("title"),
     summaryText: text("summary_text").notNull(),
     bodyText: text("body_text"),
@@ -944,6 +945,10 @@ export const memoryNodes = pgTable(
       ),
     check("memory_nodes_kind_check", sql`${table.kind} in ('leaf', 'rollup')`),
     check("memory_nodes_depth_check", sql`${table.depth} >= 0`),
+    check(
+      "memory_nodes_work_class_check",
+      sql`${table.workClass} in ('live_capture_projection', 'normal_embedding_lcm', 'historical_import_backfill')`
+    ),
     check(
       "memory_nodes_personal_owner_check",
       sql`${table.visibility} = 'personal' and ${table.ownerUserId} is not null`

@@ -46,6 +46,7 @@ import { createDbPool, createMemorySourceRepository } from "@koed/db";
 import {
   RAW_CONVERSATION_TRANSPORT_CHUNK_MAX_BYTES,
   RAW_CONVERSATION_TRANSPORT_CHUNK_MAX_COUNT,
+  codexCanonicalConversationItemKey,
   createLocalTestKeyEnvelopeEncryptionProvider,
   decryptEncryptedJsonPackage,
   rawConversationTransportChunkGroupId,
@@ -2650,7 +2651,7 @@ const createFakeRepository = () => {
       });
       const updated = await this.advanceHistoricalImportSource!(actor, {
         ...input,
-        importedRecordCount: items.length
+        importedRecordCount: input.items.length
       });
       if (!updated) {
         throw Object.assign(
@@ -10822,8 +10823,16 @@ describe("account and access flows", () => {
   });
 
   it("authorizes, redacts, and rechecks policy for local historical import batches", async () => {
+    const repository = createFakeRepository();
+    let forwardedHistoricalItems: ConversationItemInput[] = [];
+    const originalHistoricalIngest =
+      repository.ingestHistoricalImportBatch.bind(repository);
+    repository.ingestHistoricalImportBatch = async (actor, input) => {
+      forwardedHistoricalItems = input.items;
+      return originalHistoricalIngest(actor, input);
+    };
     const app = await buildServer({
-      repository: createFakeRepository(),
+      repository,
       runMemoryJobsInlineForTests: true
     });
     const owner = await app.inject({
@@ -10966,23 +10975,64 @@ describe("account and access flows", () => {
       malformedRecordCount: 1,
       items: [
         {
-          sourceRecordType: "event_msg",
-          sourceEventType: "user_message",
+          externalThreadId: "historical-session",
+          externalTurnId: "turn-1",
+          externalItemId: "assistant-message-1",
+          sourceRecordType: "response_item",
+          sourceEventType: "message",
           sourceLineNumber: 0,
           sourceSequence: 0,
           eventTime: "2026-07-01T12:00:00.000Z",
           rawJson: {
             timestamp: "2026-07-01T12:00:00.000Z",
-            type: "event_msg",
-            payload: { type: "user_message", message: "Imported memory" }
+            type: "response_item",
+            payload: {
+              id: "assistant-message-1",
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Imported memory" }]
+            }
           },
           rawText: "Imported memory",
           sourceHash: "adapter-source-hash",
           idempotencyKey: "adapter-idempotency-key",
+          canonicalItemKey: codexCanonicalConversationItemKey({
+            externalThreadId: "historical-session",
+            externalTurnId: "turn-1",
+            stableItemId: "assistant-message-1",
+            component: "message"
+          }),
+          canonicalStableItemId: "assistant-message-1",
+          canonicalSourcePriority: 200,
+          observationKind: "reconciliation",
+          observationComponent: "message",
+          projectionStatus: "pending",
           metadata: {
             transcriptByteOffset: 0,
-            transcriptItemDiscriminator: "primary:codex_transcript_user",
-            transcriptType: "user_message"
+            transcriptItemDiscriminator: "primary:codex_response_message",
+            transcriptType: "message"
+          }
+        },
+        {
+          observationOnly: true,
+          sourceRecordType: "event_msg",
+          sourceEventType: "agent_message",
+          sourceLineNumber: 1,
+          sourceSequence: 1,
+          rawJson: {
+            type: "event_msg",
+            payload: { type: "agent_message", message: "Imported memory" }
+          },
+          rawText: "Imported memory",
+          sourceHash: "adapter-observation-hash",
+          idempotencyKey: "adapter-observation-key",
+          observationKind: "reconciliation",
+          observationComponent: "message",
+          projectionStatus: "raw_only",
+          metadata: {
+            transcriptByteOffset: 1,
+            transcriptItemDiscriminator: "observation:duplicate_agent_message",
+            transcriptType: "agent_message"
           }
         }
       ]
@@ -11051,6 +11101,22 @@ describe("account and access flows", () => {
 
     expect(parserBypass.statusCode).toBe(400);
     expect(imported.statusCode).toBe(200);
+    expect(forwardedHistoricalItems).toEqual([
+      expect.objectContaining({
+        sourceRecordType: "response_item",
+        canonicalStableItemId: "assistant-message-1",
+        canonicalSourcePriority: 200,
+        observationKind: "reconciliation",
+        observationComponent: "message",
+        projectionStatus: "pending"
+      }),
+      expect.objectContaining({
+        observationOnly: true,
+        observationKind: "reconciliation",
+        observationComponent: "message",
+        projectionStatus: "raw_only"
+      })
+    ]);
     expect(imported.body).not.toContain("/Users/alice");
     expect(
       jsonBody<{
@@ -11070,7 +11136,7 @@ describe("account and access flows", () => {
     ).toMatchObject({
       replayed: true,
       items: [],
-      source: { importedRecordCount: 1 }
+      source: { importedRecordCount: 2 }
     });
   });
 

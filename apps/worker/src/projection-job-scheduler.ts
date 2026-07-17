@@ -47,7 +47,8 @@ const queueOptions = (workClass: KoedWorkClass, jobId: string) => ({
   attempts: 5,
   backoff: { type: "exponential", delay: 10_000 },
   removeOnComplete: 1000,
-  removeOnFail: 5000
+  // PostgreSQL reconciliation remains the durable retry source after attempts.
+  removeOnFail: true
 });
 
 const mapWithConcurrency = async <T>(
@@ -106,16 +107,24 @@ const enqueueCompactions = async (
   scopes: ProjectionScope[]
 ): Promise<void> => {
   await Promise.all(
-    compactionGroups(scopes).map((group) => {
-      const firstEventId = [...group.eventIds].sort()[0]!;
-      return config.compactionQueue.add(
+    compactionGroups(scopes).map(async (group) => {
+      const [dispatchScope] =
+        await config.repository.listPendingLcmDispatchScopes({
+          limit: 1,
+          ownerUserId: actor.userId,
+          workClass: group.workClass
+        });
+      if (!dispatchScope || dispatchScope.visibility !== group.visibility) {
+        return;
+      }
+      await config.compactionQueue.add(
         "compact-scope",
         {
           userId: actor.userId,
           visibility: group.visibility,
           workClass: group.workClass
         },
-        queueOptions(group.workClass, `projection-compact-${firstEventId}`)
+        queueOptions(group.workClass, dispatchScope.jobId)
       );
     })
   );

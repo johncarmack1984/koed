@@ -74,6 +74,7 @@ import {
   resolveRerankerKeyFromEnv,
   resolveSupportedEmbeddingModelConfig,
   resolveSupportedRerankerModelConfig,
+  lcmCompactionQueueJobId,
   RAW_CONVERSATION_LOGICAL_ITEM_MAX_BYTES,
   RAW_CONVERSATION_TRANSPORT_CHUNK_MAX_COUNT,
   sanitizeForPostgresStorage,
@@ -5969,6 +5970,7 @@ export const createMemorySourceRepository = (
       const pending = await pool.query<{
         owner_user_id: string;
         visibility: "personal";
+        work_class: KoedWorkClass;
         pending_memory_event_ids: string[];
         pending_memory_event_generations: string[];
       }>(
@@ -5978,6 +5980,10 @@ export const createMemorySourceRepository = (
               me.owner_user_id,
               me.visibility,
               me.id,
+              coalesce(
+                processing.work_class,
+                'normal_embedding_lcm'
+              )::text as work_class,
               coalesce((
                 select max(mn.invalidated_at)::text
                 from memory_node_sources mns
@@ -5987,13 +5993,20 @@ export const createMemorySourceRepository = (
                   and mn.invalidated_at is not null
               ), 'new') as dispatch_generation,
               row_number() over (
-                partition by me.owner_user_id, me.visibility
+                partition by me.owner_user_id, me.visibility,
+                  coalesce(processing.work_class, 'normal_embedding_lcm')
                 order by me.captured_at asc, me.id asc
               ) as pending_rank
             from memory_events me
+            left join conversation_projection_processing_outbox processing
+              on processing.event_id = me.id
             where me.visibility = 'personal'
               and me.owner_user_id is not null
               and ($2::uuid is null or me.owner_user_id = $2)
+              and ($3::text is null or coalesce(
+                processing.work_class,
+                'normal_embedding_lcm'
+              ) = $3)
               and me.invalidated_at is null
               and me.personal_deleted_at is null
               and me.include_in_lcm = true
@@ -6010,15 +6023,27 @@ export const createMemorySourceRepository = (
           select
             owner_user_id,
             visibility,
+            work_class,
             array_agg(id order by id) as pending_memory_event_ids,
             array_agg(dispatch_generation order by id) as pending_memory_event_generations
           from pending_events
-          where pending_rank <= $3
-          group by owner_user_id, visibility
-          order by min(pending_rank) asc, owner_user_id asc
+          where pending_rank <= $4
+          group by owner_user_id, visibility, work_class
+          order by
+            case work_class
+              when 'live_capture_projection' then 0
+              when 'normal_embedding_lcm' then 1
+              else 2
+            end,
+            min(pending_rank) asc, owner_user_id asc
           limit $1
         `,
-        [limit, input.ownerUserId ?? null, lcmCompactionMaxEvents()]
+        [
+          limit,
+          input.ownerUserId ?? null,
+          input.workClass ?? null,
+          lcmCompactionMaxEvents()
+        ]
       );
       return pending.rows.map((row) => {
         const pendingMemoryEventIds = [...row.pending_memory_event_ids].sort();
@@ -6035,8 +6060,14 @@ export const createMemorySourceRepository = (
         return {
           ownerUserId: row.owner_user_id,
           visibility: row.visibility,
+          workClass: row.work_class,
           pendingMemoryEventIds,
-          dispatchKey: `lcm-dispatch:${row.owner_user_id}:${row.visibility}:${fingerprint}`
+          dispatchKey: `lcm-dispatch:${row.owner_user_id}:${row.visibility}:${row.work_class}:${fingerprint}`,
+          jobId: lcmCompactionQueueJobId(
+            row.owner_user_id,
+            row.visibility,
+            `lcm-dispatch:${row.owner_user_id}:${row.visibility}:${row.work_class}:${fingerprint}`
+          )
         };
       });
     },
@@ -8083,6 +8114,8 @@ export const createMemorySourceRepository = (
         visibility: Visibility;
         source_hash: string | null;
         text: string | null;
+        work_class: KoedWorkClass;
+        reconciliation_job_id: string | null;
       }>(
         `
         with sources as (
@@ -8092,6 +8125,9 @@ export const createMemorySourceRepository = (
             mn.owner_user_id,
             mn.visibility,
             mn.source_hash,
+            mn.work_class,
+            null::text as reconciliation_job_id,
+            null::timestamptz as source_event_time,
             case
               when mn.body_text is null
                 or btrim(mn.body_text) = ''
@@ -8111,6 +8147,14 @@ export const createMemorySourceRepository = (
             me.owner_user_id,
             me.visibility,
             me.source_hash,
+            coalesce(
+              processing.work_class,
+              'normal_embedding_lcm'
+            )::text as work_class,
+            case when processing.event_id is not null
+              then 'projection-embed-' || me.id::text
+              else null end as reconciliation_job_id,
+            processing.source_event_time,
             case
               when me.include_in_embedding = false
                 then ''
@@ -8122,9 +8166,12 @@ export const createMemorySourceRepository = (
             end as text,
             me.captured_at as created_at
           from memory_events me
+          left join conversation_projection_processing_outbox processing
+            on processing.event_id = me.id
           where me.invalidated_at is null and me.personal_deleted_at is null
         )
-        select source_type, source_id, owner_user_id, visibility, source_hash, text
+        select source_type, source_id, owner_user_id, visibility, source_hash,
+          text, work_class, reconciliation_job_id
         from sources s
         where (
             length(trim(coalesce(s.text, ''))) > 0
@@ -8186,7 +8233,17 @@ export const createMemorySourceRepository = (
               and max(me.source_chunk_index) = max(me.source_chunk_count) - 1
               and min(me.source_chunk_count) = max(me.source_chunk_count)
           )
-        order by s.created_at asc, s.source_id asc
+        order by
+          case s.work_class
+            when 'live_capture_projection' then 0
+            when 'normal_embedding_lcm' then 1
+            else 2
+          end,
+          case when s.work_class = 'historical_import_backfill'
+            then s.source_event_time end desc nulls last,
+          case when s.work_class <> 'historical_import_backfill'
+            or s.source_event_time is null then s.created_at end asc,
+          s.source_id asc
         limit $4
       `,
         [
@@ -8274,7 +8331,11 @@ export const createMemorySourceRepository = (
           text: row.text!,
           sourceHash:
             row.source_hash ??
-            sourceHash(row.source_type, row.source_id, row.text!)
+            sourceHash(row.source_type, row.source_id, row.text!),
+          workClass: row.work_class,
+          ...(row.reconciliation_job_id
+            ? { reconciliationJobId: row.reconciliation_job_id }
+            : {})
         }));
     },
 
@@ -11500,6 +11561,7 @@ export const createMemorySourceRepository = (
 
     async createLcmNodes(actor, input) {
       const ownerUserId = actor.userId;
+      const workClass = input.workClass ?? "normal_embedding_lcm";
       const suppressPlaintextPayload =
         managedCloudPlaintextMemoryPayloadsDisabled();
       if (suppressPlaintextPayload && !options.envelopeEncryptionProvider) {
@@ -11532,9 +11594,12 @@ export const createMemorySourceRepository = (
             me.payload,
             me.captured_at
           from memory_events me
+          left join conversation_projection_processing_outbox processing
+            on processing.event_id = me.id
           where me.invalidated_at is null and me.personal_deleted_at is null
             and me.visibility = $1
             and me.owner_user_id = $2
+            and coalesce(processing.work_class, 'normal_embedding_lcm') = $3
             and me.include_in_lcm = true
             and not exists (
               select 1
@@ -11545,9 +11610,9 @@ export const createMemorySourceRepository = (
                 and mn.invalidated_at is null and mn.personal_deleted_at is null
             )
           order by me.captured_at asc, me.id asc
-          limit $3
+          limit $4
         `,
-          [input.visibility, ownerUserId, lcmCompactionMaxEvents()]
+          [input.visibility, ownerUserId, workClass, lcmCompactionMaxEvents()]
         );
 
         const hydratedEventRows = await Promise.all(
@@ -11682,9 +11747,10 @@ export const createMemorySourceRepository = (
               summary_token_estimate,
               source_span_start,
               source_span_end,
-              source_hash
+              source_hash,
+              work_class
             )
-            values ($1, $2, $3, 'leaf', 0, $4, $4, 'mcp', 'depth0-source-items-v1', $5::jsonb, $6, $7, $8, $9, $10, $11)
+            values ($1, $2, $3, 'leaf', 0, $4, $4, 'mcp', 'depth0-source-items-v1', $5::jsonb, $6, $7, $8, $9, $10, $11, $12)
             on conflict (source_hash) where source_hash is not null
             do update set
               owner_user_id = excluded.owner_user_id,
@@ -11698,6 +11764,7 @@ export const createMemorySourceRepository = (
               summary_token_estimate = excluded.summary_token_estimate,
               source_span_start = excluded.source_span_start,
               source_span_end = excluded.source_span_end,
+              work_class = excluded.work_class,
               invalidated_at = null,
               invalidation_reason = null,
               updated_at = now()
@@ -11718,7 +11785,8 @@ export const createMemorySourceRepository = (
                 "memory_event",
                 span.map((event) => event.id).join(","),
                 JSON.stringify(sourceItems)
-              )
+              ),
+              workClass
             ]
           );
           const nodeId =
@@ -11806,9 +11874,10 @@ export const createMemorySourceRepository = (
             and mnc.parent_memory_node_id is null
             and mn.visibility = $1
             and mn.owner_user_id = $2
+            and mn.work_class = $3
           order by mn.created_at asc, mn.id asc
         `,
-          [input.visibility, ownerUserId]
+          [input.visibility, ownerUserId, workClass]
         );
         const hydratedUnparentedRows = await hydrateMemoryNodeRows(
           client,
@@ -11870,9 +11939,10 @@ export const createMemorySourceRepository = (
               source_event_count,
               source_token_estimate,
               summary_token_estimate,
-              source_hash
+              source_hash,
+              work_class
             )
-            values ($1, $2, $3, 'rollup', 1, $4, $4, 'mcp', 'depth1-child-rollup-v1', $5::jsonb, $6, $7, $8, $9)
+            values ($1, $2, $3, 'rollup', 1, $4, $4, 'mcp', 'depth1-child-rollup-v1', $5::jsonb, $6, $7, $8, $9, $10)
             on conflict (source_hash) where source_hash is not null
             do update set
               owner_user_id = excluded.owner_user_id,
@@ -11884,6 +11954,7 @@ export const createMemorySourceRepository = (
               source_event_count = excluded.source_event_count,
               source_token_estimate = excluded.source_token_estimate,
               summary_token_estimate = excluded.summary_token_estimate,
+              work_class = excluded.work_class,
               invalidated_at = null,
               invalidation_reason = null,
               updated_at = now()
@@ -11902,7 +11973,8 @@ export const createMemorySourceRepository = (
                 "memory_node",
                 rollupChildren.map((child) => child.id).join(","),
                 rollupSummary
-              )
+              ),
+              workClass
             ]
           );
           rollupNodeId =

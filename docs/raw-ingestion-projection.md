@@ -38,9 +38,13 @@ only when all chunks are required to reconstruct one oversized canonical item;
 the reconstructed item still has one canonical identity and one downstream
 source link.
 
-Source adapters submit canonical candidates and immutable observations; the
-server owns `projection_status` and ignores client attempts to set canonical
-priority or Projection state. Canonical identity is based on
+Source adapters submit canonical candidates and immutable observations. The
+normal live-ingestion route owns `projection_status` and ignores client attempts
+to set canonical priority or Projection state. The local historical-import
+route instead accepts the complete output of the same trusted transcript
+builder, including canonical identity, observation-only records, and explicit
+`raw_only` classification, then enforces Personal Memory ownership and policy
+inside the repository transaction. Canonical identity is based on
 provider thread, turn, item, and component identifiers; content hashes validate
 observations but never establish identity. Koed writes the canonical row and its
 observation in one transaction under an advisory identity lock. A replay of the
@@ -250,9 +254,12 @@ derived answer or summary.
 
 The same worker pass reconciles downstream queue admission from PostgreSQL. It
 lists every eligible source still missing an embedding and every personal LCM
-scope with eligible Memory Events not yet covered by a leaf, then submits
-deterministic jobs. PostgreSQL remains the retry source after Redis/BullMQ or the
-local queue rejects admission, exhausts retries, or restarts. A complete
+scope with eligible Memory Events not yet covered by a leaf, retaining each
+source's durable work class and the same deterministic job identity used by
+initial Projection dispatch. PostgreSQL remains the retry source after
+Redis/BullMQ or the local queue rejects admission, exhausts retries, or
+restarts, without admitting the same source under a second normal-priority job.
+A complete
 embedding response replaces all chunks for that source atomically; a partial or
 failed response cannot hide the source from reconciliation. LCM dispatch is
 bounded by `MEMORY_LCM_COMPACTION_MAX_EVENTS` (default `1000`, maximum `10000`),
@@ -303,7 +310,11 @@ strand a projected Memory Event. Graceful Worker shutdown stops new catch-up
 passes and waits for the active pass before closing queues or Postgres. A stopped
 worker leaves unprojected historical rows pending; its next pass reevaluates
 pressure and resumes safely. Historical Projection propagates its work class to
-embedding and LCM queue jobs.
+embedding and LCM queue jobs. Compaction selection is also class-scoped: a live
+job can consume only live-lineage Memory Events, while a historical job can
+consume only historical events. LCM Placeholder nodes persist that explicit
+lineage, rollups combine only same-class children, and derived node embeddings
+reuse the triggering class across queue retries and process restarts.
 
 Historical admission and progress telemetry contains only class names, row and
 byte counts, durations, and pause reasons. It must not contain transcript
@@ -312,17 +323,22 @@ content, source paths, queries, credentials, or raw payloads.
 Durable `historical_import_runs` and `historical_import_sources` records own
 state transitions, bounded counters, retry/failure data, source ranges, and
 lifecycle timestamps. Registration immutably records source fingerprint,
-source-session identity, complete-record frontier offset, and prefix hash.
-Historical imported ranges/checkpoint and live-tail/recovery cursor are separate
+source-session identity, complete-record frontier offset, and prefix hash. New
+source registration is serialized with run transitions and is accepted only
+while the run is `discovered`, `eligible`, `queued`, `importing`, or `paused`.
+Terminal `completed`, `failed`, and `skipped` runs cannot gain stranded sources;
+an immutable source may be observed at a moved path after its failed run is
+explicitly retried into `queued`. Historical imported ranges/checkpoint and
+live-tail/recovery cursor are separate
 transactional streams; neither can advance, rewind, or overwrite the other.
 Source growth is accepted, while truncation, rotation/prefix mutation, and stale
 submissions fail visibly without changing either stream. Source records
 keep raw source paths and path-like detected Project fields only inside local
 Postgres state. Status and canonical raw/Captured Session provenance use only a
 basename-style redacted label, stable fingerprint, and path-free detected
-Project fields. Routes are
-available only in `developer` and `local_personal` profiles and require owning
-User authentication.
+Project fields. Routes, including the separate owner-scoped `live-cursor`
+advancement route, are available only in `developer` and `local_personal`
+profiles and require owning User authentication.
 
 Import evaluates effective Capture Policy and Capture Pause before eligibility
 or queueing and again before every raw write batch. `disabled`, `ask`, active

@@ -238,6 +238,14 @@ describe("route identity contract", () => {
       security: [{ sessionCookie: [] }, { bearerApiToken: [] }],
       "x-koed-team-authority": "none"
     });
+    expect(
+      openApiPaths["/v1/historical-import-sources/{sourceId}/live-cursor"]?.post
+    ).toMatchObject({
+      security: [{ sessionCookie: [] }, { bearerApiToken: [] }],
+      "x-koed-identity": "session_or_api_token",
+      "x-koed-team-authority": "none",
+      "x-koed-deployment-modes": ["developer", "local_personal"]
+    });
     expect(openApiPaths["/v1/memory/answer"]?.post).toMatchObject({
       security: [
         { sessionCookie: [] },

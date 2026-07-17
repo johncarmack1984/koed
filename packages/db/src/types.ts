@@ -837,6 +837,8 @@ export interface EmbeddableSourceRecord {
   visibility: Visibility;
   text: string;
   sourceHash: string;
+  workClass?: KoedWorkClass;
+  reconciliationJobId?: string;
 }
 
 export interface LocalEmbeddingStatus {
@@ -1115,8 +1117,10 @@ export interface ConversationProjectionBacklog {
 export interface LcmDispatchReconciliationScope {
   ownerUserId: string;
   visibility: "personal";
+  workClass: KoedWorkClass;
   pendingMemoryEventIds: string[];
   dispatchKey: string;
+  jobId: string;
 }
 
 interface ConversationProjectionInput {
@@ -1731,6 +1735,7 @@ export interface MemorySourceRepository
   listPendingLcmDispatchScopes(input?: {
     limit?: number;
     ownerUserId?: string;
+    workClass?: KoedWorkClass;
   }): Promise<LcmDispatchReconciliationScope[]>;
   listSemanticMemoryRebuildActors(input?: {
     limit?: number;

@@ -422,7 +422,13 @@ const refreshSourceProgress = async (
               where observation.conversation_item_id = ci.id
                 and observation.source_transport = 'historical_import'
             )
-            and (ci.projected_at is not null or ci.projection_status = 'raw_only')) projected_count,
+            and (ci.projected_at is not null or ci.projection_status = 'raw_only'))
+          + (select count(*)::int from conversation_item_observations observation
+             where observation.owner_user_id = source.owner_user_id
+               and observation.external_session_id = source.source_session_id
+               and observation.source_transport = 'historical_import'
+               and observation.conversation_item_id is null
+               and observation.ingestion_status = 'identity_unresolved') projected_count,
          (select count(*)::int from memory_events me
           join sessions s on s.id = me.session_id
           where s.owner_user_id = source.owner_user_id
@@ -689,8 +695,8 @@ const importedItem = (
   importObservedAt: observedAt,
   sourceFingerprint: source.sourceFingerprint,
   capturedProject,
-  projectionStatus: "pending" as const,
-  projectionVersion: "codex-transcript-v1",
+  projectionStatus: item.projectionStatus ?? ("pending" as const),
+  projectionVersion: item.projectionVersion ?? "codex-transcript-v1",
   metadata: {
     ...(item.metadata ?? {}),
     historicalImportRunId: source.runId,
@@ -742,6 +748,7 @@ const upsertSourceWithClient = (
        $11, $12, $13, $14, $15, $16
      from historical_import_runs r
      where r.id = $2 and r.owner_user_id = $1
+       and r.state in ('discovered', 'eligible', 'queued', 'importing', 'paused')
      on conflict (owner_user_id, ai_client, source_kind, source_session_id)
      do update set
        local_source_path = excluded.local_source_path,
@@ -1124,7 +1131,7 @@ const ingestBatchRecord = (
     const updated = await advanceSourceWithClient(client, actor, {
       ...input,
       ...batchSourceEventRange(input),
-      importedRecordCount: items.length
+      importedRecordCount: input.items.length
     });
     if (!updated) {
       throw Object.assign(new Error("Historical import checkpoint conflict"), {

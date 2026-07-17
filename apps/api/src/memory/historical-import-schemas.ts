@@ -143,6 +143,7 @@ const historicalItemMetadataSchema = metadataSchema.and(
 
 const historicalConversationItemSchema = z
   .object({
+    observationOnly: z.boolean().optional(),
     sessionId: z.string().uuid().optional(),
     turnId: z.string().uuid().optional(),
     externalThreadId: boundedText.optional(),
@@ -164,11 +165,36 @@ const historicalConversationItemSchema = z
     sourceHash: boundedText,
     idempotencyKey: boundedText,
     legacyIdempotencyKeys: z.array(boundedText).max(16).optional(),
-    projectionStatus: z.literal("pending").optional(),
+    canonicalItemKey: boundedText.optional(),
+    canonicalStableItemId: boundedText.optional(),
+    canonicalSourcePriority: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(2_147_483_647)
+      .optional(),
+    observationKind: z
+      .enum([
+        "snapshot",
+        "lifecycle_started",
+        "lifecycle_completed",
+        "control",
+        "reconciliation"
+      ])
+      .optional(),
+    observationComponent: boundedText.optional(),
+    projectionStatus: z.enum(["pending", "raw_only"]).optional(),
     projectionVersion: z.literal("codex-transcript-v1").optional(),
     metadata: historicalItemMetadataSchema
   })
   .superRefine((value, context) => {
+    if (value.observationOnly && value.canonicalItemKey) {
+      context.addIssue({
+        code: "custom",
+        path: ["canonicalItemKey"],
+        message: "Observation-only records cannot claim canonical identity"
+      });
+    }
     const chunked = value.logicalSourceId !== undefined;
     const chunkFields = [
       value.transportChunkIndex,

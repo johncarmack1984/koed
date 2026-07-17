@@ -10,6 +10,18 @@ const createQueue = () => ({
 
 const createRepository = () => ({
   listPendingConversationProjectionProcessing: vi.fn().mockResolvedValue([]),
+  listPendingLcmDispatchScopes: vi.fn(({ ownerUserId, workClass }) =>
+    Promise.resolve([
+      {
+        ownerUserId,
+        visibility: "personal",
+        workClass,
+        pendingMemoryEventIds: ["event-1"],
+        dispatchKey: `dispatch-${workClass}`,
+        jobId: `compact-${ownerUserId}-personal-${workClass}`
+      }
+    ])
+  ),
   markConversationProjectionProcessingDispatched: vi.fn().mockResolvedValue(1)
 });
 
@@ -62,7 +74,7 @@ describe("projection job scheduler", () => {
         workClass: "historical_import_backfill"
       },
       expect.objectContaining({
-        jobId: "projection-compact-event-1",
+        jobId: "compact-user-1-personal-historical_import_backfill",
         priority: 20
       })
     );
@@ -85,7 +97,9 @@ describe("projection job scheduler", () => {
     expect(compactionQueue.add).toHaveBeenCalledWith(
       "compact-scope",
       expect.any(Object),
-      expect.objectContaining({ jobId: "projection-compact-event-1" })
+      expect.objectContaining({
+        jobId: "compact-user-1-personal-historical_import_backfill"
+      })
     );
     expect(
       repository.markConversationProjectionProcessingDispatched

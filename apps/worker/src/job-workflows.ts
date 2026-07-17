@@ -91,14 +91,15 @@ export const enqueueSourceEmbedding = (
   sourceType: EmbeddableSourceType,
   sourceId: string,
   dispatchKey = "current",
-  workClass: KoedWorkClass = "normal_embedding_lcm"
+  workClass: KoedWorkClass = "normal_embedding_lcm",
+  jobId?: string
 ) =>
   queue.add(
     "embed-source",
     { sourceType, sourceId, workClass },
     {
       ...reconciliationJobOptions(workClass),
-      jobId: embeddingQueueJobId(dispatchKey, sourceType, sourceId)
+      jobId: jobId ?? embeddingQueueJobId(dispatchKey, sourceType, sourceId)
     }
   );
 
@@ -107,18 +108,21 @@ export const enqueueLcmCompaction = (
   requesterContext: { userId: string },
   visibility: Visibility,
   dispatchKey = "projected",
-  workClass: KoedWorkClass = "normal_embedding_lcm"
+  workClass: KoedWorkClass = "normal_embedding_lcm",
+  jobId?: string
 ) =>
   lcmCompactQueue.add(
     "compact-scope",
     { userId: requesterContext.userId, visibility, workClass },
     {
       ...reconciliationJobOptions(workClass),
-      jobId: lcmCompactionQueueJobId(
-        requesterContext.userId,
-        visibility,
-        dispatchKey
-      )
+      jobId:
+        jobId ??
+        lcmCompactionQueueJobId(
+          requesterContext.userId,
+          visibility,
+          dispatchKey
+        )
     }
   );
 
@@ -150,7 +154,8 @@ export const createWorkerJobWorkflow = (config: WorkerJobWorkflowConfig) => {
     const compaction = await scheduleCompaction({
       repository: config.repository(),
       requesterContext: { userId },
-      visibility
+      visibility,
+      workClass
     });
     const nodeIds = [
       ...compaction.leafNodeIds,
