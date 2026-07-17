@@ -702,10 +702,9 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
     boundary: number,
     identity: { sessionId: string; context: TranscriptContext }
   ): Promise<HistoricalSource> {
+    const createdAt = file.birthtimeMs > 0 ? file.birthtimeMs : file.ctimeMs;
     const frontier =
-      this.activatedAt === null || file.birthtimeMs <= this.activatedAt
-        ? boundary
-        : 0;
+      this.activatedAt === null || createdAt <= this.activatedAt ? boundary : 0;
     const prefixHash = await hashFilePrefix(transcriptPath, frontier);
     const response = await this.client.createHistoricalImportSource({
       runId: await this.ensureRunId(),
