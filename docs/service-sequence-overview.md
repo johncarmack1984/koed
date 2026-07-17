@@ -509,7 +509,7 @@ remains a later integration on top of this durable seat lifecycle state.
    default root is `CODEX_HOME/sessions`; path-delimited
    `MEMORY_CODEX_TRANSCRIPT_ROOTS` replaces it. Notifications only reduce
    latency: missed notifications still converge through rescans.
-2. The first bounded full discovery cycle establishes activation. Files in that
+2. The first successful bounded full discovery cycle establishes activation. Files in that
    baseline register an immutable complete-record frontier and leave their
    prefix to historical import. A file created after
    activation registers frontier zero and is live from its first complete

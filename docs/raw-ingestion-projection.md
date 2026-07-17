@@ -117,7 +117,7 @@ item or Memory Event.
 The Transcript Watcher is the correctness owner for externally managed transcript
 growth. Filesystem notifications and content-free Hook wake files are hints;
 bounded rescans recover missed notifications and discover new Conversations.
-The first bounded full discovery cycle establishes activation; files present in
+The first successful bounded full discovery cycle establishes activation; files present in
 that baseline retain their complete-record boundary as an immutable historical
 frontier. Files created after activation use
 a zero frontier and are live from their first complete record. Post-frontier
