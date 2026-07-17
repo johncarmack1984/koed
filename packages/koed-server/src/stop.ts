@@ -47,7 +47,15 @@ export interface KoedServerStopOptions {
   readSupervisorLock?: typeof readSupervisorLock;
 }
 
-const APP_PROCESS_ORDER = ["explorer", "worker", "api"] as const;
+const APP_PROCESS_ORDER = [
+  {
+    processName: "codexTranscriptWatcher",
+    serviceName: "codex-transcript-watcher"
+  },
+  { processName: "explorer", serviceName: "explorer" },
+  { processName: "worker", serviceName: "worker" },
+  { processName: "api", serviceName: "api" }
+] as const;
 const readRuntimeState = (
   path: string,
   deps: Pick<Required<KoedServerStopOptions>, "existsSync" | "readFileSync">
@@ -194,13 +202,15 @@ export const stopKoedServer = ({
   const missingServices: string[] = [];
   const errors: Array<{ target: string; error: string }> = [];
 
-  for (const name of APP_PROCESS_ORDER) {
-    const pid = runtime.processes?.[name];
+  for (const { processName, serviceName } of APP_PROCESS_ORDER) {
+    const pid = runtime.processes?.[processName];
     if (!pid || pid <= 0) {
-      missingServices.push(name);
+      if (runtime.services.includes(serviceName)) {
+        missingServices.push(serviceName);
+      }
       continue;
     }
-    const stopped = stopPid(name, pid, {
+    const stopped = stopPid(serviceName, pid, {
       kill,
       checkPid,
       waitForExitMs,
@@ -210,9 +220,9 @@ export const stopKoedServer = ({
     stoppedPids.push(...stopped.stoppedPids);
     missingPids.push(...stopped.missingPids);
     if (stopped.missingPids.length > 0) {
-      missingServices.push(name);
+      missingServices.push(serviceName);
     } else if (stopped.stoppedPids.length > 0) {
-      stoppedServices.push(name);
+      stoppedServices.push(serviceName);
     }
     errors.push(...stopped.errors);
   }
