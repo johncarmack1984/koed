@@ -40,6 +40,7 @@ const status: KoedServerStatus = {
   apiToken: { state: "healthy", configured: true },
   mcpServer: { state: "healthy" },
   captureHook: { state: "healthy" },
+  codexTranscriptWatcher: { state: "healthy" },
   codex: { state: "healthy", configured: true },
   lcmSummaryService: { state: "healthy" },
   upstreamBackends: {

@@ -63,6 +63,37 @@ describe("stopKoedServer", () => {
     });
   });
 
+  it("stops Transcript Watcher before API-dependent app processes", () => {
+    const koedHome = makeHome();
+    writeRuntime(
+      koedHome,
+      runtime({
+        services: ["api", "worker", "explorer", "codex-transcript-watcher"],
+        processes: {
+          api: 10,
+          worker: 11,
+          explorer: 12,
+          codexTranscriptWatcher: 13
+        }
+      })
+    );
+    const signals: Array<[number, NodeJS.Signals]> = [];
+
+    const result = stopKoedServer({
+      environment: { KOED_HOME: koedHome },
+      kill: (pid, signal) => signals.push([pid, signal]),
+      checkPid: () => false
+    });
+
+    expect(result.ok).toBe(true);
+    expect(signals).toEqual([
+      [13, "SIGTERM"],
+      [12, "SIGTERM"],
+      [11, "SIGTERM"],
+      [10, "SIGTERM"]
+    ]);
+  });
+
   it("stops app processes in reverse app order", () => {
     const koedHome = makeHome();
     writeRuntime(koedHome, runtime());
