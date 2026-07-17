@@ -378,6 +378,39 @@ export class MemoryApiClient {
     return this.request("POST", "/v1/sessions", input);
   }
 
+  async createHistoricalImportRun(): Promise<Record<string, unknown>> {
+    return this.request("POST", "/v1/historical-imports", {});
+  }
+
+  async lookupHistoricalImportSource(input: {
+    aiClient: "codex";
+    sourceKind: "codex";
+    sourceSessionId: string;
+  }): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams(input);
+    return this.request(
+      "GET",
+      `/v1/historical-import-sources/lookup?${params.toString()}`
+    );
+  }
+
+  async createHistoricalImportSource(
+    input: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    return this.request("POST", "/v1/historical-import-sources", input);
+  }
+
+  async advanceLiveTranscriptCursor(
+    sourceId: string,
+    input: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      "POST",
+      `/v1/historical-import-sources/${encodeURIComponent(sourceId)}/live-cursor`,
+      input
+    );
+  }
+
   async effectiveCapturePolicy(input: {
     projectId?: string;
     threadId?: string;

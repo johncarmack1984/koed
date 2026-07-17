@@ -1,0 +1,614 @@
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+
+import { MemoryApiError } from "../src/index.js";
+import {
+  completeTranscriptBoundary,
+  hashFilePrefix,
+  signalCodexTranscriptWatcher,
+  startCodexTranscriptWatcher,
+  type CodexTranscriptWatcherClient,
+  type CodexTranscriptWatcherConfig
+} from "../src/codex-transcript-watcher.js";
+
+const temporaryDirectories: string[] = [];
+const watcherHandles: Array<ReturnType<typeof startCodexTranscriptWatcher>> =
+  [];
+const trackedWatcher = (
+  client: CodexTranscriptWatcherClient,
+  config: CodexTranscriptWatcherConfig
+) => {
+  const watcher = startCodexTranscriptWatcher(client, config);
+  watcherHandles.push(watcher);
+  return watcher;
+};
+const temporaryDirectory = (): string => {
+  const directory = mkdtempSync(path.join(tmpdir(), "koed-watcher-test-"));
+  temporaryDirectories.push(directory);
+  return directory;
+};
+
+afterEach(async () => {
+  await Promise.all(watcherHandles.splice(0).map((watcher) => watcher.stop()));
+  for (const directory of temporaryDirectories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+const waitFor = async (
+  predicate: () => boolean,
+  timeoutMs = 1_000
+): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(predicate()).toBe(true);
+};
+
+const line = (record: unknown): string => `${JSON.stringify(record)}\n`;
+const sessionRecord = (sessionId: string, cwd = "/tmp/project") => ({
+  timestamp: "2026-01-01T00:00:00.000Z",
+  type: "session_meta",
+  payload: { id: sessionId, cwd, timestamp: "2026-01-01T00:00:00.000Z" }
+});
+const userRecord = (message: string, second = 1) => ({
+  timestamp: `2026-01-01T00:00:0${second}.000Z`,
+  type: "event_msg",
+  payload: { type: "user_message", message }
+});
+const controlRecord = (second = 2) => ({
+  timestamp: `2026-01-01T00:00:0${second}.000Z`,
+  type: "turn_context",
+  payload: { turn_id: `turn-${second}` }
+});
+
+interface Source {
+  id: string;
+  runId: string;
+  sourceSessionId: string;
+  sourceFingerprint: string;
+  registrationFrontierOffset: number;
+  registrationPrefixHash: string;
+  liveCursorOffset: number;
+  liveCursorLine: number;
+  liveCursorHash: string | null;
+  sourceSizeBytes: number;
+  sourceModifiedAt: string | null;
+  detectedProject: Record<string, unknown>;
+}
+
+class FakeWatcherClient implements CodexTranscriptWatcherClient {
+  readonly sources = new Map<string, Source>();
+  readonly itemBatches: Array<Array<Record<string, unknown>>> = [];
+  readonly cursorWrites: Array<Record<string, unknown>> = [];
+  policyEnabled = true;
+  captureState: "enabled" | "disabled" | "ask" = "enabled";
+  policyPaused = false;
+  policyVisibility = "personal";
+  sessionCalls = 0;
+  failProjection = false;
+  afterCreateItems?: () => void;
+  private nextItem = 0;
+
+  async accessCheck() {
+    return { user: { id: "user-1" } };
+  }
+
+  async createHistoricalImportRun() {
+    return { run: { id: "11111111-1111-4111-8111-111111111111" } };
+  }
+
+  async lookupHistoricalImportSource(input: { sourceSessionId: string }) {
+    const source = this.sources.get(input.sourceSessionId);
+    if (!source) {
+      throw new MemoryApiError("not found", { status: 404 });
+    }
+    return { source };
+  }
+
+  async createHistoricalImportSource(input: Record<string, unknown>) {
+    const sourceSessionId = String(input.sourceSessionId);
+    const existing = this.sources.get(sourceSessionId);
+    if (existing) {
+      existing.sourceSizeBytes = Number(input.sourceSizeBytes);
+      existing.sourceModifiedAt =
+        typeof input.sourceModifiedAt === "string"
+          ? input.sourceModifiedAt
+          : existing.sourceModifiedAt;
+      return { source: existing };
+    }
+    const frontier = Number(input.registrationFrontierOffset);
+    const source: Source = {
+      id: `source-${this.sources.size + 1}`,
+      runId: String(input.runId),
+      sourceSessionId,
+      sourceFingerprint: String(input.sourceFingerprint),
+      registrationFrontierOffset: frontier,
+      registrationPrefixHash: String(input.registrationPrefixHash),
+      liveCursorOffset: frontier,
+      liveCursorLine: 0,
+      liveCursorHash:
+        frontier === 0 ? null : String(input.registrationPrefixHash),
+      sourceSizeBytes: Number(input.sourceSizeBytes),
+      sourceModifiedAt:
+        typeof input.sourceModifiedAt === "string"
+          ? input.sourceModifiedAt
+          : null,
+      detectedProject: (input.detectedProject ?? {}) as Record<string, unknown>
+    };
+    this.sources.set(sourceSessionId, source);
+    return { source };
+  }
+
+  async advanceLiveTranscriptCursor(
+    sourceId: string,
+    input: Record<string, unknown>
+  ) {
+    const source = [...this.sources.values()].find(
+      (item) => item.id === sourceId
+    )!;
+    source.liveCursorOffset = Number(input.cursorOffset);
+    source.liveCursorLine = Number(input.cursorLine);
+    source.liveCursorHash = String(input.cursorHash);
+    source.sourceSizeBytes = Number(input.sourceSizeBytes);
+    this.cursorWrites.push(input);
+    return { source };
+  }
+
+  async effectiveCapturePolicy() {
+    return {
+      policy: {
+        captureState: this.policyEnabled ? this.captureState : "disabled",
+        visibility: this.policyVisibility,
+        paused: !this.policyEnabled || this.policyPaused
+      }
+    };
+  }
+
+  async createSession() {
+    this.sessionCalls += 1;
+    if (
+      !this.policyEnabled ||
+      this.captureState !== "enabled" ||
+      this.policyPaused ||
+      this.policyVisibility !== "personal"
+    ) {
+      return { skipped: true };
+    }
+    return { session: { id: "22222222-2222-4222-8222-222222222222" } };
+  }
+
+  async createConversationItems(input: Record<string, unknown>) {
+    const items = input.items as Array<Record<string, unknown>>;
+    this.itemBatches.push(items);
+    this.afterCreateItems?.();
+    return {
+      items: items.map((item) => ({ ...item, id: `item-${++this.nextItem}` }))
+    };
+  }
+
+  async projectConversationItems() {
+    if (this.failProjection) throw new Error("projection unavailable");
+    return {};
+  }
+}
+
+const watcherConfig = (root: string): CodexTranscriptWatcherConfig => ({
+  roots: [path.join(root, "codex", "sessions")],
+  koedHome: path.join(root, "koed"),
+  rescanIntervalMs: 60_000,
+  debounceMs: 60_000,
+  maxEntriesPerScan: 1_000,
+  maxFilesPerScan: 100,
+  maxBytesPerBatch: 64 * 1024
+});
+
+const transcriptPath = (root: string): string => {
+  const directory = path.join(root, "codex", "sessions", "2026", "01", "01");
+  fsMkdir(directory);
+  return path.join(directory, "rollout-test.jsonl");
+};
+
+const fsMkdir = (directory: string): void => {
+  mkdirSync(directory, { recursive: true });
+};
+
+describe("Codex Transcript Watcher", () => {
+  it("registers an existing source at complete frontier then captures append without Hook", async () => {
+    const root = temporaryDirectory();
+    const transcript = transcriptPath(root);
+    writeFileSync(transcript, line(sessionRecord("session-existing")));
+    const frontier = completeTranscriptBoundary(transcript);
+    const client = new FakeWatcherClient();
+    const watcher = trackedWatcher(client, watcherConfig(root));
+
+    await watcher.scanNow();
+    expect(
+      client.sources.get("session-existing")?.registrationFrontierOffset
+    ).toBe(frontier);
+    expect(client.itemBatches).toHaveLength(0);
+
+    appendFileSync(transcript, line(userRecord("captured without hook")));
+    await watcher.scanNow();
+
+    const source = client.sources.get("session-existing")!;
+    expect(source.liveCursorOffset).toBe(
+      completeTranscriptBoundary(transcript)
+    );
+    expect(client.itemBatches.flat()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceTransport: "transcript",
+          externalSessionId: "session-existing"
+        })
+      ])
+    );
+    await watcher.stop();
+  });
+
+  it("captures a source created after activation from its first complete record", async () => {
+    const root = temporaryDirectory();
+    const client = new FakeWatcherClient();
+    const config = watcherConfig(root);
+    const watcher = trackedWatcher(client, config);
+    await watcher.scanNow();
+
+    const transcript = transcriptPath(root);
+    writeFileSync(
+      transcript,
+      line(sessionRecord("session-new")) + line(userRecord("first record"))
+    );
+    await watcher.scanNow();
+
+    const source = client.sources.get("session-new")!;
+    expect(source.registrationFrontierOffset).toBe(0);
+    expect(source.liveCursorOffset).toBe(
+      completeTranscriptBoundary(transcript)
+    );
+    expect(client.itemBatches.flat().length).toBeGreaterThanOrEqual(2);
+    await watcher.stop();
+  });
+
+  it("holds partial and malformed appends without cursor corruption", async () => {
+    const root = temporaryDirectory();
+    const transcript = transcriptPath(root);
+    writeFileSync(transcript, line(sessionRecord("session-partial")));
+    const client = new FakeWatcherClient();
+    const watcher = trackedWatcher(client, watcherConfig(root));
+    await watcher.scanNow();
+    const frontier = client.sources.get("session-partial")!.liveCursorOffset;
+
+    const completedLater = line(userRecord("completed later"));
+    const splitAt = Math.floor(completedLater.length / 2);
+    appendFileSync(transcript, completedLater.slice(0, splitAt));
+    await watcher.scanNow();
+    expect(client.sources.get("session-partial")!.liveCursorOffset).toBe(
+      frontier
+    );
+
+    appendFileSync(transcript, completedLater.slice(splitAt));
+    await watcher.scanNow();
+    const completedCursor =
+      client.sources.get("session-partial")!.liveCursorOffset;
+    expect(completedCursor).toBeGreaterThan(frontier);
+
+    appendFileSync(transcript, "not-json\n");
+    await watcher.scanNow();
+    expect(client.sources.get("session-partial")!.liveCursorOffset).toBe(
+      completedCursor
+    );
+    expect(watcher.snapshot().lastErrorCode).toBe(
+      "transcript_malformed_record"
+    );
+    await watcher.stop();
+  });
+
+  it("leaves cursor unchanged when policy or Projection blocks a batch", async () => {
+    const root = temporaryDirectory();
+    const transcript = transcriptPath(root);
+    writeFileSync(transcript, line(sessionRecord("session-policy")));
+    const client = new FakeWatcherClient();
+    const watcher = trackedWatcher(client, watcherConfig(root));
+    await watcher.scanNow();
+    const frontier = client.sources.get("session-policy")!.liveCursorOffset;
+
+    client.policyEnabled = false;
+    appendFileSync(transcript, line(userRecord("blocked")));
+    await watcher.scanNow();
+    expect(client.sources.get("session-policy")!.liveCursorOffset).toBe(
+      frontier
+    );
+
+    client.policyEnabled = true;
+    client.failProjection = true;
+    await watcher.scanNow();
+    expect(client.sources.get("session-policy")!.liveCursorOffset).toBe(
+      frontier
+    );
+
+    client.failProjection = false;
+    await watcher.scanNow();
+    expect(
+      client.sources.get("session-policy")!.liveCursorOffset
+    ).toBeGreaterThan(frontier);
+    await watcher.stop();
+  });
+
+  it("rejects mutation of parsed bytes during a write batch", async () => {
+    const root = temporaryDirectory();
+    const transcript = transcriptPath(root);
+    writeFileSync(transcript, line(sessionRecord("session-race")));
+    const client = new FakeWatcherClient();
+    const watcher = trackedWatcher(client, watcherConfig(root));
+    await watcher.scanNow();
+    const frontier = client.sources.get("session-race")!.liveCursorOffset;
+    appendFileSync(transcript, line(userRecord("before mutation")));
+    client.afterCreateItems = () => {
+      client.afterCreateItems = undefined;
+      const content = Buffer.from(readTranscript(transcript));
+      content[frontier + 1] = content[frontier + 1] === 0x22 ? 0x20 : 0x22;
+      writeFileSync(transcript, content);
+    };
+
+    await watcher.scanNow();
+
+    expect(client.sources.get("session-race")!.liveCursorOffset).toBe(frontier);
+    expect(watcher.snapshot().lastErrorCode).toBe(
+      "transcript_mutated_during_batch"
+    );
+  });
+
+  it("resumes from durable live cursor and rejects prefix mutation", async () => {
+    const root = temporaryDirectory();
+    const transcript = transcriptPath(root);
+    writeFileSync(transcript, line(sessionRecord("session-restart")));
+    const client = new FakeWatcherClient();
+    const config = watcherConfig(root);
+    const first = trackedWatcher(client, config);
+    await first.scanNow();
+    appendFileSync(transcript, line(userRecord("one")));
+    await first.scanNow();
+    await first.stop();
+    const durableOffset =
+      client.sources.get("session-restart")!.liveCursorOffset;
+
+    appendFileSync(transcript, line(controlRecord(3)));
+    const restarted = trackedWatcher(client, config);
+    await restarted.scanNow();
+    expect(client.cursorWrites.at(-1)?.expectedCursorOffset).toBe(
+      durableOffset
+    );
+
+    const content = Buffer.from(readTranscript(transcript));
+    content[0] = content[0] === 0x7b ? 0x5b : 0x7b;
+    writeFileSync(transcript, content);
+    appendFileSync(transcript, line(controlRecord(4)));
+    const beforeMutationScan =
+      client.sources.get("session-restart")!.liveCursorOffset;
+    await restarted.scanNow();
+    expect(client.sources.get("session-restart")!.liveCursorOffset).toBe(
+      beforeMutationScan
+    );
+    expect(restarted.snapshot().lastErrorCode).toBe(
+      "transcript_prefix_mutated"
+    );
+    await restarted.stop();
+  });
+
+  it("detects truncation and treats inode rotation as a new live source", async () => {
+    const root = temporaryDirectory();
+    const transcript = transcriptPath(root);
+    writeFileSync(transcript, line(sessionRecord("session-rotate")));
+    const client = new FakeWatcherClient();
+    const watcher = trackedWatcher(client, watcherConfig(root));
+    await watcher.scanNow();
+    appendFileSync(transcript, line(userRecord("captured")));
+    await watcher.scanNow();
+    const cursor = client.sources.get("session-rotate")!.liveCursorOffset;
+
+    writeFileSync(transcript, line(sessionRecord("session-rotate")));
+    await watcher.scanNow();
+    expect(client.sources.get("session-rotate")!.liveCursorOffset).toBe(cursor);
+    expect(watcher.snapshot().lastErrorCode).toMatch(
+      /historical|transcript_truncated/
+    );
+
+    const replacement = `${transcript}.replacement`;
+    writeFileSync(
+      replacement,
+      line(sessionRecord("session-replacement")) + line(userRecord("new"))
+    );
+    renameSync(replacement, transcript);
+    await watcher.scanNow();
+    expect(
+      client.sources.get("session-replacement")?.registrationFrontierOffset
+    ).toBe(0);
+    expect(client.sources.get("session-replacement")!.liveCursorOffset).toBe(
+      completeTranscriptBoundary(transcript)
+    );
+    await watcher.stop();
+  });
+
+  it("recovers an append through periodic rescan without scanNow or Hook", async () => {
+    const root = temporaryDirectory();
+    const transcript = transcriptPath(root);
+    writeFileSync(transcript, line(sessionRecord("session-periodic")));
+    const client = new FakeWatcherClient();
+    const config = {
+      ...watcherConfig(root),
+      rescanIntervalMs: 20,
+      debounceMs: 5
+    };
+    const watcher = trackedWatcher(client, config);
+    await watcher.scanNow();
+    const frontier = client.sources.get("session-periodic")!.liveCursorOffset;
+
+    appendFileSync(transcript, line(userRecord("timer recovery")));
+    await waitFor(
+      () =>
+        (client.sources.get("session-periodic")?.liveCursorOffset ?? 0) >
+        frontier
+    );
+    expect(client.itemBatches.flat()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sourceTransport: "transcript" })
+      ])
+    );
+  });
+
+  it("keeps post-activation source live across watcher restart", async () => {
+    const root = temporaryDirectory();
+    const client = new FakeWatcherClient();
+    const config = watcherConfig(root);
+    const first = trackedWatcher(client, config);
+    await first.scanNow();
+    await first.stop();
+
+    const transcript = transcriptPath(root);
+    writeFileSync(
+      transcript,
+      line(sessionRecord("session-after-stop")) + line(userRecord("live"))
+    );
+    const restarted = trackedWatcher(client, config);
+    await restarted.scanNow();
+
+    const source = client.sources.get("session-after-stop")!;
+    expect(source.registrationFrontierOffset).toBe(0);
+    expect(source.liveCursorOffset).toBe(
+      completeTranscriptBoundary(transcript)
+    );
+  });
+
+  it("continues bounded discovery across scans without following symlinks", async () => {
+    const root = temporaryDirectory();
+    const config = {
+      ...watcherConfig(root),
+      maxEntriesPerScan: 2,
+      maxFilesPerScan: 1
+    };
+    for (const [index, sessionId] of ["one", "two", "three"].entries()) {
+      const directory = path.join(config.roots[0]!, String(index));
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(
+        path.join(directory, `rollout-${index}.jsonl`),
+        line(sessionRecord(`session-${sessionId}`))
+      );
+    }
+    const outside = path.join(root, "outside");
+    mkdirSync(outside, { recursive: true });
+    const outsideTranscript = path.join(outside, "rollout-outside.jsonl");
+    writeFileSync(outsideTranscript, line(sessionRecord("session-outside")));
+    symlinkSync(
+      outsideTranscript,
+      path.join(config.roots[0]!, "rollout-link.jsonl")
+    );
+
+    const client = new FakeWatcherClient();
+    const watcher = trackedWatcher(client, config);
+    for (
+      let attempt = 0;
+      attempt < 20 && client.sources.size < 3;
+      attempt += 1
+    ) {
+      await watcher.scanNow();
+    }
+    expect([...client.sources.keys()].sort()).toEqual([
+      "session-one",
+      "session-three",
+      "session-two"
+    ]);
+    expect(client.sources.has("session-outside")).toBe(false);
+  });
+
+  it("blocks ask, pause, and non-personal policy before session creation", async () => {
+    const root = temporaryDirectory();
+    const transcript = transcriptPath(root);
+    writeFileSync(transcript, line(sessionRecord("session-policy-states")));
+    const client = new FakeWatcherClient();
+    const watcher = trackedWatcher(client, watcherConfig(root));
+    await watcher.scanNow();
+    appendFileSync(transcript, line(userRecord("blocked states")));
+
+    client.captureState = "ask";
+    await watcher.scanNow();
+    client.captureState = "enabled";
+    client.policyPaused = true;
+    await watcher.scanNow();
+    client.policyPaused = false;
+    client.policyVisibility = "team";
+    await watcher.scanNow();
+
+    expect(client.sessionCalls).toBe(0);
+    expect(client.cursorWrites).toHaveLength(0);
+  });
+
+  it("writes bounded redacted diagnostic status with private permissions", async () => {
+    const root = temporaryDirectory();
+    const transcript = transcriptPath(root);
+    writeFileSync(transcript, line(sessionRecord("session-status")));
+    const client = new FakeWatcherClient();
+    const watcher = trackedWatcher(client, watcherConfig(root));
+    await watcher.scanNow();
+    await watcher.stop();
+
+    const statusPath = path.join(
+      root,
+      "koed",
+      "status",
+      "codex-transcript-watcher.json"
+    );
+    const status = readFileSync(statusPath, "utf8");
+    expect(status).not.toContain(root);
+    expect(status).not.toContain("session-status");
+    expect(status).not.toContain("watcher-token");
+    const snapshot = JSON.parse(status) as Record<string, unknown>;
+    expect(snapshot).toMatchObject({
+      state: "stopped",
+      lastErrorCode: null
+    });
+    expect(typeof snapshot.scans).toBe("number");
+    expect(typeof snapshot.filesDiscovered).toBe("number");
+    expect(statSync(statusPath).mode & 0o777).toBe(0o600);
+  });
+
+  it("coalesces content-free Hook wake hints under isolated KOED_HOME", () => {
+    const root = temporaryDirectory();
+    const env = { KOED_HOME: path.join(root, "koed") };
+    signalCodexTranscriptWatcher(env);
+    signalCodexTranscriptWatcher(env);
+    const wake = readFileSync(
+      path.join(root, "koed", "run", "codex-transcript-watcher.wake"),
+      "utf8"
+    );
+    expect(wake).toMatch(/^\d+\n$/);
+    expect(wake).not.toContain(root);
+  });
+
+  it("computes cursor hashes from exact complete prefixes", async () => {
+    const root = temporaryDirectory();
+    const transcript = transcriptPath(root);
+    writeFileSync(transcript, line(sessionRecord("session-hash")) + "partial");
+    const boundary = completeTranscriptBoundary(transcript);
+    expect(boundary).toBeLessThan(readTranscript(transcript).length);
+    expect(await hashFilePrefix(transcript, 0)).toMatch(/^[0-9a-f]{64}$/);
+    expect(await hashFilePrefix(transcript, boundary)).toMatch(
+      /^[0-9a-f]{64}$/
+    );
+  });
+});
+
+const readTranscript = (transcript: string): string =>
+  readFileSync(transcript, "utf8");
