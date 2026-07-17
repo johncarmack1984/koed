@@ -143,14 +143,20 @@ const rawProjectionService =
           requesterContext,
           visibility,
           dispatchKey,
-          workClass
+          workClass,
+          jobId,
+          sourceSessionId,
+          finalize
         ) =>
           enqueueLcmCompaction(
             lcmCompactQueue,
             requesterContext,
             visibility,
             dispatchKey,
-            workClass
+            workClass,
+            jobId,
+            sourceSessionId,
+            finalize
           ),
         enqueueProjectedMemoryEventProcessing: projectionJobScheduler.enqueue,
         enqueueSourceEmbedding: (

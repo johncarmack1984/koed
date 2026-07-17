@@ -77,6 +77,9 @@ const withProjectionDefaults = (repository: Record<string, unknown>) =>
   ({
     getConversationProjectionBacklog: vi.fn().mockResolvedValue(emptyBacklog),
     listPendingLcmDispatchScopes: vi.fn().mockResolvedValue([]),
+    listHistoricalImportSourcesNeedingLcmFinalization: vi
+      .fn()
+      .mockResolvedValue([]),
     listSourcesNeedingEmbeddings: vi.fn().mockResolvedValue([]),
     ...repository
   }) as unknown as MemorySourceRepository;
@@ -227,6 +230,36 @@ describe("raw projection service", () => {
         resource: { type: "memory_event", id: "event-1" }
       }),
       "could not enqueue pending embedding source"
+    );
+  });
+
+  it("enqueues deterministic source-scoped terminal historical finalization", async () => {
+    const repository = withProjectionDefaults({
+      listConversationProjectionActors: vi.fn().mockResolvedValue([]),
+      listSemanticMemoryRebuildActors: vi.fn().mockResolvedValue([]),
+      listHistoricalImportSourcesNeedingLcmFinalization: vi
+        .fn()
+        .mockResolvedValue([
+          {
+            sourceId: "source-1",
+            ownerUserId: "user-1",
+            sourceSessionId: "session-1"
+          }
+        ])
+    });
+    const options = serviceOptions(repository);
+    const service = createRawProjectionService(options);
+
+    await service.run();
+
+    expect(options.enqueueLcmCompaction).toHaveBeenCalledWith(
+      { userId: "user-1" },
+      "personal",
+      "historical-import-finalize-source-1",
+      "historical_import_backfill",
+      "historical-import-finalize-source-1",
+      "session-1",
+      true
     );
   });
 

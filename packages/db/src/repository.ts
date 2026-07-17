@@ -23,6 +23,7 @@ import {
 } from "./conversation-semantic-projection.js";
 import { createConversationItemRepository } from "./conversation-item-repository.js";
 import { createHistoricalImportRepository } from "./historical-import-repository.js";
+import { embeddingTableForDimensions } from "./embedding-coverage.js";
 import { invalidateDerivedMemoryForMemoryEvents } from "./derived-memory-invalidation.js";
 import { createCrossIdentitySyncRepository } from "./cross-identity-sync-repository.js";
 import {
@@ -2083,22 +2084,6 @@ const sourceHash = (
     .digest("hex");
 
 const vectorLiteral = (vector: number[]): string => `[${vector.join(",")}]`;
-
-const embeddingTableForDimensions = (dimensions: number): string => {
-  if (dimensions === 384) {
-    return "memory_embeddings_384";
-  }
-  if (dimensions === 1024) {
-    return "memory_embeddings_1024";
-  }
-  if (dimensions === 1536) {
-    return "memory_embeddings_1536";
-  }
-  if (dimensions === 3072) {
-    return "memory_embeddings_3072";
-  }
-  throw new Error(`Unsupported local embedding dimensions: ${dimensions}`);
-};
 
 const positiveIntEnv = (name: string, fallback: number): number => {
   const parsed = Number.parseInt(process.env[name] ?? "", 10);
@@ -8107,6 +8092,9 @@ export const createMemorySourceRepository = (
     },
 
     async listSourcesNeedingEmbeddings(limit = 100) {
+      const embeddingTable = embeddingTableForDimensions(
+        localEmbeddingDimensions()
+      );
       const result = await pool.query<{
         source_type: EmbeddableSourceType;
         source_id: string;
@@ -8208,6 +8196,7 @@ export const createMemorySourceRepository = (
           and not exists (
             select 1
             from memory_embeddings me
+            join ${embeddingTable} vectors on vectors.memory_embedding_id = me.id
             where me.invalidated_at is null and me.personal_deleted_at is null
               and me.embedding_model = $1
               and me.embedding_dimensions = $2
@@ -11600,6 +11589,7 @@ export const createMemorySourceRepository = (
             and me.visibility = $1
             and me.owner_user_id = $2
             and coalesce(processing.work_class, 'normal_embedding_lcm') = $3
+            and ($5::uuid is null or me.session_id = $5::uuid)
             and me.include_in_lcm = true
             and not exists (
               select 1
@@ -11612,7 +11602,13 @@ export const createMemorySourceRepository = (
           order by me.captured_at asc, me.id asc
           limit $4
         `,
-          [input.visibility, ownerUserId, workClass, lcmCompactionMaxEvents()]
+          [
+            input.visibility,
+            ownerUserId,
+            workClass,
+            lcmCompactionMaxEvents(),
+            input.sourceSessionId ?? null
+          ]
         );
 
         const hydratedEventRows = await Promise.all(
@@ -11643,8 +11639,9 @@ export const createMemorySourceRepository = (
           })
         );
         const freshTail = lcmFreshEventTail();
-        const events =
-          freshTail > 0 && hydratedEventRows.length > freshTail
+        const events = input.finalize
+          ? hydratedEventRows
+          : freshTail > 0 && hydratedEventRows.length > freshTail
             ? hydratedEventRows.slice(0, hydratedEventRows.length - freshTail)
             : freshTail === 0
               ? hydratedEventRows
@@ -11694,6 +11691,7 @@ export const createMemorySourceRepository = (
               0
             );
             if (
+              input.finalize ||
               currentSpan.length >= eventThreshold ||
               remainingTokens >= tokenThreshold
             ) {

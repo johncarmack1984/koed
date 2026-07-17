@@ -1737,6 +1737,9 @@ export interface MemorySourceRepository
     ownerUserId?: string;
     workClass?: KoedWorkClass;
   }): Promise<LcmDispatchReconciliationScope[]>;
+  listHistoricalImportSourcesNeedingLcmFinalization(): Promise<
+    Array<{ sourceId: string; ownerUserId: string; sourceSessionId: string }>
+  >;
   listSemanticMemoryRebuildActors(input?: {
     limit?: number;
   }): Promise<ActorContext[]>;

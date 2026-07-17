@@ -40,7 +40,9 @@ export interface RawProjectionServiceConfig {
     visibility: Visibility,
     dispatchKey: string,
     workClass?: KoedWorkClass,
-    jobId?: string
+    jobId?: string,
+    sourceSessionId?: string,
+    finalize?: boolean
   ): Promise<unknown>;
   enqueueProjectedMemoryEventProcessing(
     actor: { userId: string },
@@ -164,6 +166,31 @@ const logHistoricalDecision = (
       }
     },
     "historical import admission evaluated"
+  );
+};
+
+const reconcileTerminalHistoricalLcmJobs = async (
+  config: RawProjectionServiceConfig
+): Promise<void> => {
+  if (
+    !("listHistoricalImportSourcesNeedingLcmFinalization" in config.repository)
+  ) {
+    return;
+  }
+  const sources =
+    await config.repository.listHistoricalImportSourcesNeedingLcmFinalization();
+  await Promise.all(
+    sources.map((source) =>
+      config.enqueueLcmCompaction(
+        { userId: source.ownerUserId },
+        "personal",
+        `historical-import-finalize-${source.sourceId}`,
+        "historical_import_backfill",
+        `historical-import-finalize-${source.sourceId}`,
+        source.sourceSessionId,
+        true
+      )
+    )
   );
 };
 
@@ -385,6 +412,7 @@ export const createRawProjectionService = (
       );
       const rebuild = await processRebuildActors(config);
       await reconcileEmbeddingJobs(config);
+      await reconcileTerminalHistoricalLcmJobs(config);
       await reconcileLcmCompactionJobs(config);
       logHistoricalDecision(
         config.logger,

@@ -4,6 +4,7 @@ import { createDb } from "./connection.js";
 import { createCapturedSessionRepository } from "./captured-session-repository.js";
 import { createConversationItemRepository } from "./conversation-item-repository.js";
 import { createSettingsRepository } from "./settings-repository.js";
+import { currentEmbeddingConfig } from "./embedding-coverage.js";
 import type {
   ActorContext,
   HistoricalImportBatchWriteInput,
@@ -55,6 +56,9 @@ export interface HistoricalImportRepository {
     actor: ActorContext,
     sourceId: string
   ): Promise<HistoricalImportSourceRecord | null>;
+  listHistoricalImportSourcesNeedingLcmFinalization(): Promise<
+    Array<{ sourceId: string; ownerUserId: string; sourceSessionId: string }>
+  >;
 }
 
 type CreateHistoricalImportSourceInput = {
@@ -407,6 +411,7 @@ const refreshSourceProgress = async (
   ownerUserId: string,
   sourceId: string
 ): Promise<void> => {
+  const embedding = currentEmbeddingConfig();
   await pool.query(
     `with source as (
        select id, owner_user_id, source_session_id, imported_record_count
@@ -440,11 +445,10 @@ const refreshSourceProgress = async (
               where mes.memory_event_id = me.id
                 and observation.source_transport = 'historical_import'
             )
-            and me.invalidated_at is null and me.include_in_embedding) embedding_eligible_count,
-         (select count(distinct me.id)::int from memory_events me
+            and me.invalidated_at is null and me.personal_deleted_at is null
+            and me.include_in_embedding) embedding_eligible_count,
+         (select count(*)::int from memory_events me
           join sessions s on s.id = me.session_id
-          join memory_embeddings emb on emb.memory_event_id = me.id
-            and emb.invalidated_at is null
           where s.owner_user_id = source.owner_user_id
             and s.external_session_id = source.source_session_id
             and exists (
@@ -454,7 +458,26 @@ const refreshSourceProgress = async (
               where mes.memory_event_id = me.id
                 and observation.source_transport = 'historical_import'
             )
-            and me.invalidated_at is null and me.include_in_embedding) embedded_count,
+            and me.invalidated_at is null and me.personal_deleted_at is null
+            and me.include_in_embedding
+            and exists (
+              select 1 from memory_embeddings emb
+              join ${embedding.table} vector
+                on vector.memory_embedding_id = emb.id
+              where emb.memory_event_id = me.id
+                and emb.invalidated_at is null
+                and emb.personal_deleted_at is null
+                and emb.embedding_model = $3
+                and emb.embedding_dimensions = $4
+                and emb.embedding_version = $5
+                and emb.source_hash = me.source_hash
+              group by emb.memory_event_id, emb.source_hash
+              having count(*) = max(emb.source_chunk_count)
+                and count(distinct emb.source_chunk_index) = max(emb.source_chunk_count)
+                and min(emb.source_chunk_index) = 0
+                and max(emb.source_chunk_index) = max(emb.source_chunk_count) - 1
+                and min(emb.source_chunk_count) = max(emb.source_chunk_count)
+            )) embedded_count,
          (select count(*)::int from memory_events me
           join sessions s on s.id = me.session_id
           where s.owner_user_id = source.owner_user_id
@@ -492,7 +515,13 @@ const refreshSourceProgress = async (
        lcm_eligible_event_count = progress.lcm_eligible_count,
        lcm_completed_event_count = progress.lcm_completed_count
      from progress where his.id = progress.id`,
-    [ownerUserId, sourceId]
+    [
+      ownerUserId,
+      sourceId,
+      embedding.model,
+      embedding.dimensions,
+      embedding.version
+    ]
   );
 };
 
@@ -1107,6 +1136,46 @@ const batchSourceEventRange = (
   };
 };
 
+const listSourcesNeedingLcmFinalization = async (
+  pool: pg.Pool
+): Promise<
+  Array<{ sourceId: string; ownerUserId: string; sourceSessionId: string }>
+> => {
+  const candidates = await pool.query<{
+    id: string;
+    owner_user_id: string;
+    source_session_id: string;
+  }>(
+    `select id, owner_user_id, source_session_id
+     from historical_import_sources
+     where state = 'importing'
+       and checkpoint_offset = registration_frontier_offset`
+  );
+  await Promise.all(
+    candidates.rows.map((source) =>
+      refreshSourceProgress(pool, source.owner_user_id, source.id)
+    )
+  );
+  const result = await pool.query<{
+    id: string;
+    owner_user_id: string;
+    source_session_id: string;
+  }>(
+    `select id, owner_user_id, source_session_id
+     from historical_import_sources
+     where state = 'importing'
+       and checkpoint_offset = registration_frontier_offset
+       and projected_record_count >= raw_ingested_record_count
+       and embedded_event_count = embedding_eligible_event_count
+       and lcm_completed_event_count < lcm_eligible_event_count`
+  );
+  return result.rows.map((source) => ({
+    sourceId: source.id,
+    ownerUserId: source.owner_user_id,
+    sourceSessionId: source.source_session_id
+  }));
+};
+
 const ingestBatchRecord = (
   pool: pg.Pool,
   actor: ActorContext,
@@ -1166,5 +1235,7 @@ export const createHistoricalImportRepository = (
   ingestHistoricalImportBatch: (actor, input) =>
     ingestBatchRecord(pool, actor, input),
   getHistoricalImportSource: (actor, sourceId) =>
-    getSource(pool, actor, sourceId)
+    getSource(pool, actor, sourceId),
+  listHistoricalImportSourcesNeedingLcmFinalization: () =>
+    listSourcesNeedingLcmFinalization(pool)
 });

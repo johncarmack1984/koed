@@ -483,6 +483,8 @@ export interface ScheduleCompactionInput {
   requesterContext: RequesterContext;
   visibility: Visibility;
   workClass?: MemoryWorkClass;
+  sourceSessionId?: string;
+  finalize?: boolean;
 }
 
 export interface MemoryEventRecord {
@@ -625,7 +627,12 @@ export interface MemoryEngineRepository {
   }>;
   createLcmNodes(
     actor: RequesterContext,
-    input: { visibility: Visibility; workClass?: MemoryWorkClass }
+    input: {
+      visibility: Visibility;
+      workClass?: MemoryWorkClass;
+      sourceSessionId?: string;
+      finalize?: boolean;
+    }
   ): Promise<CompactionResult>;
   expandMemoryNode(
     nodeId: string,

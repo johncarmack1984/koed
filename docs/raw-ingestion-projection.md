@@ -260,8 +260,11 @@ initial Projection dispatch. PostgreSQL remains the retry source after
 Redis/BullMQ or the local queue rejects admission, exhausts retries, or
 restarts, without admitting the same source under a second normal-priority job.
 A complete
-embedding response replaces all chunks for that source atomically; a partial or
-failed response cannot hide the source from reconciliation. LCM dispatch is
+embedding response replaces all chunks for that source atomically. Reconciliation
+and historical semantic-readiness counters require current model, dimensions,
+version, source hash, active vector rows, and one complete contiguous chunk set.
+A partial, stale, deleted, or vectorless response cannot hide the source from
+reconciliation. LCM dispatch is
 bounded by `MEMORY_LCM_COMPACTION_MAX_EVENTS` (default `1000`, maximum `10000`),
 and invalidating an old leaf creates a new dispatch generation.
 
@@ -314,7 +317,13 @@ embedding and LCM queue jobs. Compaction selection is also class-scoped: a live
 job can consume only live-lineage Memory Events, while a historical job can
 consume only historical events. LCM Placeholder nodes persist that explicit
 lineage, rollups combine only same-class children, and derived node embeddings
-reuse the triggering class across queue retries and process restarts.
+reuse the triggering class across queue retries and process restarts. Normal
+LCM compaction retains its fresh-event tail until leaf thresholds are reached.
+After a historical source reaches its immutable registration frontier and all
+raw, Projection, and embedding work is complete, Worker submits one
+source-scoped deterministic finalization job. It flushes only residual,
+same-class events for that source session, including spans below normal tail or
+leaf thresholds; live-tail behavior remains unchanged.
 
 Historical admission and progress telemetry contains only class names, row and
 byte counts, durations, and pause reasons. It must not contain transcript
