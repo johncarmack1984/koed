@@ -11,7 +11,13 @@ import {
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { startKoedServer, stopChildProcess } from "./start.js";
+import { resolveKoedServerPaths } from "./paths.js";
+import {
+  startKoedServer,
+  stopChildProcess,
+  waitForManagedProcessExits
+} from "./start.js";
+import { acquireKoedServerSupervisorLock } from "./supervisor-lock.js";
 import type { KoedServerStatus } from "./types.js";
 
 const temps: string[] = [];
@@ -169,6 +175,30 @@ describe("start supervisor", () => {
       stopChildProcess(value as never, 100)
     ).resolves.toBeUndefined();
     expect(signals).toEqual(["SIGTERM"]);
+  });
+
+  it("recognizes managed processes that exited before listeners attach", async () => {
+    const alreadyExited = new EventEmitter() as EventEmitter & {
+      exitCode: number | null;
+      signalCode: NodeJS.Signals | null;
+    };
+    alreadyExited.exitCode = 0;
+    alreadyExited.signalCode = null;
+    const live = new EventEmitter() as EventEmitter & {
+      exitCode: number | null;
+      signalCode: NodeJS.Signals | null;
+    };
+    live.exitCode = null;
+    live.signalCode = null;
+
+    const waiting = waitForManagedProcessExits({
+      alreadyExited: alreadyExited as never,
+      live: live as never
+    });
+    live.exitCode = 0;
+    live.emit("exit", 0, null);
+
+    await expect(waiting).resolves.toBeUndefined();
   });
 
   it("requires explicit external service URLs without localhost fallbacks", async () => {
@@ -666,14 +696,10 @@ describe("start supervisor", () => {
 
   it("does not allocate ports when a live supervisor owns KOED_HOME", async () => {
     const root = tempDir();
-    mkdirSync(resolve(root, "run"), { recursive: true });
-    writeFileSync(
-      resolve(root, "run/koed-server.lock"),
-      JSON.stringify({
-        pid: process.pid,
-        acquiredAt: "2026-01-01T00:00:00.000Z"
-      })
+    const lock = acquireKoedServerSupervisorLock(
+      resolveKoedServerPaths({ KOED_HOME: root, KOED_REPO_ROOT: root })
     );
+    expect(lock.acquired).toBe(true);
     const commands: string[] = [];
 
     await startKoedServer({
