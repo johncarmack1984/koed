@@ -11,6 +11,7 @@ import type {
   HistoricalImportBatchWriteResult,
   HistoricalImportRunDetail,
   HistoricalImportRunRecord,
+  HistoricalImportSourceIdentity,
   HistoricalImportSourceRecord,
   HistoricalImportState,
   LiveTranscriptCursorAdvanceInput
@@ -55,6 +56,10 @@ export interface HistoricalImportRepository {
   getHistoricalImportSource(
     actor: ActorContext,
     sourceId: string
+  ): Promise<HistoricalImportSourceRecord | null>;
+  getHistoricalImportSourceByIdentity(
+    actor: ActorContext,
+    identity: HistoricalImportSourceIdentity
   ): Promise<HistoricalImportSourceRecord | null>;
   listHistoricalImportSourcesNeedingLcmFinalization(): Promise<
     Array<{ sourceId: string; ownerUserId: string; sessionId: string }>
@@ -402,6 +407,25 @@ const getSource = async (
   const result = await pool.query<SourceRow>(
     "select * from historical_import_sources where id = $2 and owner_user_id = $1",
     [actor.userId, sourceId]
+  );
+  return result.rows[0] ? mapSource(result.rows[0]) : null;
+};
+
+const getSourceByIdentity = async (
+  pool: pg.Pool,
+  actor: ActorContext,
+  identity: HistoricalImportSourceIdentity
+): Promise<HistoricalImportSourceRecord | null> => {
+  const result = await pool.query<SourceRow>(
+    `select * from historical_import_sources
+     where owner_user_id = $1 and ai_client = $2 and source_kind = $3
+       and source_session_id = $4`,
+    [
+      actor.userId,
+      identity.aiClient,
+      identity.sourceKind,
+      identity.sourceSessionId
+    ]
   );
   return result.rows[0] ? mapSource(result.rows[0]) : null;
 };
@@ -1238,6 +1262,8 @@ export const createHistoricalImportRepository = (
     ingestBatchRecord(pool, actor, input),
   getHistoricalImportSource: (actor, sourceId) =>
     getSource(pool, actor, sourceId),
+  getHistoricalImportSourceByIdentity: (actor, identity) =>
+    getSourceByIdentity(pool, actor, identity),
   listHistoricalImportSourcesNeedingLcmFinalization: () =>
     listSourcesNeedingLcmFinalization(pool)
 });

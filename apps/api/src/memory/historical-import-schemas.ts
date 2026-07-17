@@ -53,6 +53,14 @@ export const historicalImportSourceParamsSchema = z.object({
   sourceId: z.string().uuid()
 });
 
+export const historicalImportSourceLookupSchema = z
+  .object({
+    aiClient: z.literal("codex"),
+    sourceKind: z.literal("codex"),
+    sourceSessionId: boundedText
+  })
+  .strict();
+
 const detectedProjectSchema = z
   .object({
     projectId: boundedText.optional(),
@@ -343,6 +351,7 @@ export const liveTranscriptCursorSchema = z
     cursorHash: checkpointHash,
     sourceSizeBytes: boundedBytes
   })
+  .strict()
   .superRefine((value, context) => {
     if (
       value.cursorOffset <= value.expectedCursorOffset ||

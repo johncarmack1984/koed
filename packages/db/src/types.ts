@@ -561,6 +561,12 @@ export interface HistoricalImportRunRecord extends HistoricalImportCounters {
   updatedAt: string;
 }
 
+export interface HistoricalImportSourceIdentity {
+  aiClient: string;
+  sourceKind: string;
+  sourceSessionId: string;
+}
+
 export interface HistoricalImportSourceRecord extends HistoricalImportCounters {
   id: string;
   runId: string;
@@ -1839,6 +1845,10 @@ export interface MemorySourceRepository
   getHistoricalImportSource(
     actor: ActorContext,
     sourceId: string
+  ): Promise<HistoricalImportSourceRecord | null>;
+  getHistoricalImportSourceByIdentity(
+    actor: ActorContext,
+    identity: HistoricalImportSourceIdentity
   ): Promise<HistoricalImportSourceRecord | null>;
   getEffectiveCapturePolicy(
     actor: ActorContext,
