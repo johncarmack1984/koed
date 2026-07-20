@@ -84,109 +84,6 @@ describeDb("durable historical import repository", () => {
     await pool?.end();
   });
 
-  it("finalizes non-UUID external-session historical LCM work with internal session ID", async () => {
-    const repo = createMemorySourceRepository(pool);
-    const owner = await repo.createUser({
-      email: `terminal-lcm-owner-${randomUUID()}@example.com`
-    });
-    const externalSessionId = `codex-terminal-${randomUUID()}`;
-    const run = await repo.createHistoricalImportRun({ userId: owner.id });
-    const source = await repo.createHistoricalImportSource(
-      { userId: owner.id },
-      {
-        runId: run.id,
-        aiClient: "codex",
-        sourceKind: "codex",
-        sourceSessionId: externalSessionId,
-        sourceFingerprint: fingerprint("a"),
-        registrationFrontierOffset: 0,
-        registrationPrefixHash:
-          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        localSourcePath: "/private/terminal-lcm.jsonl",
-        sourceSizeBytes: 0
-      }
-    );
-    const session = await repo.createCapturedSession(
-      { userId: owner.id },
-      {
-        externalSessionId,
-        idempotencyKey: `terminal-lcm-session:${externalSessionId}`
-      }
-    );
-    for (const [expectedState, state] of [
-      ["discovered", "eligible"],
-      ["eligible", "queued"],
-      ["queued", "importing"]
-    ] as const) {
-      await repo.transitionHistoricalImportRun(
-        { userId: owner.id },
-        { runId: run.id, expectedState, state }
-      );
-      await repo.transitionHistoricalImportSource(
-        { userId: owner.id },
-        { sourceId: source!.id, expectedState, state }
-      );
-    }
-    await repo.createConversationItems(
-      { userId: owner.id },
-      {
-        items: [
-          {
-            ...transcriptItem({
-              sessionId: session.id,
-              transport: "historical_import"
-            }),
-            externalSessionId,
-            externalThreadId: externalSessionId,
-            idempotencyKey: `terminal-lcm-item:${externalSessionId}`
-          }
-        ]
-      }
-    );
-    await repo.projectPendingConversationItems(
-      { userId: owner.id },
-      { workClass: "historical_import_backfill", limit: 10 }
-    );
-    await pool.query(
-      `update memory_events set include_in_embedding = false
-       where owner_user_id = $1 and session_id = $2`,
-      [owner.id, session.id]
-    );
-
-    const [finalization] =
-      await repo.listHistoricalImportSourcesNeedingLcmFinalization();
-    expect(finalization).toMatchObject({
-      sourceId: source!.id,
-      ownerUserId: owner.id,
-      sessionId: session.id
-    });
-    const compaction = await repo.createLcmNodes(
-      { userId: owner.id },
-      {
-        visibility: "personal",
-        workClass: "historical_import_backfill",
-        sessionId: finalization!.sessionId,
-        finalize: true
-      }
-    );
-    expect(compaction.leafNodeIds).toEqual([expect.any(String)]);
-    await pool.query(
-      `update memory_nodes set summary_model = 'test-summary-model'
-       where id = any($1::uuid[])`,
-      [compaction.leafNodeIds]
-    );
-    await expect(
-      repo.transitionHistoricalImportSource(
-        { userId: owner.id },
-        {
-          sourceId: source!.id,
-          expectedState: "importing",
-          state: "completed"
-        }
-      )
-    ).resolves.toMatchObject({ state: "completed" });
-  });
-
   it("registers new sources only while the run can accept work", async () => {
     const repo = createMemorySourceRepository(pool);
     const owner = await repo.createUser({
@@ -1340,5 +1237,152 @@ describeDb("durable historical import repository", () => {
         "transcript"
       ]);
     }
+  });
+
+  it("finalizes non-UUID external-session historical LCM work with internal session ID", async () => {
+    const repo = createMemorySourceRepository(pool);
+    const owner = await repo.createUser({
+      email: `terminal-lcm-owner-${randomUUID()}@example.com`
+    });
+    const externalSessionId = `codex-terminal-${randomUUID()}`;
+    const run = await repo.createHistoricalImportRun({ userId: owner.id });
+    const source = await repo.createHistoricalImportSource(
+      { userId: owner.id },
+      {
+        runId: run.id,
+        aiClient: "codex",
+        sourceKind: "codex",
+        sourceSessionId: externalSessionId,
+        sourceFingerprint: fingerprint("a"),
+        registrationFrontierOffset: 0,
+        registrationPrefixHash:
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        localSourcePath: "/private/terminal-lcm.jsonl",
+        sourceSizeBytes: 0
+      }
+    );
+    const session = await repo.createCapturedSession(
+      { userId: owner.id },
+      {
+        externalSessionId,
+        idempotencyKey: `terminal-lcm-session:${externalSessionId}`
+      }
+    );
+    for (const [expectedState, state] of [
+      ["discovered", "eligible"],
+      ["eligible", "queued"],
+      ["queued", "importing"]
+    ] as const) {
+      await repo.transitionHistoricalImportRun(
+        { userId: owner.id },
+        { runId: run.id, expectedState, state }
+      );
+      await repo.transitionHistoricalImportSource(
+        { userId: owner.id },
+        { sourceId: source!.id, expectedState, state }
+      );
+    }
+    await repo.createConversationItems(
+      { userId: owner.id },
+      {
+        items: [
+          {
+            sessionId: session.id,
+            sourceKind: "codex",
+            sourceAdapterVersion: "codex-transcript-v1",
+            sourceTransport: "historical_import",
+            externalSessionId,
+            externalThreadId: externalSessionId,
+            externalTurnId: "terminal-turn",
+            externalItemId: "terminal-response",
+            sourceRecordType: "response_item",
+            sourceEventType: "message",
+            sourceLineNumber: 1,
+            sourceSequence: 1,
+            eventTime: "2026-07-01T12:00:00.000Z",
+            rawJson: {
+              type: "response_item",
+              payload: {
+                id: "terminal-response",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Terminal LCM memory" }]
+              }
+            },
+            rawText: "Terminal LCM memory",
+            sourceHash: `terminal-source:${externalSessionId}`,
+            idempotencyKey: `terminal-lcm-item:${externalSessionId}`,
+            canonicalItemKey: codexCanonicalConversationItemKey({
+              externalThreadId: externalSessionId,
+              externalTurnId: "terminal-turn",
+              stableItemId: "terminal-response",
+              component: "message"
+            }),
+            canonicalStableItemId: "terminal-response",
+            canonicalSourcePriority: 200,
+            observationKind: "reconciliation",
+            observationComponent: "message",
+            projectionStatus: "pending",
+            projectionVersion: "codex-transcript-v1",
+            metadata: {
+              transcriptByteOffset: 0,
+              transcriptItemDiscriminator: "primary:codex_response_message",
+              transcriptType: "message"
+            }
+          }
+        ]
+      }
+    );
+    await repo.projectPendingConversationItems(
+      { userId: owner.id },
+      { workClass: "historical_import_backfill", limit: 10 }
+    );
+    await pool.query(
+      `update memory_events set include_in_embedding = false, include_in_lcm = true
+       where owner_user_id = $1 and session_id = $2`,
+      [owner.id, session.id]
+    );
+
+    expect(
+      await repo.getHistoricalImportSource({ userId: owner.id }, source!.id)
+    ).toMatchObject({
+      state: "importing",
+      projectedRecordCount: 1,
+      embeddingEligibleEventCount: 0,
+      lcmEligibleEventCount: 1,
+      lcmCompletedEventCount: 0
+    });
+    const [finalization] =
+      await repo.listHistoricalImportSourcesNeedingLcmFinalization();
+    expect(finalization).toMatchObject({
+      sourceId: source!.id,
+      ownerUserId: owner.id,
+      sessionId: session.id
+    });
+    const compaction = await repo.createLcmNodes(
+      { userId: owner.id },
+      {
+        visibility: "personal",
+        workClass: "historical_import_backfill",
+        sessionId: finalization!.sessionId,
+        finalize: true
+      }
+    );
+    expect(compaction.leafNodeIds).toEqual([expect.any(String)]);
+    await pool.query(
+      `update memory_nodes set summary_model = 'test-summary-model'
+       where id = any($1::uuid[])`,
+      [compaction.leafNodeIds]
+    );
+    await expect(
+      repo.transitionHistoricalImportSource(
+        { userId: owner.id },
+        {
+          sourceId: source!.id,
+          expectedState: "importing",
+          state: "completed"
+        }
+      )
+    ).resolves.toMatchObject({ state: "completed" });
   });
 });
