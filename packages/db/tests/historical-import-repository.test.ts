@@ -160,17 +160,21 @@ describeDb("durable historical import repository", () => {
       ownerUserId: owner.id,
       sessionId: session.id
     });
-    await expect(
-      repo.createLcmNodes(
-        { userId: owner.id },
-        {
-          visibility: "personal",
-          workClass: "historical_import_backfill",
-          sessionId: finalization!.sessionId,
-          finalize: true
-        }
-      )
-    ).resolves.toMatchObject({ leafNodeIds: [expect.any(String)] });
+    const compaction = await repo.createLcmNodes(
+      { userId: owner.id },
+      {
+        visibility: "personal",
+        workClass: "historical_import_backfill",
+        sessionId: finalization!.sessionId,
+        finalize: true
+      }
+    );
+    expect(compaction.leafNodeIds).toEqual([expect.any(String)]);
+    await pool.query(
+      `update memory_nodes set summary_model = 'test-summary-model'
+       where id = any($1::uuid[])`,
+      [compaction.leafNodeIds]
+    );
     await expect(
       repo.transitionHistoricalImportSource(
         { userId: owner.id },
