@@ -483,7 +483,7 @@ export interface ScheduleCompactionInput {
   requesterContext: RequesterContext;
   visibility: Visibility;
   workClass?: MemoryWorkClass;
-  sourceSessionId?: string;
+  sessionId?: string;
   finalize?: boolean;
 }
 
@@ -630,7 +630,7 @@ export interface MemoryEngineRepository {
     input: {
       visibility: Visibility;
       workClass?: MemoryWorkClass;
-      sourceSessionId?: string;
+      sessionId?: string;
       finalize?: boolean;
     }
   ): Promise<CompactionResult>;

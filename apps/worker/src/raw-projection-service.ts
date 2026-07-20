@@ -41,7 +41,7 @@ export interface RawProjectionServiceConfig {
     dispatchKey: string,
     workClass?: KoedWorkClass,
     jobId?: string,
-    sourceSessionId?: string,
+    sessionId?: string,
     finalize?: boolean
   ): Promise<unknown>;
   enqueueProjectedMemoryEventProcessing(
@@ -187,7 +187,7 @@ const reconcileTerminalHistoricalLcmJobs = async (
         `historical-import-finalize-${source.sourceId}`,
         "historical_import_backfill",
         `historical-import-finalize-${source.sourceId}`,
-        source.sourceSessionId,
+        source.sessionId,
         true
       )
     )

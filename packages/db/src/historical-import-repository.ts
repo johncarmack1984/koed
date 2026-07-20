@@ -57,7 +57,7 @@ export interface HistoricalImportRepository {
     sourceId: string
   ): Promise<HistoricalImportSourceRecord | null>;
   listHistoricalImportSourcesNeedingLcmFinalization(): Promise<
-    Array<{ sourceId: string; ownerUserId: string; sourceSessionId: string }>
+    Array<{ sourceId: string; ownerUserId: string; sessionId: string }>
   >;
 }
 
@@ -1139,14 +1139,13 @@ const batchSourceEventRange = (
 const listSourcesNeedingLcmFinalization = async (
   pool: pg.Pool
 ): Promise<
-  Array<{ sourceId: string; ownerUserId: string; sourceSessionId: string }>
+  Array<{ sourceId: string; ownerUserId: string; sessionId: string }>
 > => {
   const candidates = await pool.query<{
     id: string;
     owner_user_id: string;
-    source_session_id: string;
   }>(
-    `select id, owner_user_id, source_session_id
+    `select id, owner_user_id
      from historical_import_sources
      where state = 'importing'
        and checkpoint_offset = registration_frontier_offset`
@@ -1159,20 +1158,23 @@ const listSourcesNeedingLcmFinalization = async (
   const result = await pool.query<{
     id: string;
     owner_user_id: string;
-    source_session_id: string;
+    session_id: string;
   }>(
-    `select id, owner_user_id, source_session_id
-     from historical_import_sources
-     where state = 'importing'
-       and checkpoint_offset = registration_frontier_offset
-       and projected_record_count >= raw_ingested_record_count
-       and embedded_event_count = embedding_eligible_event_count
-       and lcm_completed_event_count < lcm_eligible_event_count`
+    `select source.id, source.owner_user_id, captured_session.id as session_id
+     from historical_import_sources source
+     join sessions captured_session
+       on captured_session.owner_user_id = source.owner_user_id
+      and captured_session.external_session_id = source.source_session_id
+     where source.state = 'importing'
+       and source.checkpoint_offset = source.registration_frontier_offset
+       and source.projected_record_count >= source.raw_ingested_record_count
+       and source.embedded_event_count = source.embedding_eligible_event_count
+       and source.lcm_completed_event_count < source.lcm_eligible_event_count`
   );
   return result.rows.map((source) => ({
     sourceId: source.id,
     ownerUserId: source.owner_user_id,
-    sourceSessionId: source.source_session_id
+    sessionId: source.session_id
   }));
 };
 

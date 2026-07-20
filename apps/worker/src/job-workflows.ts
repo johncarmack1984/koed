@@ -21,7 +21,7 @@ export interface CompactionQueueJobData {
   userId: string;
   visibility: Visibility;
   workClass?: KoedWorkClass;
-  sourceSessionId?: string;
+  sessionId?: string;
   finalize?: boolean;
 }
 
@@ -112,7 +112,7 @@ export const enqueueLcmCompaction = (
   dispatchKey = "projected",
   workClass: KoedWorkClass = "normal_embedding_lcm",
   jobId?: string,
-  sourceSessionId?: string,
+  sessionId?: string,
   finalize = false
 ) =>
   lcmCompactQueue.add(
@@ -121,7 +121,7 @@ export const enqueueLcmCompaction = (
       userId: requesterContext.userId,
       visibility,
       workClass,
-      ...(sourceSessionId ? { sourceSessionId } : {}),
+      ...(sessionId ? { sessionId } : {}),
       ...(finalize ? { finalize: true } : {})
     },
     {
@@ -161,14 +161,14 @@ export const createWorkerJobWorkflow = (config: WorkerJobWorkflowConfig) => {
     const userId = stringValue(record.userId);
     const visibility = visibilityFromJobData(record);
     const workClass = workClassFromJobData(record);
-    const sourceSessionId = stringValue(record.sourceSessionId) || undefined;
+    const sessionId = stringValue(record.sessionId) || undefined;
     const finalize = record.finalize === true;
     const compaction = await scheduleCompaction({
       repository: config.repository(),
       requesterContext: { userId },
       visibility,
       workClass,
-      ...(sourceSessionId ? { sourceSessionId } : {}),
+      ...(sessionId ? { sessionId } : {}),
       ...(finalize ? { finalize: true } : {})
     });
     const nodeIds = [

@@ -243,7 +243,7 @@ describe("raw projection service", () => {
           {
             sourceId: "source-1",
             ownerUserId: "user-1",
-            sourceSessionId: "session-1"
+            sessionId: "session-uuid-1"
           }
         ])
     });
@@ -258,7 +258,7 @@ describe("raw projection service", () => {
       "historical-import-finalize-source-1",
       "historical_import_backfill",
       "historical-import-finalize-source-1",
-      "session-1",
+      "session-uuid-1",
       true
     );
   });

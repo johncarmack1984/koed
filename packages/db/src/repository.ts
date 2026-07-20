@@ -11607,7 +11607,7 @@ export const createMemorySourceRepository = (
             ownerUserId,
             workClass,
             lcmCompactionMaxEvents(),
-            input.sourceSessionId ?? null
+            input.sessionId ?? null
           ]
         );
 
