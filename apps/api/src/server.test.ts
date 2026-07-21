@@ -2686,6 +2686,19 @@ const createFakeRepository = () => {
         ) ?? null
       );
     },
+    async observeHistoricalImportSource(actor, input) {
+      const source = historicalImportSources.get(input.sourceId);
+      if (!source || source.ownerUserId !== actor.userId) return null;
+      source.localSourcePath = input.localSourcePath;
+      source.redactedSourceLabel = `…/${input.localSourcePath
+        .split("/")
+        .filter(Boolean)
+        .at(-1)}`;
+      source.sourceSizeBytes = input.sourceSizeBytes;
+      source.sourceModifiedAt =
+        input.sourceModifiedAt ?? source.sourceModifiedAt;
+      return source;
+    },
     async createCapturedSession(actor: ActorContext, input) {
       const id = randomUUID();
       const detectedProjects =

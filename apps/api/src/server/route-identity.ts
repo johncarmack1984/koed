@@ -393,6 +393,16 @@ export const routeIdentityContracts = [
   ),
   route(
     "PATCH",
+    "/v1/historical-import-sources/{sourceId}/observation",
+    "session_or_api_token",
+    "capture",
+    "Refresh verified owner-scoped local source observation without changing historical state.",
+    "none",
+    "implemented",
+    localEdgeDeploymentModes
+  ),
+  route(
+    "PATCH",
     "/v1/historical-import-sources/{sourceId}",
     "session_or_api_token",
     "capture",

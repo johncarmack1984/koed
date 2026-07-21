@@ -61,6 +61,14 @@ export const historicalImportSourceLookupSchema = z
   })
   .strict();
 
+export const historicalImportSourceObservationSchema = z
+  .object({
+    localSourcePath: localPath,
+    sourceSizeBytes: boundedBytes,
+    sourceModifiedAt: z.string().datetime({ offset: true }).optional()
+  })
+  .strict();
+
 const detectedProjectSchema = z
   .object({
     projectId: boundedText.optional(),

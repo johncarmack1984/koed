@@ -400,6 +400,17 @@ export class MemoryApiClient {
     return this.request("POST", "/v1/historical-import-sources", input);
   }
 
+  async observeHistoricalImportSource(
+    sourceId: string,
+    input: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    return this.request(
+      "PATCH",
+      `/v1/historical-import-sources/${encodeURIComponent(sourceId)}/observation`,
+      input
+    );
+  }
+
   async advanceLiveTranscriptCursor(
     sourceId: string,
     input: Record<string, unknown>

@@ -90,6 +90,10 @@ export interface CodexTranscriptWatcherClient {
   createHistoricalImportSource(
     input: Record<string, unknown>
   ): Promise<Record<string, unknown>>;
+  observeHistoricalImportSource(
+    sourceId: string,
+    input: Record<string, unknown>
+  ): Promise<Record<string, unknown>>;
   advanceLiveTranscriptCursor(
     sourceId: string,
     input: Record<string, unknown>
@@ -659,9 +663,9 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
     if (linkState.isSymbolicLink() || !linkState.isFile()) return;
     const before = await stat(transcriptPath);
     if (!before.isFile()) return;
-    const boundary = completeTranscriptBoundary(transcriptPath);
     const fileKey = `${before.dev}:${before.ino}`;
     this.rememberBaselineFile(fileKey);
+    const boundary = completeTranscriptBoundary(transcriptPath);
     const cachedIdentity = this.identities.get(transcriptPath);
     const parsedIdentity =
       cachedIdentity?.fileKey === fileKey
@@ -690,12 +694,7 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
         await this.verifyCursorPrefix(source, transcriptPath, before.size);
       }
       if (firstPathObservation) {
-        source = await this.refreshSourcePath(
-          source,
-          transcriptPath,
-          before,
-          identity.context
-        );
+        source = await this.refreshSourcePath(source, transcriptPath, before);
       }
     } else {
       source = await this.registerSource(
@@ -798,24 +797,16 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
   private async refreshSourcePath(
     source: HistoricalSource,
     transcriptPath: string,
-    file: Stats,
-    context: TranscriptContext
+    file: Stats
   ): Promise<HistoricalSource> {
-    const response = await this.client.createHistoricalImportSource({
-      runId: source.runId,
-      aiClient: "codex",
-      sourceKind: "codex",
-      sourceSessionId: source.sourceSessionId,
-      sourceFingerprint: source.sourceFingerprint,
-      registrationFrontierOffset: source.registrationFrontierOffset,
-      registrationPrefixHash: source.registrationPrefixHash,
-      localSourcePath: transcriptPath,
-      sourceSizeBytes: file.size,
-      sourceModifiedAt: file.mtime.toISOString(),
-      detectedProject: Object.keys(source.detectedProject).length
-        ? source.detectedProject
-        : projectFromContext(context)
-    });
+    const response = await this.client.observeHistoricalImportSource(
+      source.id,
+      {
+        localSourcePath: transcriptPath,
+        sourceSizeBytes: file.size,
+        sourceModifiedAt: file.mtime.toISOString()
+      }
+    );
     return responseValue<HistoricalSource>(response, "source");
   }
 

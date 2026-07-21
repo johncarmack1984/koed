@@ -156,6 +156,22 @@ class FakeWatcherClient implements CodexTranscriptWatcherClient {
     return { source };
   }
 
+  async observeHistoricalImportSource(
+    sourceId: string,
+    input: Record<string, unknown>
+  ) {
+    const source = [...this.sources.values()].find(
+      (item) => item.id === sourceId
+    )!;
+    source.localSourcePath = String(input.localSourcePath);
+    source.sourceSizeBytes = Number(input.sourceSizeBytes);
+    source.sourceModifiedAt =
+      typeof input.sourceModifiedAt === "string"
+        ? input.sourceModifiedAt
+        : source.sourceModifiedAt;
+    return { source };
+  }
+
   async advanceLiveTranscriptCursor(
     sourceId: string,
     input: Record<string, unknown>
@@ -290,6 +306,29 @@ describe("Codex Transcript Watcher", () => {
       client.sources.get("session-baseline-recovery")
         ?.registrationFrontierOffset
     ).toBe(completeTranscriptBoundary(badPath));
+  });
+
+  it("keeps a boundary-failing baseline file historical after recovery", async () => {
+    const root = temporaryDirectory();
+    const config = watcherConfig(root);
+    const transcript = path.join(config.roots[0]!, "rollout-oversized.jsonl");
+    fsMkdir(path.dirname(transcript));
+    writeFileSync(transcript, Buffer.alloc(16 * 1024 * 1024 + 2, "x"));
+    const client = new FakeWatcherClient();
+    const watcher = trackedWatcher(client, config);
+
+    await watcher.scanNow();
+    expect(watcher.snapshot().state).toBe("running");
+
+    writeFileSync(
+      transcript,
+      line(sessionRecord("session-oversized-recovery"))
+    );
+    await watcher.scanNow();
+    expect(
+      client.sources.get("session-oversized-recovery")
+        ?.registrationFrontierOffset
+    ).toBe(completeTranscriptBoundary(transcript));
   });
 
   it("persists a verified same-session path after rename and restart", async () => {

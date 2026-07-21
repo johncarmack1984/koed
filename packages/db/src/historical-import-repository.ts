@@ -12,6 +12,7 @@ import type {
   HistoricalImportRunDetail,
   HistoricalImportRunRecord,
   HistoricalImportSourceIdentity,
+  HistoricalImportSourceObservationInput,
   HistoricalImportSourceRecord,
   HistoricalImportState,
   LiveTranscriptCursorAdvanceInput
@@ -60,6 +61,10 @@ export interface HistoricalImportRepository {
   getHistoricalImportSourceByIdentity(
     actor: ActorContext,
     identity: HistoricalImportSourceIdentity
+  ): Promise<HistoricalImportSourceRecord | null>;
+  observeHistoricalImportSource(
+    actor: ActorContext,
+    input: HistoricalImportSourceObservationInput
   ): Promise<HistoricalImportSourceRecord | null>;
   listHistoricalImportSourcesNeedingLcmFinalization(): Promise<
     Array<{ sourceId: string; ownerUserId: string; sessionId: string }>
@@ -425,6 +430,33 @@ const getSourceByIdentity = async (
       identity.aiClient,
       identity.sourceKind,
       identity.sourceSessionId
+    ]
+  );
+  return result.rows[0] ? mapSource(result.rows[0]) : null;
+};
+
+const observeSource = async (
+  pool: pg.Pool,
+  actor: ActorContext,
+  input: HistoricalImportSourceObservationInput
+): Promise<HistoricalImportSourceRecord | null> => {
+  const result = await pool.query<SourceRow>(
+    `update historical_import_sources
+     set local_source_path = $3,
+         redacted_source_label = $4,
+         source_size_bytes = $5,
+         source_modified_at = $6,
+         last_observed_at = now(),
+         updated_at = now()
+     where id = $2 and owner_user_id = $1
+     returning *`,
+    [
+      actor.userId,
+      input.sourceId,
+      input.localSourcePath,
+      sourceLabel(input.localSourcePath),
+      input.sourceSizeBytes,
+      input.sourceModifiedAt ?? null
     ]
   );
   return result.rows[0] ? mapSource(result.rows[0]) : null;
@@ -1264,6 +1296,8 @@ export const createHistoricalImportRepository = (
     getSource(pool, actor, sourceId),
   getHistoricalImportSourceByIdentity: (actor, identity) =>
     getSourceByIdentity(pool, actor, identity),
+  observeHistoricalImportSource: (actor, input) =>
+    observeSource(pool, actor, input),
   listHistoricalImportSourcesNeedingLcmFinalization: () =>
     listSourcesNeedingLcmFinalization(pool)
 });
