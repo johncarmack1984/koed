@@ -11,6 +11,15 @@ export {
   destroyManagedCodexHome,
   runCodexAppServerJsonTask
 } from "./codex-app-server-runner.js";
+export {
+  adaptCodexTranscriptV1,
+  codexTranscriptAdapterVersion,
+  codexTranscriptItemKey,
+  codexTranscriptRecordHash,
+  type CodexTranscriptAdapterInput,
+  type CodexTranscriptObservation,
+  type CodexTranscriptRawItem
+} from "./codex-transcript-adapter.js";
 export type {
   CodexAppServerJsonTaskConfig,
   CodexAppServerRunResult

@@ -14,9 +14,10 @@ MCP-side workers.
   memory-answer work, and runs the LCM Summary Service.
 - **API**: the Fastify backend that authenticates API Tokens, persists raw
   records, runs Projection, and serves recall endpoints.
-- **Worker**: the background process that consumes BullMQ or Postgres-backed
-  local queue jobs, performs catch-up Projection, embedding work, and LCM node
-  embedding.
+- **Worker**: background process that consumes priority-ordered BullMQ or
+  Postgres-backed local queue jobs, performs catch-up Projection, embedding
+  work, and LCM node embedding. It admits historical batches only after live
+  and interactive pressure clears.
 - **Embedding Service**: Operator-managed service in external dependency mode, or native Koed-owned runtime in bundled-local mode, that turns memory text into retrieval vectors.
 - **Database**: Postgres storage for raw conversation items, projected semantic
   rows, Memory Events, Memory Nodes, embeddings, questions, token usage,
@@ -101,7 +102,8 @@ MCP-side workers.
    Hook config so stale ports or credentials show as explicit integration
    mismatches. Readiness gates include Postgres reachability and version,
    current migrations, pgvector, local or BullMQ queue backend availability,
-   and Embedding Service model/dimension compatibility.
+   and Embedding Service model/dimension compatibility. Historical-import
+   backlog is an authenticated diagnostic counter, never a readiness gate.
 9. `koed-server setup codex --json` wraps the existing guided bootstrap path so
    Codex MCP Server, Supported Capture Hook, local API Token, app-provisioned
    Explorer credential, verification, and doctor setup can be invoked through
@@ -550,21 +552,74 @@ remains a later integration on top of this durable seat lifecycle state.
    and repository read paths hydrate authorized graph, embedding, retrieval,
    LCM source content, and Memory Question payloads from encrypted companions
    after access checks.
-9. The Worker runs catch-up over pending or failed canonical rows, then derives
-   missing embedding jobs and pending LCM compaction scopes from PostgreSQL.
-   Deterministic queue identities make that reconciliation idempotent, so queue
-   admission failure or exhausted retries cannot permanently strand work.
-   Embedding reconciliation recognizes only complete active chunk sets for the
-   current source version, and LCM dispatch is bounded per owner.
-10. The Worker consumes queued jobs from Redis/BullMQ or `local_work_queue`,
-    embeds Memory Events by calling the Embedding Service, and atomically
-    replaces the source's complete embedding chunk set.
-11. The Worker schedules compaction, creating or updating LCM Placeholder Memory
+9. Projection persists an identifier-only processing outbox before raw rows are
+   marked projected. API and Worker queue producers use deterministic job ids
+   and acknowledge each outbox row only after its policy-eligible embedding and
+   compaction jobs are admitted. Worker catch-up replays unacknowledged rows
+   after queue failures or restart. Queue payloads hold only identifiers plus
+   one work class: interactive Recall/Memory Questions, live Capture Projection,
+   normal embedding/LCM, or historical import/backfill.
+10. Direct API Projection selects only live rows. The Worker also selects live
+    rows first. Historical rows have the durable
+    `historical_import_backfill` Projection class and are selected only as one
+    bounded batch when API readiness, queue, and Embedding Service probes are
+    healthy and configured live/interactive pressure thresholds are clear.
+    Physical row/payload-byte limits and runtime checks apply at completed-turn
+    segment boundaries. A Postgres advisory lease permits one historical batch
+    across Worker processes. It yields after each batch and reevaluates after
+    restart.
+11. The Worker independently derives missing embedding jobs and pending LCM
+    compaction scopes from PostgreSQL. Deterministic queue identities make this
+    reconciliation idempotent, so outbox admission failure, exhausted retries,
+    or restart cannot permanently strand work or promote historical work into
+    the normal class. Embedding reconciliation accepts only complete active
+    chunk sets for current source version. LCM dispatch is bounded per owner and
+    work class; compaction selects only Memory Events with the requested durable
+    lineage. Created leaves and rollups persist that lineage, and derived node
+    embeddings retain it.
+12. Local historical import state uses authenticated
+    `/v1/historical-imports` and `/v1/historical-import-sources` routes. These
+    routes exist only on developer/local-personal edges. Durable run/source
+    records validate transitions and retain an immutable complete-record
+    registration frontier (offset/prefix hash plus fingerprint/session ID),
+    separate historical imported ranges/checkpoint and live recovery cursor,
+    stage counters, retry/failure timestamps, immutable
+    detected Project provenance, and local-only raw source path. Responses and
+    canonical raw/Captured Session provenance remove raw path and path-like
+    Project fields. New sources can be registered only while a run is active or
+    paused; completed, failed, and skipped runs reject registration
+    transactionally. The owner-scoped `live-cursor` route is part of the same
+    local-only route identity and OpenAPI inventory.
+13. Before source eligibility/queueing and every import batch, API resolves
+    owning User's effective Capture Policy and Capture Pause. Disabled, ask,
+    paused, or non-personal results fail closed. Policy mutation is serialized
+    against batch persistence. Batch writes use the same
+    `codex-transcript-v1` adapter and `conversation_items` path as Hook capture.
+    The boundary accepts canonical response-item identity, immutable observation
+    fields, observation-only records, and raw-only classifications without
+    rewriting them; raw persistence, counters, and checkpoint advancement
+    commit atomically. Offset/prefix-hash
+    retries distinguish exact replay from mutation, rotation, or truncation.
+    Pre-frontier records are historical; post-frontier/downtime-recovery records
+    are live. No Team,
+    Workspace Access, or Share Grant mutation occurs.
+14. Worker consumes queued jobs from Redis/BullMQ or `local_work_queue`.
+    Both backends use lower-number-first priority and FIFO as the current
+    within-class tie-breaker, so
+    live capture runs ahead of queued historical embedding/LCM work. Schema
+    upgrades assign existing local jobs normal priority. Before BullMQ workers
+    start, Koed assigns same normal priority to legacy waiting, paused, and
+    delayed jobs that have no stored priority. Aging, token-cost fairness,
+    per-User/tenant shares, reserved interactive capacity, and dynamic dispatch
+    priority are deferred to KOE-355.
+15. Worker embeds Memory Events by calling Embedding Service and atomically
+    replaces source's complete embedding chunk set.
+16. Worker schedules compaction, creating or updating LCM Placeholder Memory
     Nodes from Memory Events and child nodes, then queues Memory Node embedding.
     In paid Koed-managed cloud, placeholder summaries, body text, source item
     JSON, completed LCM summaries, and structured LCM summary JSON are stored as
     redacted Memory Node fields with encrypted companions.
-12. Pending LCM placeholders remain available as degraded evidence until local
+17. Pending LCM placeholders remain available as degraded evidence until local
     LCM summaries are submitted.
 
 ### Experimental Koed-managed Codex threads

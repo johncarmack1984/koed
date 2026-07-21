@@ -361,6 +361,14 @@ policy, or full URLs containing customer content.
 - `MEMORY_RAW_PROJECTION_INTERVAL_MS`: worker interval for projecting pending raw `conversation_items` into messages, tool events, Memory Events, and token-usage rows. Default `5000`.
 - `MEMORY_RAW_PROJECTION_BATCH_LIMIT`: maximum raw rows projected per actor on each worker catch-up pass. Default `1000`.
 - `MEMORY_RAW_PROJECTION_ACTOR_LIMIT`: maximum memory owner scopes checked on each worker catch-up pass. Default `10`.
+- `MEMORY_HISTORICAL_IMPORT_BATCH_ROWS`: hard maximum raw rows selected for one historical Projection batch. An atomic segment larger than this cap remains pending until the Operator raises the cap. Default `100`; valid range `1`–`1000`.
+- `MEMORY_HISTORICAL_IMPORT_BATCH_BYTES`: hard maximum raw payload bytes selected for one historical Projection batch. An atomic segment larger than this cap remains pending until the Operator raises the cap. Default `1000000`; valid range `1`–`10000000`.
+- `MEMORY_HISTORICAL_IMPORT_BATCH_RUNTIME_MS`: maximum historical Projection runtime before yielding at next Projection boundary. Default `15000`; valid range `100`–`60000`.
+- `MEMORY_HISTORICAL_IMPORT_CONCURRENCY`: historical Projection worker slots. Must remain `1`; values outside `1`–`1` fail configuration validation.
+- `MEMORY_HISTORICAL_IMPORT_LIVE_BACKLOG_MAX`: live raw-Projection rows permitted before historical admission pauses. Default `0`; valid range `0`–`10000`.
+- `MEMORY_HISTORICAL_IMPORT_INTERACTIVE_BACKLOG_MAX`: pending interactive Memory Questions permitted before historical admission pauses. Default `0`; valid range `0`–`10000`.
+- `MEMORY_HISTORICAL_IMPORT_API_READY_URL`: required worker-visible API `/ready` URL for historical admission. Leave empty to fail closed and pause historical batches; Koed does not guess a replacement URL.
+- `MEMORY_HISTORICAL_IMPORT_API_READY_TIMEOUT_MS`: timeout for that API readiness probe. Default `1000`; valid range `100`–`10000`.
 - `MEMORY_VECTOR_CANDIDATE_LIMIT`: vector retrieval candidate count.
 - `MEMORY_RAG_ROLLUP_CANDIDATE_LIMIT`, `MEMORY_RAG_LEAF_CANDIDATE_LIMIT`, `MEMORY_RAG_FRESH_EVENT_CANDIDATE_LIMIT`, `MEMORY_RAG_RAW_FALLBACK_CANDIDATE_LIMIT`, `MEMORY_RAG_LEXICAL_CANDIDATE_LIMIT`, `MEMORY_RAG_SCOPED_LEAF_CANDIDATE_LIMIT`: optional per-stage retrieval candidate limits. Leave blank to use code defaults derived from the requested result limit.
 - `MEMORY_RAG_ROLLUP_RESULT_LIMIT`: optional cap on rollup results admitted into final recall evidence.
@@ -508,6 +516,45 @@ Events, embeddings, and LCM sources. The seeded defaults keep UI projection and
 embedding selection matched for every transcript type in the current build, but
 the fields are independent so future policy rows can support display-only or
 recall-only transcript types without a schema change.
+
+## Historical Import Scheduling
+
+Work classes have fixed priorities across Postgres `local_work_queue` and
+BullMQ: interactive Recall/Memory Questions (`1`), live Capture Projection
+(`5`), normal embedding/LCM (`10`), and historical import/backfill (`20`).
+Lower number runs first. Queue payloads contain identifiers and class only;
+they never contain source content or local paths. Historical backlog is shown
+only as redacted diagnostic counters in authenticated `/ops/status`; it is not
+part of `/ready` and does not make Koed unavailable.
+
+FIFO is currently only the within-class tie-breaker. These fixed classes and
+bounded historical admission do not yet provide aging, token-cost fairness,
+per-User/tenant shares, reserved interactive capacity, or dynamic dispatch
+priority; KOE-355 owns that scheduler work.
+
+A coordinator registers each existing source with immutable fingerprint,
+source-session identity, complete-record frontier offset, and prefix hash.
+Pre-frontier rows receive the historical class. Post-frontier rows, including
+downtime catch-up, receive the live class. A source created after registration
+has a zero frontier and is live from its first complete record. Never label
+history from FIFO position, timestamp age, source path, or arbitrary metadata.
+
+Historical import control/status routes are enabled only when
+`KOED_DEPLOYMENT_PROFILE` resolves to `developer` or `local_personal`. They
+accept owning User browser sessions or Personal API Tokens and grant no Team
+authority. No separate configuration enables these routes on private VPS, Team
+Self-Hosted, or Koed-managed cloud profiles.
+
+Import coordinators persist source path through local-only source registration.
+Status and batch responses expose a redacted basename label and stable SHA-256
+fingerprint, never raw path or path-like detected Project fields. Coordinators
+must send transcript records through reusable `codex-transcript-v1` adapter and
+must maintain the returned historical checkpoint/imported ranges separately
+from the live-tail/recovery cursor. Neither stream may derive from or update the
+other. Source growth is allowed; truncation, rotation/prefix mutation, and stale
+checkpoints fail explicitly. Exact retries return a read-only replay. Effective
+Capture Policy and Capture Pause are rechecked under the same
+owner-scoped transaction lock as each batch write.
 
 ## Data At Rest
 

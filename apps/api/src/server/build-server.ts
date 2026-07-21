@@ -42,6 +42,7 @@ import {
   registerCaptureRoutes,
   registerCuratedMemoryRoutes,
   registerGraphRoutes,
+  registerHistoricalImportRoutes,
   registerLocalAgentSettingsRoutes,
   registerLcmRoutes,
   registerQuestionRoutes,
@@ -503,6 +504,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   registerCrossIdentitySyncRoutes(app, routeContext);
   registerCaptureRoutes(app, routeContext);
   registerCuratedMemoryRoutes(app, routeContext);
+  registerHistoricalImportRoutes(app, routeContext);
   registerRawConversationRoutes(app, routeContext);
   registerRecallRoutes(app, routeContext);
   registerLocalAgentSettingsRoutes(app, routeContext);
