@@ -87,6 +87,7 @@ interface Source {
   liveCursorHash: string | null;
   sourceSizeBytes: number;
   sourceModifiedAt: string | null;
+  localSourcePath: string;
   detectedProject: Record<string, unknown>;
 }
 
@@ -128,6 +129,7 @@ class FakeWatcherClient implements CodexTranscriptWatcherClient {
         typeof input.sourceModifiedAt === "string"
           ? input.sourceModifiedAt
           : existing.sourceModifiedAt;
+      existing.localSourcePath = String(input.localSourcePath);
       return { source: existing };
     }
     const frontier = Number(input.registrationFrontierOffset);
@@ -147,6 +149,7 @@ class FakeWatcherClient implements CodexTranscriptWatcherClient {
         typeof input.sourceModifiedAt === "string"
           ? input.sourceModifiedAt
           : null,
+      localSourcePath: String(input.localSourcePath),
       detectedProject: (input.detectedProject ?? {}) as Record<string, unknown>
     };
     this.sources.set(sourceSessionId, source);
@@ -257,6 +260,61 @@ describe("Codex Transcript Watcher", () => {
       ])
     );
     await watcher.stop();
+  });
+
+  it("activates despite malformed baseline files and keeps their later recovery historical", async () => {
+    const root = temporaryDirectory();
+    const config = watcherConfig(root);
+    const badPath = path.join(config.roots[0]!, "rollout-malformed.jsonl");
+    fsMkdir(path.dirname(badPath));
+    writeFileSync(badPath, "not-json\n");
+    const client = new FakeWatcherClient();
+    const watcher = trackedWatcher(client, config);
+
+    await watcher.scanNow();
+    expect(watcher.snapshot().state).toBe("running");
+
+    const newTranscript = transcriptPath(root);
+    writeFileSync(
+      newTranscript,
+      line(sessionRecord("session-after-malformed")) + line(userRecord("live"))
+    );
+    await watcher.scanNow();
+    expect(
+      client.sources.get("session-after-malformed")?.registrationFrontierOffset
+    ).toBe(0);
+
+    writeFileSync(badPath, line(sessionRecord("session-baseline-recovery")));
+    await watcher.scanNow();
+    expect(
+      client.sources.get("session-baseline-recovery")
+        ?.registrationFrontierOffset
+    ).toBe(completeTranscriptBoundary(badPath));
+  });
+
+  it("persists a verified same-session path after rename and restart", async () => {
+    const root = temporaryDirectory();
+    const transcript = transcriptPath(root);
+    writeFileSync(transcript, line(sessionRecord("session-moved")));
+    const client = new FakeWatcherClient();
+    const config = watcherConfig(root);
+    const watcher = trackedWatcher(client, config);
+    await watcher.scanNow();
+    const source = client.sources.get("session-moved")!;
+    const frontier = source.registrationFrontierOffset;
+
+    const moved = path.join(path.dirname(transcript), "rollout-moved.jsonl");
+    renameSync(transcript, moved);
+    await watcher.scanNow();
+    expect(source.localSourcePath).toBe(moved);
+    expect(source.registrationFrontierOffset).toBe(frontier);
+    await watcher.stop();
+
+    appendFileSync(moved, line(userRecord("after restart")));
+    const restarted = trackedWatcher(client, config);
+    await restarted.scanNow();
+    expect(source.localSourcePath).toBe(moved);
+    expect(source.liveCursorOffset).toBe(completeTranscriptBoundary(moved));
   });
 
   it("captures a source created after activation from its first complete record", async () => {

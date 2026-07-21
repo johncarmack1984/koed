@@ -36,6 +36,7 @@ export {
 
 const WATCHER_VERSION = 1;
 const EMPTY_SHA256 = createHash("sha256").digest("hex");
+const PREFIX_SENTINEL_BYTES = 64 * 1024;
 const TRANSCRIPT_PATTERN = /^rollout-.*\.jsonl$/;
 
 export interface CodexTranscriptWatcherConfig {
@@ -193,12 +194,22 @@ export const hashFilePrefix = async (
 ): Promise<string> => {
   if (offset === 0) return EMPTY_SHA256;
   const digest = createHash("sha256");
-  const stream = createReadStream(transcriptPath, {
+  const firstLength = Math.min(offset, PREFIX_SENTINEL_BYTES);
+  const first = createReadStream(transcriptPath, {
     start: 0,
-    end: offset - 1,
+    end: firstLength - 1,
     highWaterMark: 64 * 1024
   });
-  for await (const chunk of stream) digest.update(chunk as Buffer);
+  for await (const chunk of first) digest.update(chunk as Buffer);
+  if (offset > PREFIX_SENTINEL_BYTES) {
+    const last = createReadStream(transcriptPath, {
+      start: Math.max(PREFIX_SENTINEL_BYTES, offset - PREFIX_SENTINEL_BYTES),
+      end: offset - 1,
+      highWaterMark: 64 * 1024
+    });
+    for await (const chunk of last) digest.update(chunk as Buffer);
+  }
+  digest.update(`:${offset}`);
   return digest.digest("hex");
 };
 
@@ -237,42 +248,74 @@ export const completeTranscriptBoundary = (
 const watcherStatePath = (config: CodexTranscriptWatcherConfig): string =>
   path.join(config.koedHome, "state", "codex-transcript-watcher.json");
 
-const activationTime = (
+type WatcherActivationState = {
+  activatedAt: number | null;
+  baselineFileKeys: Set<string>;
+};
+
+const readActivationState = (
   config: CodexTranscriptWatcherConfig
-): number | null => {
-  const statePath = watcherStatePath(config);
+): WatcherActivationState => {
   try {
-    const parsed = JSON.parse(readFileSync(statePath, "utf8")) as {
+    const parsed = JSON.parse(
+      readFileSync(watcherStatePath(config), "utf8")
+    ) as {
       version?: number;
       activatedAt?: string;
       activatedAtMs?: number;
+      baselineFileKeys?: unknown;
     };
+    if (parsed.version !== WATCHER_VERSION) {
+      return { activatedAt: null, baselineFileKeys: new Set() };
+    }
     const activatedAt =
       parsed.activatedAtMs ?? Date.parse(parsed.activatedAt ?? "");
-    if (parsed.version === WATCHER_VERSION && Number.isFinite(activatedAt)) {
-      return activatedAt;
-    }
+    return {
+      activatedAt: Number.isFinite(activatedAt) ? activatedAt : null,
+      baselineFileKeys: new Set(
+        Array.isArray(parsed.baselineFileKeys)
+          ? parsed.baselineFileKeys.filter(
+              (value): value is string => typeof value === "string"
+            )
+          : []
+      )
+    };
   } catch {
-    // First activation completes after one bounded full discovery cycle.
+    return { activatedAt: null, baselineFileKeys: new Set() };
   }
-  return null;
 };
 
-const persistActivationTime = (
-  config: CodexTranscriptWatcherConfig
-): number => {
+const persistActivationState = (
+  config: CodexTranscriptWatcherConfig,
+  state: WatcherActivationState
+): void => {
   const statePath = watcherStatePath(config);
-  const activatedAtMs = performance.timeOrigin + performance.now();
-  const activatedAt = new Date(activatedAtMs).toISOString();
   mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
   const temporary = `${statePath}.${process.pid}.tmp`;
   writeFileSync(
     temporary,
-    `${JSON.stringify({ version: WATCHER_VERSION, activatedAt, activatedAtMs })}\n`,
+    `${JSON.stringify({
+      version: WATCHER_VERSION,
+      ...(state.activatedAt === null
+        ? {}
+        : {
+            activatedAt: new Date(state.activatedAt).toISOString(),
+            activatedAtMs: state.activatedAt
+          }),
+      baselineFileKeys: [...state.baselineFileKeys]
+    })}\n`,
     { mode: 0o600 }
   );
   renameSync(temporary, statePath);
-  return activatedAtMs;
+};
+
+const activate = (
+  config: CodexTranscriptWatcherConfig,
+  baselineFileKeys: Set<string>
+): number => {
+  const activatedAt = performance.timeOrigin + performance.now();
+  persistActivationState(config, { activatedAt, baselineFileKeys });
+  return activatedAt;
 };
 
 class BoundedTranscriptDiscovery {
@@ -454,6 +497,7 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
   private readonly config: CodexTranscriptWatcherConfig;
   private readonly client: CodexTranscriptWatcherClient;
   private activatedAt: number | null;
+  private readonly baselineFileKeys: Set<string>;
   private readonly discovery: BoundedTranscriptDiscovery;
   private readonly watchers: FSWatcher[] = [];
   private readonly processing = new Set<string>();
@@ -484,7 +528,9 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
   ) {
     this.client = client;
     this.config = config;
-    this.activatedAt = activationTime(config);
+    const activationState = readActivationState(config);
+    this.activatedAt = activationState.activatedAt;
+    this.baselineFileKeys = activationState.baselineFileKeys;
     this.discovery = new BoundedTranscriptDiscovery(config);
     this.metrics = {
       state: "starting",
@@ -581,12 +627,8 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
         if (this.stopped) break;
         await this.processPathOnce(transcriptPath);
       }
-      if (
-        this.activatedAt === null &&
-        discovery.cycleComplete &&
-        this.failureCount === failuresBefore
-      ) {
-        this.activatedAt = persistActivationTime(this.config);
+      if (this.activatedAt === null && discovery.cycleComplete) {
+        this.activatedAt = activate(this.config, this.baselineFileKeys);
         this.metrics.state = "running";
       }
       if (this.failureCount === failuresBefore) {
@@ -619,6 +661,7 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
     if (!before.isFile()) return;
     const boundary = completeTranscriptBoundary(transcriptPath);
     const fileKey = `${before.dev}:${before.ino}`;
+    this.rememberBaselineFile(fileKey);
     const cachedIdentity = this.identities.get(transcriptPath);
     const parsedIdentity =
       cachedIdentity?.fileKey === fileKey
@@ -646,17 +689,35 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
       if (firstPathObservation || sourceChanged) {
         await this.verifyCursorPrefix(source, transcriptPath, before.size);
       }
+      if (firstPathObservation) {
+        source = await this.refreshSourcePath(
+          source,
+          transcriptPath,
+          before,
+          identity.context
+        );
+      }
     } else {
       source = await this.registerSource(
         transcriptPath,
         before,
         boundary,
+        fileKey,
         identity
       );
     }
     this.rememberSourcePath(source.id, transcriptPath, before);
     if (boundary <= source.liveCursorOffset) return;
     await this.ingestPage(source, transcriptPath, identity.context, boundary);
+  }
+
+  private rememberBaselineFile(fileKey: string): void {
+    if (this.activatedAt !== null || this.baselineFileKeys.has(fileKey)) return;
+    this.baselineFileKeys.add(fileKey);
+    persistActivationState(this.config, {
+      activatedAt: this.activatedAt,
+      baselineFileKeys: this.baselineFileKeys
+    });
   }
 
   private rememberIdentity(
@@ -704,9 +765,13 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
     transcriptPath: string,
     file: Stats,
     boundary: number,
+    fileKey: string,
     identity: { sessionId: string; context: TranscriptContext }
   ): Promise<HistoricalSource> {
-    const frontier = this.activatedAt === null ? boundary : 0;
+    const frontier =
+      this.activatedAt === null || this.baselineFileKeys.has(fileKey)
+        ? boundary
+        : 0;
     const prefixHash = await hashFilePrefix(transcriptPath, frontier);
     const response = await this.client.createHistoricalImportSource({
       runId: await this.ensureRunId(),
@@ -722,6 +787,35 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
       detectedProject: projectFromContext(identity.context)
     });
     this.metrics.sourcesRegistered += 1;
+    this.baselineFileKeys.delete(fileKey);
+    persistActivationState(this.config, {
+      activatedAt: this.activatedAt,
+      baselineFileKeys: this.baselineFileKeys
+    });
+    return responseValue<HistoricalSource>(response, "source");
+  }
+
+  private async refreshSourcePath(
+    source: HistoricalSource,
+    transcriptPath: string,
+    file: Stats,
+    context: TranscriptContext
+  ): Promise<HistoricalSource> {
+    const response = await this.client.createHistoricalImportSource({
+      runId: source.runId,
+      aiClient: "codex",
+      sourceKind: "codex",
+      sourceSessionId: source.sourceSessionId,
+      sourceFingerprint: source.sourceFingerprint,
+      registrationFrontierOffset: source.registrationFrontierOffset,
+      registrationPrefixHash: source.registrationPrefixHash,
+      localSourcePath: transcriptPath,
+      sourceSizeBytes: file.size,
+      sourceModifiedAt: file.mtime.toISOString(),
+      detectedProject: Object.keys(source.detectedProject).length
+        ? source.detectedProject
+        : projectFromContext(context)
+    });
     return responseValue<HistoricalSource>(response, "source");
   }
 
