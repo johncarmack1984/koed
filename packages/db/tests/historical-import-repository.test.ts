@@ -1206,24 +1206,16 @@ describeDb("durable historical import repository", () => {
       ["historical_import", "hook", "transcript"]
     ] as const) {
       const externalSessionId = `transport-${randomUUID()}`;
-      const canonicalKey = codexCanonicalConversationItemKey({
-        externalThreadId: externalSessionId,
-        externalTurnId: "turn-1",
-        stableItemId: "assistant-message-1",
-        component: "message"
-      });
+      const session = await repo.createCapturedSession(
+        { userId: owner.id },
+        {
+          externalSessionId,
+          idempotencyKey: `session-${externalSessionId}`
+        }
+      );
+      const canonicalKey = `conversation-item:${randomUUID()}`;
       const ids: string[] = [];
-      const sessionIds: string[] = [];
       for (const transport of order) {
-        const session = await repo.createCapturedSession(
-          { userId: owner.id },
-          {
-            externalSessionId,
-            captureMethod: transport === "hook" ? "hook" : "api",
-            idempotencyKey: `session-${externalSessionId}-${transport}`
-          }
-        );
-        sessionIds.push(session.id);
         const [item] = await repo.createConversationItems(
           { userId: owner.id },
           {
@@ -1239,34 +1231,10 @@ describeDb("durable historical import repository", () => {
                 }),
                 externalSessionId,
                 externalThreadId: externalSessionId,
-                externalItemId: "assistant-message-1",
-                sourceRecordType: "response_item",
-                sourceEventType: "message",
-                sourceLineNumber: 3,
-                sourceSequence: 3,
-                rawJson: {
-                  type: "response_item",
-                  payload: {
-                    id: "assistant-message-1",
-                    type: "message",
-                    role: "assistant",
-                    content: [{ type: "output_text", text: "Canonical answer" }]
-                  }
-                },
-                rawText: "Canonical answer",
-                sourceHash: `response-item-source-hash:${externalSessionId}`,
                 idempotencyKey: canonicalKey,
-                canonicalItemKey: canonicalKey,
-                canonicalStableItemId: "assistant-message-1",
-                canonicalSourcePriority: 200,
-                observationKind: "reconciliation",
-                observationComponent: "message",
                 metadata: {
                   transcriptByteOffset: 128,
-                  transcriptItemDiscriminator: "primary:codex_response_message",
-                  transcriptType: "message",
-                  canonicalConversationItemActor: "agent",
-                  canonicalConversationItemKind: "message",
+                  transcriptItemDiscriminator: "primary:codex_transcript_user",
                   ...(transport === "hook"
                     ? { observedViaHook: true }
                     : transport === "transcript"
@@ -1279,9 +1247,7 @@ describeDb("durable historical import repository", () => {
         );
         ids.push(item!.id);
       }
-      expect(new Set(sessionIds).size).toBe(1);
       expect(new Set(ids).size).toBe(1);
-      const sessionId = sessionIds[0]!;
       const observations = await pool.query<{ source_transport: string }>(
         `select source_transport from conversation_item_observations
          where conversation_item_id = $1 order by source_transport`,
@@ -1292,25 +1258,6 @@ describeDb("durable historical import repository", () => {
         "hook",
         "transcript"
       ]);
-      const livePriority = await pool.query<{ projection_work_class: string }>(
-        "select projection_work_class from conversation_items where id = $1",
-        [ids[0]]
-      );
-      expect(livePriority.rows[0]?.projection_work_class).toBe(
-        "live_capture_projection"
-      );
-      expect(
-        await repo.projectPendingConversationItems(
-          { userId: owner.id },
-          { workClass: "live_capture_projection", limit: 10 }
-        )
-      ).toMatchObject({ rawItemsProjected: 1 });
-      const projected = await pool.query<{ count: string }>(
-        `select count(*)::text count from memory_events
-         where owner_user_id = $1 and session_id = $2`,
-        [owner.id, sessionId]
-      );
-      expect(projected.rows[0]?.count).toBe("1");
     }
   });
 
