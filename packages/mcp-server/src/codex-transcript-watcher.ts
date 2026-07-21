@@ -703,6 +703,12 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
     this.rememberIdentity(transcriptPath, { ...identity, fileKey });
     let source = await lookupSource(this.client, identity.sessionId);
     if (source) {
+      if (
+        source.sourceSizeBytes !== null &&
+        before.size < source.sourceSizeBytes
+      ) {
+        throw new Error("transcript_truncated");
+      }
       const priorObservation = this.sourcePaths.get(source.id);
       const firstPathObservation =
         priorObservation?.transcriptPath !== transcriptPath;
@@ -848,7 +854,12 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
     transcriptPath: string,
     size: number
   ): Promise<void> {
-    if (size < source.liveCursorOffset) throw new Error("transcript_truncated");
+    if (
+      size < source.liveCursorOffset ||
+      (source.sourceSizeBytes !== null && size < source.sourceSizeBytes)
+    ) {
+      throw new Error("transcript_truncated");
+    }
     if (source.liveCursorOffset === 0) {
       if (source.liveCursorHash !== null)
         throw new Error("cursor_hash_invalid");
@@ -979,8 +990,13 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
       throw new Error("transcript_mutated_during_batch");
     }
     const current = await stat(transcriptPath);
-    if (current.size < checkpoint.offset)
+    if (
+      current.size < checkpoint.offset ||
+      (source.sourceSizeBytes !== null && current.size < source.sourceSizeBytes)
+    ) {
       throw new Error("transcript_truncated");
+    }
+    const priorCursorOffset = source.liveCursorOffset;
     await this.client.advanceLiveTranscriptCursor(source.id, {
       expectedCursorOffset: source.liveCursorOffset,
       expectedCursorHash: source.liveCursorHash,
@@ -990,11 +1006,12 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
       sourceSizeBytes: current.size
     });
     source.liveCursorOffset = checkpoint.offset;
+    source.sourceSizeBytes = current.size;
     this.rememberSourcePath(source, transcriptPath, current);
     this.applyParserCheckpoint(state, checkpoint);
     this.metrics.batchesIngested += 1;
     this.metrics.recordsIngested += parsed.records.length;
-    this.metrics.bytesAdvanced += checkpoint.offset - source.liveCursorOffset;
+    this.metrics.bytesAdvanced += checkpoint.offset - priorCursorOffset;
     if (checkpoint.offset < boundary) this.scanRequested = true;
   }
 

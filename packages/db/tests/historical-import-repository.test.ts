@@ -371,7 +371,7 @@ describeDb("durable historical import repository", () => {
         registrationFrontierOffset: 100,
         registrationPrefixHash: prefixHash,
         localSourcePath: "/private/original.jsonl",
-        sourceSizeBytes: 150
+        sourceSizeBytes: 200
       }
     );
     await repo.transitionHistoricalImportSource(
@@ -390,7 +390,7 @@ describeDb("durable historical import repository", () => {
         checkpointOffset: 60,
         checkpointLine: 2,
         checkpointHash: "5".repeat(64),
-        sourceSizeBytes: 150,
+        sourceSizeBytes: 200,
         importedRecordCount: 2
       }
     );
@@ -403,7 +403,7 @@ describeDb("durable historical import repository", () => {
         cursorOffset: 150,
         cursorLine: 5,
         cursorHash: "6".repeat(64),
-        sourceSizeBytes: 150
+        sourceSizeBytes: 200
       }
     );
     const restarted = createHistoricalImportRepository(pool);
@@ -425,7 +425,7 @@ describeDb("durable historical import repository", () => {
         }
       ]
     });
-    for (const sourceSizeBytes of [59, 99, 149]) {
+    for (const sourceSizeBytes of [59, 99, 149, 175]) {
       expect(
         await repo.observeHistoricalImportSource(
           { userId: owner.id },
@@ -441,7 +441,8 @@ describeDb("durable historical import repository", () => {
       await repo.getHistoricalImportSource({ userId: owner.id }, source!.id)
     ).toMatchObject({
       localSourcePath: "/private/original.jsonl",
-      sourceSizeBytes: 150
+      sourceSizeBytes: 200,
+      liveCursorOffset: 150
     });
     await expect(
       repo.advanceHistoricalImportSource(
@@ -468,10 +469,16 @@ describeDb("durable historical import repository", () => {
           cursorOffset: 160,
           cursorLine: 6,
           cursorHash: "8".repeat(64),
-          sourceSizeBytes: 90
+          sourceSizeBytes: 175
         }
       )
     ).rejects.toThrow("conflict");
+    expect(
+      await repo.getHistoricalImportSource({ userId: owner.id }, source!.id)
+    ).toMatchObject({
+      sourceSizeBytes: 200,
+      liveCursorOffset: 150
+    });
     expect(
       await repo.createHistoricalImportSource(
         { userId: owner.id },

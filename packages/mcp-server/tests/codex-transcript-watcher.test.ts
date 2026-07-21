@@ -297,6 +297,9 @@ describe("Codex Transcript Watcher", () => {
     expect(source.liveCursorOffset).toBe(
       completeTranscriptBoundary(transcript)
     );
+    expect(watcher.snapshot().bytesAdvanced).toBe(
+      completeTranscriptBoundary(transcript) - frontier
+    );
     expect(client.itemBatches.flat()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -533,6 +536,41 @@ describe("Codex Transcript Watcher", () => {
       "transcript_prefix_mutated"
     );
     await restarted.stop();
+  });
+
+  it("rejects a transcript smaller than its durable source observation", async () => {
+    const root = temporaryDirectory();
+    const transcript = transcriptPath(root);
+    const content =
+      line(sessionRecord("session-shrunk")) + "incomplete-record!";
+    writeFileSync(transcript, content);
+    expect(statSync(transcript).size).toBe(175);
+    const client = new FakeWatcherClient();
+    client.sources.set("session-shrunk", {
+      id: "source-shrunk",
+      runId: "11111111-1111-4111-8111-111111111111",
+      sourceSessionId: "session-shrunk",
+      sourceFingerprint: "1".repeat(64),
+      registrationFrontierOffset: 0,
+      registrationPrefixHash: "0".repeat(64),
+      liveCursorOffset: 150,
+      liveCursorLine: 1,
+      liveCursorHash: "2".repeat(64),
+      sourceSizeBytes: 200,
+      sourceModifiedAt: null,
+      localSourcePath: transcript,
+      detectedProject: {}
+    });
+    const watcher = trackedWatcher(client, watcherConfig(root));
+
+    await watcher.scanNow();
+
+    expect(client.sources.get("session-shrunk")).toMatchObject({
+      sourceSizeBytes: 200,
+      liveCursorOffset: 150
+    });
+    expect(client.cursorWrites).toHaveLength(0);
+    expect(watcher.snapshot().lastErrorCode).toBe("transcript_truncated");
   });
 
   it("detects truncation and treats inode rotation as a new live source", async () => {

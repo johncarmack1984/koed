@@ -450,7 +450,8 @@ const observeSource = async (
          updated_at = now()
      where id = $2 and owner_user_id = $1
        and $5 >= greatest(
-         registration_frontier_offset, checkpoint_offset, live_cursor_offset
+         registration_frontier_offset, checkpoint_offset, live_cursor_offset,
+         coalesce(source_size_bytes, 0)
        )
      returning *`,
     [
@@ -1126,6 +1127,11 @@ const advanceLiveCursorRecord = (
     await lockImportOwner(client, actor.userId);
     const source = await requireSourceForUpdate(client, actor, input.sourceId);
     const expectedHash = input.expectedCursorHash ?? null;
+    if (input.sourceSizeBytes < (source.sourceSizeBytes ?? 0)) {
+      throw Object.assign(new Error("Live transcript cursor conflict"), {
+        statusCode: 409
+      });
+    }
     if (
       source.liveCursorOffset === input.cursorOffset &&
       source.liveCursorLine === input.cursorLine &&
@@ -1140,7 +1146,8 @@ const advanceLiveCursorRecord = (
       input.cursorOffset <= input.expectedCursorOffset ||
       input.cursorOffset < source.registrationFrontierOffset ||
       input.cursorOffset > input.sourceSizeBytes ||
-      input.sourceSizeBytes < source.checkpointOffset
+      input.sourceSizeBytes < source.checkpointOffset ||
+      input.sourceSizeBytes < (source.sourceSizeBytes ?? 0)
     ) {
       throw Object.assign(new Error("Live transcript cursor conflict"), {
         statusCode: 409
@@ -1155,6 +1162,7 @@ const advanceLiveCursorRecord = (
          and live_cursor_offset = $3
          and live_cursor_hash is not distinct from $8
          and checkpoint_offset <= $7
+         and $7 >= coalesce(source_size_bytes, 0)
        returning *`,
       [
         actor.userId,
