@@ -1,4 +1,4 @@
-import {
+import fs, {
   appendFileSync,
   mkdirSync,
   mkdtempSync,
@@ -11,12 +11,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MemoryApiError } from "../src/index.js";
 import {
   completeTranscriptBoundary,
-  hashFilePrefix,
+  hashFilePrefixSentinels,
   signalCodexTranscriptWatcher,
   startCodexTranscriptWatcher,
   type CodexTranscriptWatcherClient,
@@ -246,6 +246,36 @@ const fsMkdir = (directory: string): void => {
 };
 
 describe("Codex Transcript Watcher", () => {
+  it("reads one final byte for a complete large transcript boundary", () => {
+    const root = temporaryDirectory();
+    const transcript = transcriptPath(root);
+    const content = Buffer.alloc(20 * 1024 * 1024, "x");
+    content[content.length - 1] = 0x0a;
+    writeFileSync(transcript, content);
+    const readSync = vi.spyOn(fs, "readSync");
+
+    expect(completeTranscriptBoundary(transcript)).toBe(content.length);
+    expect(
+      readSync.mock.calls.reduce((total, call) => total + call[1].byteLength, 0)
+    ).toBe(1);
+    readSync.mockRestore();
+  });
+
+  it("skips boundary reads for unchanged transcript observations", async () => {
+    const root = temporaryDirectory();
+    const transcript = transcriptPath(root);
+    writeFileSync(transcript, line(sessionRecord("session-unchanged")));
+    const client = new FakeWatcherClient();
+    const watcher = trackedWatcher(client, watcherConfig(root));
+    await watcher.scanNow();
+    const readSync = vi.spyOn(fs, "readSync");
+
+    await watcher.scanNow();
+
+    expect(readSync).not.toHaveBeenCalled();
+    readSync.mockRestore();
+  });
+
   it("registers an existing source at complete frontier then captures append without Hook", async () => {
     const root = temporaryDirectory();
     const transcript = transcriptPath(root);
@@ -694,15 +724,33 @@ describe("Codex Transcript Watcher", () => {
     expect(wake).not.toContain(root);
   });
 
-  it("computes cursor hashes from exact complete prefixes", async () => {
+  it("computes bounded cursor prefix sentinels", async () => {
     const root = temporaryDirectory();
     const transcript = transcriptPath(root);
     writeFileSync(transcript, line(sessionRecord("session-hash")) + "partial");
     const boundary = completeTranscriptBoundary(transcript);
     expect(boundary).toBeLessThan(readTranscript(transcript).length);
-    expect(await hashFilePrefix(transcript, 0)).toMatch(/^[0-9a-f]{64}$/);
-    expect(await hashFilePrefix(transcript, boundary)).toMatch(
+    expect(await hashFilePrefixSentinels(transcript, 0)).toMatch(
       /^[0-9a-f]{64}$/
+    );
+    expect(await hashFilePrefixSentinels(transcript, boundary)).toMatch(
+      /^[0-9a-f]{64}$/
+    );
+  });
+
+  it("intentionally does not detect middle-prefix mutations outside sentinels", async () => {
+    const root = temporaryDirectory();
+    const transcript = transcriptPath(root);
+    const content = Buffer.alloc(512 * 1024, "x");
+    content[content.length - 1] = 0x0a;
+    writeFileSync(transcript, content);
+    const before = await hashFilePrefixSentinels(transcript, content.length);
+
+    content[Math.floor(content.length / 2)] = 0x79;
+    writeFileSync(transcript, content);
+
+    expect(await hashFilePrefixSentinels(transcript, content.length)).toBe(
+      before
     );
   });
 });

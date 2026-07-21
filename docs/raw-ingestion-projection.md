@@ -122,10 +122,11 @@ that baseline retain their complete-record boundary as an immutable historical
 frontier. Files created after activation use
 a zero frontier and are live from their first complete record. Post-frontier
 ranges, including restart recovery, advance a durable live cursor independent
-of historical imported ranges and checkpoints. Before each page, Koed verifies
-cursor offset and prefix SHA-256. Partial trailing JSONL holds the cursor;
-malformed complete records, truncation, and prefix mutation fail visibly without
-advancement. Capture Policy and Capture Pause are checked before session
+of historical imported ranges and checkpoints. Before each page, Koed compares
+cursor offset with bounded SHA-256 first/last prefix sentinels. Partial trailing
+JSONL holds the cursor; malformed complete records, truncation, and
+sentinel-covered prefix mutation fail visibly without advancement. Mutations
+outside sentinel windows are intentionally not detected by this bounded check. Capture Policy and Capture Pause are checked before session
 creation and every raw batch. Watcher writes are Personal Memory only and grant
 no Team or Workspace authority.
 
@@ -346,7 +347,8 @@ content, source paths, queries, credentials, or raw payloads.
 Durable `historical_import_runs` and `historical_import_sources` records own
 state transitions, bounded counters, retry/failure data, source ranges, and
 lifecycle timestamps. Registration immutably records source fingerprint,
-source-session identity, complete-record frontier offset, and prefix hash. New
+source-session identity, complete-record frontier offset, and bounded prefix
+sentinel hash. New
 source registration is serialized with run transitions and is accepted only
 while the run is `discovered`, `eligible`, `queued`, `importing`, or `paused`.
 Terminal `completed`, `failed`, and `skipped` runs cannot gain stranded sources;
@@ -354,8 +356,8 @@ an immutable source may be observed at a moved path after its failed run is
 explicitly retried into `queued`. Historical imported ranges/checkpoint and
 Transcript Watcher live cursor are separate
 transactional streams; neither can advance, rewind, or overwrite the other.
-Source growth is accepted, while truncation, rotation/prefix mutation, and stale
-submissions fail visibly without changing either stream. Source records
+Source growth is accepted, while truncation, rotation, sentinel-covered prefix
+mutation, and stale submissions fail visibly without changing either stream. Source records
 keep raw source paths and path-like detected Project fields only inside local
 Postgres state. Status and canonical raw/Captured Session provenance use only a
 basename-style redacted label, stable fingerprint, and path-free detected

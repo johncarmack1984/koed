@@ -425,6 +425,24 @@ describeDb("durable historical import repository", () => {
         }
       ]
     });
+    for (const sourceSizeBytes of [59, 99, 149]) {
+      expect(
+        await repo.observeHistoricalImportSource(
+          { userId: owner.id },
+          {
+            sourceId: source!.id,
+            localSourcePath: "/private/stale.jsonl",
+            sourceSizeBytes
+          }
+        )
+      ).toBeNull();
+    }
+    expect(
+      await repo.getHistoricalImportSource({ userId: owner.id }, source!.id)
+    ).toMatchObject({
+      localSourcePath: "/private/original.jsonl",
+      sourceSizeBytes: 150
+    });
     await expect(
       repo.advanceHistoricalImportSource(
         { userId: owner.id },

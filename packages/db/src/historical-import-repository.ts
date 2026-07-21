@@ -449,6 +449,9 @@ const observeSource = async (
          last_observed_at = now(),
          updated_at = now()
      where id = $2 and owner_user_id = $1
+       and $5 >= greatest(
+         registration_frontier_offset, checkpoint_offset, live_cursor_offset
+       )
      returning *`,
     [
       actor.userId,

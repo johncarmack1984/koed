@@ -37,6 +37,7 @@ export {
 const WATCHER_VERSION = 1;
 const EMPTY_SHA256 = createHash("sha256").digest("hex");
 const PREFIX_SENTINEL_BYTES = 64 * 1024;
+const BOUNDARY_SCAN_BYTES = 64 * 1024;
 const TRANSCRIPT_PATTERN = /^rollout-.*\.jsonl$/;
 
 export interface CodexTranscriptWatcherConfig {
@@ -192,7 +193,7 @@ export const resolveCodexTranscriptWatcherConfig = (
 const sha256 = (value: string): string =>
   createHash("sha256").update(value).digest("hex");
 
-export const hashFilePrefix = async (
+export const hashFilePrefixSentinels = async (
   transcriptPath: string,
   offset: number
 ): Promise<string> => {
@@ -223,29 +224,41 @@ export const completeTranscriptBoundary = (
 ): number => {
   const size = statSync(transcriptPath).size;
   if (size === 0) return 0;
-  const length = Math.min(size, maxRecordBytes + 1);
-  const start = size - length;
   const descriptor = fs.openSync(transcriptPath, "r");
-  const buffer = Buffer.allocUnsafe(length);
   try {
-    fs.readSync(descriptor, buffer, 0, length, start);
+    const finalByte = Buffer.allocUnsafe(1);
+    fs.readSync(descriptor, finalByte, 0, 1, size - 1);
+    if (finalByte[0] === 0x0a) return size;
+    const segments: Buffer[] = [finalByte];
+    let scanned = 1;
+    for (let end = size - 1; end > 0; ) {
+      const length = Math.min(BOUNDARY_SCAN_BYTES, end, maxRecordBytes);
+      const start = end - length;
+      const buffer = Buffer.allocUnsafe(length);
+      fs.readSync(descriptor, buffer, 0, length, start);
+      const newline = buffer.lastIndexOf(0x0a);
+      if (newline >= 0) {
+        const trailing = Buffer.concat([
+          buffer.subarray(newline + 1),
+          ...segments
+        ]).toString("utf8");
+        if (!trailing.trim()) return size;
+        try {
+          JSON.parse(trailing);
+          return size;
+        } catch {
+          return start + newline + 1;
+        }
+      }
+      segments.unshift(buffer);
+      scanned += length;
+      end = start;
+      if (scanned > maxRecordBytes)
+        throw new Error("transcript_record_too_large");
+    }
+    return 0;
   } finally {
     fs.closeSync(descriptor);
-  }
-  const newline = buffer.lastIndexOf(0x0a);
-  const trailing = buffer.subarray(newline + 1).toString("utf8");
-  if (!trailing.trim()) return size;
-  try {
-    JSON.parse(trailing);
-    return size;
-  } catch {
-    if (newline < 0) {
-      if (size > maxRecordBytes) {
-        throw new Error("transcript_record_too_large");
-      }
-      return 0;
-    }
-    return start + newline + 1;
   }
 };
 
@@ -515,7 +528,13 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
   >();
   private readonly sourcePaths = new Map<
     string,
-    { transcriptPath: string; size: number; modifiedAt: string }
+    {
+      transcriptPath: string;
+      fileKey: string;
+      size: number;
+      modifiedAt: string;
+      liveCursorOffset: number;
+    }
   >();
   private readonly metrics: WatcherSnapshot;
   private runId?: string;
@@ -665,6 +684,7 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
     if (!before.isFile()) return;
     const fileKey = `${before.dev}:${before.ino}`;
     this.rememberBaselineFile(fileKey);
+    if (this.sourcePathUnchanged(transcriptPath, before)) return;
     const boundary = completeTranscriptBoundary(transcriptPath);
     const cachedIdentity = this.identities.get(transcriptPath);
     const parsedIdentity =
@@ -691,7 +711,7 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
         priorObservation?.size !== before.size ||
         priorObservation?.modifiedAt !== before.mtime.toISOString();
       if (firstPathObservation || sourceChanged) {
-        await this.verifyCursorPrefix(source, transcriptPath, before.size);
+        await this.verifyCursorSentinels(source, transcriptPath, before.size);
       }
       if (firstPathObservation) {
         source = await this.refreshSourcePath(source, transcriptPath, before);
@@ -705,9 +725,20 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
         identity
       );
     }
-    this.rememberSourcePath(source.id, transcriptPath, before);
+    this.rememberSourcePath(source, transcriptPath, before);
     if (boundary <= source.liveCursorOffset) return;
     await this.ingestPage(source, transcriptPath, identity.context, boundary);
+  }
+
+  private sourcePathUnchanged(transcriptPath: string, file: Stats): boolean {
+    return [...this.sourcePaths.values()].some(
+      (observation) =>
+        observation.transcriptPath === transcriptPath &&
+        observation.fileKey === `${file.dev}:${file.ino}` &&
+        observation.size === file.size &&
+        observation.modifiedAt === file.mtime.toISOString() &&
+        observation.liveCursorOffset >= file.size
+    );
   }
 
   private rememberBaselineFile(fileKey: string): void {
@@ -734,15 +765,17 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
   }
 
   private rememberSourcePath(
-    sourceId: string,
+    source: HistoricalSource,
     transcriptPath: string,
     file: Stats
   ): void {
-    this.sourcePaths.delete(sourceId);
-    this.sourcePaths.set(sourceId, {
+    this.sourcePaths.delete(source.id);
+    this.sourcePaths.set(source.id, {
       transcriptPath,
+      fileKey: `${file.dev}:${file.ino}`,
       size: file.size,
-      modifiedAt: file.mtime.toISOString()
+      modifiedAt: file.mtime.toISOString(),
+      liveCursorOffset: source.liveCursorOffset
     });
     const maximum = Math.max(this.config.maxFilesPerScan * 10, 100);
     while (this.sourcePaths.size > maximum) {
@@ -771,7 +804,7 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
       this.activatedAt === null || this.baselineFileKeys.has(fileKey)
         ? boundary
         : 0;
-    const prefixHash = await hashFilePrefix(transcriptPath, frontier);
+    const prefixHash = await hashFilePrefixSentinels(transcriptPath, frontier);
     const response = await this.client.createHistoricalImportSource({
       runId: await this.ensureRunId(),
       aiClient: "codex",
@@ -810,7 +843,7 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
     return responseValue<HistoricalSource>(response, "source");
   }
 
-  private async verifyCursorPrefix(
+  private async verifyCursorSentinels(
     source: HistoricalSource,
     transcriptPath: string,
     size: number
@@ -821,7 +854,7 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
         throw new Error("cursor_hash_invalid");
       return;
     }
-    const prefixHash = await hashFilePrefix(
+    const prefixHash = await hashFilePrefixSentinels(
       transcriptPath,
       source.liveCursorOffset
     );
@@ -914,7 +947,10 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
     });
     const checkpoint = parsed.checkpoint;
     if (!checkpoint || checkpoint.offset <= source.liveCursorOffset) return;
-    const cursorHash = await hashFilePrefix(transcriptPath, checkpoint.offset);
+    const cursorHash = await hashFilePrefixSentinels(
+      transcriptPath,
+      checkpoint.offset
+    );
     const session = await this.ensureSession(source, transcriptPath, context);
     const items = buildCodexTranscriptConversationItems({
       records: parsed.records,
@@ -934,8 +970,8 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
       items
     );
     await this.projectItems(persisted);
-    await this.verifyCursorPrefix(source, transcriptPath, checkpoint.size);
-    const currentCursorHash = await hashFilePrefix(
+    await this.verifyCursorSentinels(source, transcriptPath, checkpoint.size);
+    const currentCursorHash = await hashFilePrefixSentinels(
       transcriptPath,
       checkpoint.offset
     );
@@ -953,6 +989,8 @@ class CodexTranscriptWatcher implements CodexTranscriptWatcherHandle {
       cursorHash,
       sourceSizeBytes: current.size
     });
+    source.liveCursorOffset = checkpoint.offset;
+    this.rememberSourcePath(source, transcriptPath, current);
     this.applyParserCheckpoint(state, checkpoint);
     this.metrics.batchesIngested += 1;
     this.metrics.recordsIngested += parsed.records.length;

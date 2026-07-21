@@ -551,7 +551,7 @@ per-User/tenant shares, reserved interactive capacity, or dynamic dispatch
 priority; KOE-355 owns that scheduler work.
 
 A coordinator registers each existing source with immutable fingerprint,
-source-session identity, complete-record frontier offset, and prefix hash.
+source-session identity, complete-record frontier offset, and bounded prefix sentinel hash.
 Pre-frontier rows receive the historical class. Post-frontier rows, including
 downtime catch-up, receive the live class. A source created after registration
 has a zero frontier and is live from its first complete record. Never label
@@ -569,8 +569,8 @@ fingerprint, never raw path or path-like detected Project fields. Coordinators
 must send transcript records through reusable `codex-transcript-v1` adapter and
 must maintain the returned historical checkpoint/imported ranges separately
 from the live-tail/recovery cursor. Neither stream may derive from or update the
-other. Source growth is allowed; truncation, rotation/prefix mutation, and stale
-checkpoints fail explicitly. Exact retries return a read-only replay. Effective
+other. Source growth is allowed; truncation, rotation/sentinel-covered prefix mutation,
+and stale checkpoints fail explicitly. Exact retries return a read-only replay. Effective
 Capture Policy and Capture Pause are rechecked under the same
 owner-scoped transaction lock as each batch write.
 

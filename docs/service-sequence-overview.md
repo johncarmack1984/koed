@@ -515,10 +515,12 @@ remains a later integration on top of this durable seat lifecycle state.
    activation registers frontier zero and is live from its first complete
    record. Restart resumes post-frontier growth from the durable live cursor,
    never from the independent historical checkpoint.
-3. Before reading a page, the watcher validates file size and the cursor-prefix
-   SHA-256. It reads only complete JSONL records within bounded file, entry, and
-   byte limits. Partial trailing records hold the cursor; malformed complete
-   records, truncation, and prefix mutation fail visibly without advancing it.
+3. Before reading a page, the watcher validates file size and compares bounded
+   SHA-256 first/last cursor-prefix sentinels. It reads only complete JSONL
+   records within bounded file, entry, and byte limits. Partial trailing records
+   hold the cursor; malformed complete records, truncation, and sentinel-covered
+   prefix mutation fail visibly without advancing it. Mutations outside sentinel
+   windows are intentionally not detected by this bounded check.
 4. Codex may also emit `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`,
    `SubagentStart`, and `SubagentStop`. The Supported Capture Hook writes a
    content-free local wake hint and may provide stripped completion evidence.
@@ -590,7 +592,7 @@ remains a later integration on top of this durable seat lifecycle state.
     routes exist only on
     developer/local-personal edges. Durable run/source
     records validate transitions and retain an immutable complete-record
-    registration frontier (offset/prefix hash plus fingerprint/session ID),
+    registration frontier (offset/bounded prefix sentinel hash plus fingerprint/session ID),
     separate historical imported ranges/checkpoint and live recovery cursor,
     stage counters, retry/failure timestamps, immutable
     detected Project provenance, and local-only raw source path. Responses and
@@ -608,7 +610,7 @@ remains a later integration on top of this durable seat lifecycle state.
     fields, observation-only records, and raw-only classifications without
     rewriting them; raw persistence, counters, and checkpoint advancement
     commit atomically. Offset/prefix-hash
-    retries distinguish exact replay from mutation, rotation, or truncation.
+    retries distinguish exact replay from sentinel-covered mutation, rotation, or truncation.
     Pre-frontier records are historical; post-frontier/downtime-recovery records
     are live. No Team,
     Workspace Access, or Share Grant mutation occurs.
@@ -701,7 +703,7 @@ sequenceDiagram
   Hook-->>Watcher: Content-free wake hint / completion evidence
   Watcher->>API: Read durable frontier and live cursor
   API->>DB: Resolve owner-scoped source state
-  Watcher->>Transcript: Validate prefix hash and parse bounded complete records
+  Watcher->>Transcript: Compare prefix sentinels and parse bounded complete records
   Watcher->>API: Capture Policy/Pause check and raw conversation_items
   API->>DB: Persist or reconcile transcript rows idempotently
   Watcher->>API: Advance independent durable live cursor
