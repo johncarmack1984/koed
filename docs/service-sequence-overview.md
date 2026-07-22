@@ -9,7 +9,8 @@ MCP-side workers.
 ## Services In Scope
 
 - **AI Client**: Codex is the supported AI Client in this build.
-- **Capture Hook**: the TypeScript hook that sends conversation activity to Koed.
+- **Transcript Watcher**: the local background service that owns correctness for externally managed Codex transcript growth.
+- **Capture Hook**: the TypeScript hook that provides low-latency wake signals and completion evidence.
 - **MCP Server**: the local process that exposes `memory_answer`, runs local
   memory-answer work, and runs the LCM Summary Service.
 - **API**: the Fastify backend that authenticates API Tokens, persists raw
@@ -91,8 +92,9 @@ MCP-side workers.
    `koed-server` and connect to those configured dependency URLs. API/Worker
    job queues use `WORK_QUEUE_BACKEND=bullmq` for Redis/BullMQ or
    `WORK_QUEUE_BACKEND=local` for the Postgres-backed `local_work_queue`
-   table.
-7. `koed-server start --daemon --json` starts a detached `koed-server start` supervisor and returns machine-readable startup intent for Desktop and scripts. `koed-server stop --json` stops supervised processes in dependency-safe order: Explorer, Worker, API, native Embedding Service, then native Postgres through `pg_ctl stop`. It treats stale process IDs as an idempotent no-op and does not stop Docker Compose or Operator-managed dependencies. `koed-server restart --json` runs the same stop lifecycle, starts a detached `koed-server start` supervisor, and returns machine-readable JSON without streaming startup logs.
+   table. After the API is healthy and a local API Token exists, the supervisor
+   starts `@koed/mcp-server` command `watch-codex-transcripts` when enabled.
+7. `koed-server start --daemon --json` starts a detached `koed-server start` supervisor and returns machine-readable startup intent for Desktop and scripts. `koed-server stop --json` stops supervised processes in dependency-safe order: Transcript Watcher, Explorer, Worker, API, native Embedding Service, then native Postgres through `pg_ctl stop`. Stopping the watcher before the API lets its active scan finish or terminate without losing the API dependency. Stop treats stale process IDs as an idempotent no-op and does not stop Docker Compose or Operator-managed dependencies. `koed-server restart --json` runs the same stop lifecycle, starts a detached `koed-server start` supervisor, and returns machine-readable JSON without streaming startup logs.
 8. `koed-server status --json` and `koed-server doctor --json` poll the API
    readiness endpoint, dependency readiness as reported by the API, local
    Worker process state, local API Token configuration, MCP Server doctor
@@ -103,7 +105,8 @@ MCP-side workers.
    mismatches. Readiness gates include Postgres reachability and version,
    current migrations, pgvector, local or BullMQ queue backend availability,
    and Embedding Service model/dimension compatibility. Historical-import
-   backlog is an authenticated diagnostic counter, never a readiness gate.
+   backlog and aggregate Transcript Watcher process/status data are diagnostic
+   only, never readiness gates.
 9. `koed-server setup codex --json` wraps the existing guided bootstrap path so
    Codex MCP Server, Supported Capture Hook, local API Token, app-provisioned
    Explorer credential, verification, and doctor setup can be invoked through
@@ -501,36 +504,40 @@ remains a later integration on top of this durable seat lifecycle state.
 
 ## Ingestion
 
-1. Codex emits supported hook events such as `SessionStart`,
-   `UserPromptSubmit`, `PostToolUse`, `Stop`, `SubagentStart`, and
-   `SubagentStop`.
-2. The TypeScript Capture Hook treats the hook event as a trigger signal. It
-   starts a detached transcript catch-up process for the transcript path and
-   returns without waiting for API writes, Projection, embeddings, or LCM work.
-3. The detached catch-up process holds a per-transcript lock so multiple hooks
-   coalesce into one active ingestion pass. It drains transcript rows from the
-   last checkpoint up to the latest complete JSONL line. If live capture sees
-   an existing transcript with no checkpoint, it baselines to the current end of
-   file after ingesting only timestamped rows in the first-contact grace window;
-   older transcript history requires an explicit historical import. Rows without
-   source timestamps are held at the checkpoint until a later timestamped row
-   lets Koed interpolate their source time without reordering transcript
-   chronology.
-4. Catch-up converts Codex transcript records into canonical
-   `conversation_items` plus immutable `conversation_item_observations` with
-   source adapter metadata, source identity, hashes, and chronology. `Stop` and
-   `SubagentStop` hook signals may also be stored as stripped control records so
-   Projection can seal an agent turn, but content-bearing hook fields are
-   omitted before storage. Transcript JSONL records are the source of truth for
-   display and semantic content.
-5. The API authenticates the API Token and persists canonical items and source
-   observations atomically as
-   `personal` memory through `POST /v1/memory/conversation-items`.
-6. During persistence, exact provider identity controls canonicalization.
-   Replayed observations are idempotent, conflicting observation bytes fail,
-   and Capture Policy/Pause is enforced again at this common boundary. Hook
-   control records do not become messages, tool events, Memory Event content,
-   LCM sources, or embeddings.
+1. The supervised Transcript Watcher combines recursive filesystem notification
+   hints with bounded periodic rescans of explicit Codex transcript roots. The
+   default root is `CODEX_HOME/sessions`; path-delimited
+   `MEMORY_CODEX_TRANSCRIPT_ROOTS` replaces it. Notifications only reduce
+   latency: missed notifications still converge through rescans.
+2. The first successful bounded full discovery cycle establishes activation. Files in that
+   baseline register an immutable complete-record frontier and leave their
+   prefix to historical import. A file created after
+   activation registers frontier zero and is live from its first complete
+   record. Restart resumes post-frontier growth from the durable live cursor,
+   never from the independent historical checkpoint.
+3. Before reading a page, the watcher validates file size and compares bounded
+   SHA-256 first/last cursor-prefix sentinels. It reads only complete JSONL
+   records within bounded file, entry, and byte limits. Partial trailing records
+   hold the cursor; malformed complete records, truncation, and sentinel-covered
+   prefix mutation fail visibly without advancing it. Mutations outside sentinel
+   windows are intentionally not detected by this bounded check.
+4. Codex may also emit `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`,
+   `SubagentStart`, and `SubagentStop`. The Supported Capture Hook writes a
+   content-free local wake hint and may provide stripped completion evidence.
+   Missing, duplicate, delayed, or reordered signals cannot create a capture
+   gap or duplicate. Transcript JSONL remains the content source of truth.
+5. The watcher checks Capture Policy and Capture Pause before session creation
+   and before every batch, then converts records with `codex-transcript-v1` into
+   canonical `conversation_items` plus immutable
+   `conversation_item_observations`. The API authenticates the Personal API
+   Token and persists each raw batch as Personal Memory. No Team Workspace,
+   Share Grant, remote authority, or backend synthesis is introduced.
+6. Exact provider identity controls canonicalization across watcher, Hook,
+   managed reconciliation, and historical import. Replayed observations are
+   idempotent, conflicting bytes fail, and a later live observation promotes
+   work to live Projection priority without another canonical item or Memory
+   Event. Cursor advancement occurs only after raw persistence and direct live
+   Projection succeed.
 7. Projection reads `projection_policy_rules` to decide which Codex transcript
    item types become UI rows, tool events, Memory Events, embeddings, and LCM
    sources. The seeded policy projects user, agent, subagent, tool call/result,
@@ -578,10 +585,14 @@ remains a later integration on top of this durable seat lifecycle state.
     lineage. Created leaves and rollups persist that lineage, and derived node
     embeddings retain it.
 12. Local historical import state uses authenticated
-    `/v1/historical-imports` and `/v1/historical-import-sources` routes. These
-    routes exist only on developer/local-personal edges. Durable run/source
+    `/v1/historical-imports` and `/v1/historical-import-sources` routes. A
+    strict local-only lookup resolves one owner-scoped source from its AI
+    Client, source kind, and source session ID so capture can resume after
+    restart without exposing raw paths or path-like Project provenance. These
+    routes exist only on
+    developer/local-personal edges. Durable run/source
     records validate transitions and retain an immutable complete-record
-    registration frontier (offset/prefix hash plus fingerprint/session ID),
+    registration frontier (offset/bounded prefix sentinel hash plus fingerprint/session ID),
     separate historical imported ranges/checkpoint and live recovery cursor,
     stage counters, retry/failure timestamps, immutable
     detected Project provenance, and local-only raw source path. Responses and
@@ -599,7 +610,7 @@ remains a later integration on top of this durable seat lifecycle state.
     fields, observation-only records, and raw-only classifications without
     rewriting them; raw persistence, counters, and checkpoint advancement
     commit atomically. Offset/prefix-hash
-    retries distinguish exact replay from mutation, rotation, or truncation.
+    retries distinguish exact replay from sentinel-covered mutation, rotation, or truncation.
     Pre-frontier records are historical; post-frontier/downtime-recovery records
     are live. No Team,
     Workspace Access, or Share Grant mutation occurs.
@@ -656,9 +667,9 @@ Captured Session and reconciles that child's rollout independently. Parent and
 child turns use the same terminal-evidence requirement and remain distinct
 through Projection and downstream memory.
 
-This path currently has no frontend and does not replace the Supported Capture
-Hook. Threads started outside Koed continue using hook-triggered detached JSONL
-catch-up.
+This path currently has no frontend and does not replace the Transcript Watcher.
+Threads started outside Koed are captured from transcript growth; Supported
+Capture Hook signals provide low-latency wakeups and completion evidence.
 
 Commercial/private VPS/Team deployments can run encrypted-field backfill over
 existing human-readable Memory and evidence columns. Backfill is whitelist-based
@@ -680,18 +691,23 @@ responses, logs, or diagnostics.
 ```mermaid
 sequenceDiagram
   participant Client as AI Client
+  participant Transcript as Codex Transcript JSONL
+  participant Watcher as Transcript Watcher
   participant Hook as Capture Hook
   participant API as API
   participant DB as Database
   participant Worker as Worker
   participant Embed as Embedding Service
 
-  Client->>Hook: Supported hook event and transcript path
-  Hook-->>Hook: Start detached transcript catch-up
-  Hook-->>Client: Return without waiting for capture work
-  Hook->>DB: Update local catch-up status breadcrumbs
-  Hook->>API: Background access check and raw conversation_items
+  Client->>Transcript: Append transcript records
+  Hook-->>Watcher: Content-free wake hint / completion evidence
+  Watcher->>API: Read durable frontier and live cursor
+  API->>DB: Resolve owner-scoped source state
+  Watcher->>Transcript: Compare prefix sentinels and parse bounded complete records
+  Watcher->>API: Capture Policy/Pause check and raw conversation_items
   API->>DB: Persist or reconcile transcript rows idempotently
+  Watcher->>API: Advance independent durable live cursor
+  API->>DB: Compare-and-swap live cursor
   Worker->>DB: Catch up pending raw rows
   Worker->>DB: Read projection_policy_rules
   Worker->>DB: Project sessions, turns, messages, Memory Events

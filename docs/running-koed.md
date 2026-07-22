@@ -4,7 +4,7 @@
 > Only Codex is supported for knowledge capture. More agents to follow!
 
 Koed's server deployment unit is `koed-server` plus dependencies. Internally,
-`koed-server` supervises API, Worker, and Explorer app processes, and connects
+`koed-server` supervises API, Worker, Explorer, and the local Transcript Watcher, and connects
 to the configured Embedding Service. Postgres with pgvector stores Users, API
 Tokens, Memory Events, Memory Nodes, embeddings, and Capture Policies. Redis
 backs BullMQ queues when `WORK_QUEUE_BACKEND=bullmq`; the Postgres-backed local
@@ -46,7 +46,7 @@ node packages/koed-server/dist/cli.js restart --json
 
 `start --daemon --json` starts a detached `koed-server start` supervisor and returns machine-readable startup intent for Desktop and scripts. One live supervisor owns each `KOED_HOME`: startup acquires an atomic lock before allocating automatic ports or starting dependencies, and a concurrent start reuses the live supervisor instead of rewriting `config/local-ports.json`. Stale locks are reclaimed after their owning process exits. Bundled-local cleanup stops native Postgres only when the current startup actually started it, so a failed concurrent or recovery attempt cannot stop another live supervisor's database.
 
-`stop` is idempotent. Missing/stale process IDs are reported in JSON but do not fail the command. After managed services stop, the CLI verifies the runtime PID against the supervisor lock and writes an identity-bound stop request containing the PID and supervisor start time. The matching supervisor consumes that request and exits itself; the stop path never sends signals to a supervisor based only on a recorded PID. Runtime state is removed only when its identity is unchanged. `restart --json` runs the same stop lifecycle, starts a detached `koed-server start` supervisor, and returns machine-readable JSON without streaming startup logs. In bundled-local mode it stops Explorer, Worker, API, native Embedding Service, and native Postgres via `pg_ctl stop -D <dataDir> -m fast`. It does not stop Docker Compose. External dependency mode does not stop Operator-managed Postgres, Redis, or Embedding Service.
+`stop` is idempotent. Missing/stale process IDs are reported in JSON but do not fail the command. After managed services stop, the CLI verifies the runtime PID against the supervisor lock and writes an identity-bound stop request containing the PID and supervisor start time. The matching supervisor consumes that request and exits itself; the stop path never sends signals to a supervisor based only on a recorded PID. Runtime state is removed only when its identity is unchanged. `restart --json` runs the same stop lifecycle, starts a detached `koed-server start` supervisor, and returns machine-readable JSON without streaming startup logs. Stop order is Transcript Watcher, Explorer, Worker, API, then native Embedding Service and native Postgres via `pg_ctl stop -D <dataDir> -m fast` in bundled-local mode. It does not stop Docker Compose. External dependency mode does not stop Operator-managed Postgres, Redis, or Embedding Service.
 
 In a source checkout, the supervisor launches the built API, Worker, and Explorer
 Node entry points directly. Recorded process IDs therefore identify the service
@@ -150,8 +150,9 @@ package rows as an operational workflow.
 
 - `config/` for `server.json`, `local-ports.json`, `explorer-token.json`,
   local Project metadata, and Project-to-Team Workspace mappings
-- `run/` for `koed-server.json`, `last-verification.json`, upstream enrollment
-  orchestration state, and supervisor state
+- `run/` for `koed-server.json`, `last-verification.json`, content-free Transcript Watcher wake state, upstream enrollment orchestration state, and supervisor state
+- `status/` for aggregate diagnostic-only Transcript Watcher status
+- `state/` for content-free Transcript Watcher activation state
 - `logs/` for service logs, including `postgres.log`
 - `data/` for native database files, including `data/postgres`
 - `models/` for embedding and reranker model files
@@ -209,12 +210,17 @@ docker compose --env-file .env -f examples/server-compose/docker-compose.yml exe
 
 Do not point normal AI Client integrations directly at this remote/server API.
 Each User's Codex MCP Server and Supported Capture Hook should normally point at
-that User's local `koed-server` API, usually `http://localhost:3300`. The local
-`koed-server` then registers this server as an upstream and routes approved Team
-Workspace recall, Share Grant, sync/offload, or remote capture-bearing
-operations through local-edge policy. This keeps Personal Memory capture local by
-default and avoids exposing upstream/cloud/device credentials to MCP Server or
-Capture Hook processes.
+that User's local `koed-server` API, usually `http://localhost:3300`; that local
+server also supervises the Transcript Watcher. The watcher is enabled by default
+for developer/local-personal runtime modes. External runtime mode must opt in
+with `MEMORY_CODEX_TRANSCRIPT_WATCHER_ENABLED=true` and provide Personal API
+Token access. Transcript roots default to `CODEX_HOME/sessions` and may be
+replaced with explicit local roots. The local `koed-server` then registers
+this server as an upstream and routes approved Team Workspace recall, Share
+Grant, sync/offload, or remote capture-bearing operations through local-edge
+policy. This keeps watcher capture in Personal Memory and avoids exposing
+upstream/cloud/device credentials to MCP Server, Transcript Watcher, or Capture
+Hook processes.
 
 ### Bundled-local native runtime
 

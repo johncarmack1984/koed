@@ -11,6 +11,8 @@ import type {
   HistoricalImportBatchWriteResult,
   HistoricalImportRunDetail,
   HistoricalImportRunRecord,
+  HistoricalImportSourceIdentity,
+  HistoricalImportSourceObservationInput,
   HistoricalImportSourceRecord,
   HistoricalImportState,
   LiveTranscriptCursorAdvanceInput
@@ -55,6 +57,14 @@ export interface HistoricalImportRepository {
   getHistoricalImportSource(
     actor: ActorContext,
     sourceId: string
+  ): Promise<HistoricalImportSourceRecord | null>;
+  getHistoricalImportSourceByIdentity(
+    actor: ActorContext,
+    identity: HistoricalImportSourceIdentity
+  ): Promise<HistoricalImportSourceRecord | null>;
+  observeHistoricalImportSource(
+    actor: ActorContext,
+    input: HistoricalImportSourceObservationInput
   ): Promise<HistoricalImportSourceRecord | null>;
   listHistoricalImportSourcesNeedingLcmFinalization(): Promise<
     Array<{ sourceId: string; ownerUserId: string; sessionId: string }>
@@ -406,6 +416,56 @@ const getSource = async (
   return result.rows[0] ? mapSource(result.rows[0]) : null;
 };
 
+const getSourceByIdentity = async (
+  pool: pg.Pool,
+  actor: ActorContext,
+  identity: HistoricalImportSourceIdentity
+): Promise<HistoricalImportSourceRecord | null> => {
+  const result = await pool.query<SourceRow>(
+    `select * from historical_import_sources
+     where owner_user_id = $1 and ai_client = $2 and source_kind = $3
+       and source_session_id = $4`,
+    [
+      actor.userId,
+      identity.aiClient,
+      identity.sourceKind,
+      identity.sourceSessionId
+    ]
+  );
+  return result.rows[0] ? mapSource(result.rows[0]) : null;
+};
+
+const observeSource = async (
+  pool: pg.Pool,
+  actor: ActorContext,
+  input: HistoricalImportSourceObservationInput
+): Promise<HistoricalImportSourceRecord | null> => {
+  const result = await pool.query<SourceRow>(
+    `update historical_import_sources
+     set local_source_path = $3,
+         redacted_source_label = $4,
+         source_size_bytes = $5,
+         source_modified_at = $6,
+         last_observed_at = now(),
+         updated_at = now()
+     where id = $2 and owner_user_id = $1
+       and $5 >= greatest(
+         registration_frontier_offset, checkpoint_offset, live_cursor_offset,
+         coalesce(source_size_bytes, 0)
+       )
+     returning *`,
+    [
+      actor.userId,
+      input.sourceId,
+      input.localSourcePath,
+      sourceLabel(input.localSourcePath),
+      input.sourceSizeBytes,
+      input.sourceModifiedAt ?? null
+    ]
+  );
+  return result.rows[0] ? mapSource(result.rows[0]) : null;
+};
+
 const refreshSourceProgress = async (
   pool: pg.Pool,
   ownerUserId: string,
@@ -638,6 +698,11 @@ const validateBatchCheckpoint = (
   ) {
     return "replay";
   }
+  if (input.sourceSizeBytes < (source.sourceSizeBytes ?? 0)) {
+    throw Object.assign(new Error("Historical import checkpoint conflict"), {
+      statusCode: 409
+    });
+  }
   if (
     !["queued", "importing"].includes(source.state) ||
     source.checkpointOffset !== input.expectedCheckpointOffset ||
@@ -848,6 +913,7 @@ const advanceSourceWithClient = async (
        and $4 <= registration_frontier_offset
        and ($4 < registration_frontier_offset or $6 = registration_prefix_hash)
        and $7 >= live_cursor_offset
+       and $7 >= coalesce(source_size_bytes, 0)
        and state in ('queued', 'importing') returning *`,
     [
       actor.userId,
@@ -1075,13 +1141,19 @@ const advanceLiveCursorRecord = (
     ) {
       return source;
     }
+    if (input.sourceSizeBytes < (source.sourceSizeBytes ?? 0)) {
+      throw Object.assign(new Error("Live transcript cursor conflict"), {
+        statusCode: 409
+      });
+    }
     if (
       source.liveCursorOffset !== input.expectedCursorOffset ||
       source.liveCursorHash !== expectedHash ||
       input.cursorOffset <= input.expectedCursorOffset ||
       input.cursorOffset < source.registrationFrontierOffset ||
       input.cursorOffset > input.sourceSizeBytes ||
-      input.sourceSizeBytes < source.checkpointOffset
+      input.sourceSizeBytes < source.checkpointOffset ||
+      input.sourceSizeBytes < (source.sourceSizeBytes ?? 0)
     ) {
       throw Object.assign(new Error("Live transcript cursor conflict"), {
         statusCode: 409
@@ -1096,6 +1168,7 @@ const advanceLiveCursorRecord = (
          and live_cursor_offset = $3
          and live_cursor_hash is not distinct from $8
          and checkpoint_offset <= $7
+         and $7 >= coalesce(source_size_bytes, 0)
        returning *`,
       [
         actor.userId,
@@ -1238,6 +1311,10 @@ export const createHistoricalImportRepository = (
     ingestBatchRecord(pool, actor, input),
   getHistoricalImportSource: (actor, sourceId) =>
     getSource(pool, actor, sourceId),
+  getHistoricalImportSourceByIdentity: (actor, identity) =>
+    getSourceByIdentity(pool, actor, identity),
+  observeHistoricalImportSource: (actor, input) =>
+    observeSource(pool, actor, input),
   listHistoricalImportSourcesNeedingLcmFinalization: () =>
     listSourcesNeedingLcmFinalization(pool)
 });

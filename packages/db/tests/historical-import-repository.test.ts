@@ -228,13 +228,14 @@ describeDb("durable historical import repository", () => {
       email: `import-outsider-${randomUUID()}@example.com`
     });
     const run = await repo.createHistoricalImportRun({ userId: owner.id });
+    const sourceSessionId = `session-${randomUUID()}`;
     const source = await repo.createHistoricalImportSource(
       { userId: owner.id },
       {
         runId: run.id,
         aiClient: "codex",
         sourceKind: "codex",
-        sourceSessionId: `session-${randomUUID()}`,
+        sourceSessionId,
         sourceFingerprint: fingerprint("a"),
         registrationFrontierOffset: 100,
         registrationPrefixHash: "1".repeat(64),
@@ -250,6 +251,27 @@ describeDb("durable historical import repository", () => {
     ).toBeNull();
     expect(
       await repo.getHistoricalImportSource({ userId: outsider.id }, source!.id)
+    ).toBeNull();
+    const identity = {
+      aiClient: "codex",
+      sourceKind: "codex",
+      sourceSessionId
+    };
+    expect(
+      await repo.getHistoricalImportSourceByIdentity(
+        { userId: owner.id },
+        identity
+      )
+    ).toMatchObject({
+      id: source!.id,
+      localSourcePath: source!.localSourcePath,
+      updatedAt: source!.updatedAt
+    });
+    expect(
+      await repo.getHistoricalImportSourceByIdentity(
+        { userId: outsider.id },
+        identity
+      )
     ).toBeNull();
 
     await repo.transitionHistoricalImportSource(
@@ -274,9 +296,9 @@ describeDb("durable historical import repository", () => {
     );
 
     const restarted = createHistoricalImportRepository(pool);
-    const resumed = await restarted.getHistoricalImportSource(
+    const resumed = await restarted.getHistoricalImportSourceByIdentity(
       { userId: owner.id },
-      source!.id
+      identity
     );
     expect(resumed).toMatchObject({
       state: "importing",
@@ -349,7 +371,7 @@ describeDb("durable historical import repository", () => {
         registrationFrontierOffset: 100,
         registrationPrefixHash: prefixHash,
         localSourcePath: "/private/original.jsonl",
-        sourceSizeBytes: 150
+        sourceSizeBytes: 200
       }
     );
     await repo.transitionHistoricalImportSource(
@@ -368,7 +390,7 @@ describeDb("durable historical import repository", () => {
         checkpointOffset: 60,
         checkpointLine: 2,
         checkpointHash: "5".repeat(64),
-        sourceSizeBytes: 150,
+        sourceSizeBytes: 200,
         importedRecordCount: 2
       }
     );
@@ -381,7 +403,7 @@ describeDb("durable historical import repository", () => {
         cursorOffset: 150,
         cursorLine: 5,
         cursorHash: "6".repeat(64),
-        sourceSizeBytes: 150
+        sourceSizeBytes: 200
       }
     );
     const restarted = createHistoricalImportRepository(pool);
@@ -402,6 +424,47 @@ describeDb("durable historical import repository", () => {
           checkpointHash: "5".repeat(64)
         }
       ]
+    });
+    for (const sourceSizeBytes of [59, 99, 149, 175]) {
+      expect(
+        await repo.observeHistoricalImportSource(
+          { userId: owner.id },
+          {
+            sourceId: source!.id,
+            localSourcePath: "/private/stale.jsonl",
+            sourceSizeBytes
+          }
+        )
+      ).toBeNull();
+    }
+    expect(
+      await repo.getHistoricalImportSource({ userId: owner.id }, source!.id)
+    ).toMatchObject({
+      localSourcePath: "/private/original.jsonl",
+      sourceSizeBytes: 200,
+      liveCursorOffset: 150
+    });
+    await expect(
+      repo.advanceHistoricalImportSource(
+        { userId: owner.id },
+        {
+          sourceId: source!.id,
+          expectedCheckpointOffset: 60,
+          expectedCheckpointHash: "5".repeat(64),
+          checkpointOffset: 80,
+          checkpointLine: 3,
+          checkpointHash: "7".repeat(64),
+          sourceSizeBytes: 175,
+          importedRecordCount: 1
+        }
+      )
+    ).rejects.toThrow("conflict");
+    expect(
+      await repo.getHistoricalImportSource({ userId: owner.id }, source!.id)
+    ).toMatchObject({
+      checkpointOffset: 60,
+      sourceSizeBytes: 200,
+      liveCursorOffset: 150
     });
     await expect(
       repo.advanceHistoricalImportSource(
@@ -428,10 +491,16 @@ describeDb("durable historical import repository", () => {
           cursorOffset: 160,
           cursorLine: 6,
           cursorHash: "8".repeat(64),
-          sourceSizeBytes: 90
+          sourceSizeBytes: 175
         }
       )
     ).rejects.toThrow("conflict");
+    expect(
+      await repo.getHistoricalImportSource({ userId: owner.id }, source!.id)
+    ).toMatchObject({
+      sourceSizeBytes: 200,
+      liveCursorOffset: 150
+    });
     expect(
       await repo.createHistoricalImportSource(
         { userId: owner.id },
@@ -840,6 +909,30 @@ describeDb("durable historical import repository", () => {
       repo.ingestHistoricalImportBatch({ userId: owner.id }, batch)
     ]);
     expect([first.replayed, retry.replayed].sort()).toEqual([false, true]);
+    const liveCursor = {
+      sourceId: source!.id,
+      expectedCursorOffset: 100,
+      expectedCursorHash: "e".repeat(64),
+      cursorOffset: 110,
+      cursorLine: 2,
+      cursorHash: "f".repeat(64),
+      sourceSizeBytes: 110
+    };
+    await repo.advanceLiveTranscriptCursor({ userId: owner.id }, liveCursor);
+    await repo.observeHistoricalImportSource(
+      { userId: owner.id },
+      {
+        sourceId: source!.id,
+        localSourcePath: "/Users/private/.codex/sessions/batch.jsonl",
+        sourceSizeBytes: 120
+      }
+    );
+    await expect(
+      repo.advanceLiveTranscriptCursor({ userId: owner.id }, liveCursor)
+    ).resolves.toMatchObject({ liveCursorOffset: 110 });
+    await expect(
+      repo.ingestHistoricalImportBatch({ userId: owner.id }, batch)
+    ).resolves.toMatchObject({ replayed: true });
     const stored = await pool.query<{
       source_path: string | null;
       captured_project: Record<string, unknown>;

@@ -82,10 +82,11 @@ derivations and reprojects retained canonical items under the new policy.
 
 ## Current Codex Adapters
 
-Codex transcript hooks, managed transcript reconciliation, and historical import
-share `sourceAdapterVersion=codex-transcript-v1`. Hook observations set
-`sourceTransport=hook`, managed reconciliation uses `transcript`, and historical
-observations set `historical_import`. Each exact transcript observation creates
+The Codex Transcript Watcher, transcript hooks, managed transcript
+reconciliation, and historical import share
+`sourceAdapterVersion=codex-transcript-v1`. Watcher and managed reconciliation
+observations use `sourceTransport=transcript`, Hook observations set `hook`, and
+historical observations set `historical_import`. Each exact transcript observation creates
 or augments a canonical raw item before selected records are projected into
 `memory_events`. None writes semantic `memory_events` directly. Hook payloads
 are capture signals, not semantic content sources; transcript JSONL timestamps
@@ -105,15 +106,29 @@ path-bound transcript identity, adapters submit the old identity as a bounded
 compatibility alias. Koed may reuse an existing canonical row through that
 alias, but never uses the alias as the identity for a new row.
 
-Hook capture and historical import also converge on the same active Personal
-Captured Session when owning User and source session ID match. Session creation
-is serialized for that owner/source pair, so import-first, Hook-first, and
-concurrent observations do not split later raw items across duplicate sessions.
-The same convergence and live-priority promotion apply to
-`sourceTransport=transcript`, providing the ingestion seam for the continuous
-append-only transcript tailer tracked in KOE-343. This PR does not start or
-operate that watcher; it supplies the shared identity, append-safe parser and
-checkpoint behavior, and canonical Projection path the watcher must reuse.
+Transcript Watcher, Hook capture, reconciliation, and historical import converge
+on the same active Personal Captured Session when owning User and source session
+ID match. Session creation is serialized for that owner/source pair, so
+watcher-first, import-first, Hook-first, and concurrent observations do not split
+later raw items across duplicate sessions. A later live observation promotes
+historical work to live Projection priority without creating another canonical
+item or Memory Event.
+
+The Transcript Watcher is the correctness owner for externally managed transcript
+growth. Filesystem notifications and content-free Hook wake files are hints;
+bounded rescans recover missed notifications and discover new Conversations.
+The first successful bounded full discovery cycle establishes activation; files present in
+that baseline retain their complete-record boundary as an immutable historical
+frontier. Files created after activation use
+a zero frontier and are live from their first complete record. Post-frontier
+ranges, including restart recovery, advance a durable live cursor independent
+of historical imported ranges and checkpoints. Before each page, Koed compares
+cursor offset with bounded SHA-256 first/last prefix sentinels. Partial trailing
+JSONL holds the cursor; malformed complete records, truncation, and
+sentinel-covered prefix mutation fail visibly without advancement. Mutations
+outside sentinel windows are intentionally not detected by this bounded check. Capture Policy and Capture Pause are checked before session
+creation and every raw batch. Watcher writes are Personal Memory only and grant
+no Team or Workspace authority.
 
 The experimental Koed-managed conversation adapter uses
 `sourceAdapterVersion=codex-app-server-conversation-v1` and
@@ -184,7 +199,7 @@ memory without relying on client-supplied Projection state.
 
 Capture Policy is enforced again at canonical raw persistence, including an
 active Capture Pause after a Captured Session was created. This is the common
-defence for hook, managed, and internal-workflow transports; API metadata cannot
+defence for watcher, hook, managed, and internal-workflow transports; API metadata cannot
 bypass it.
 
 ## Derived Memory Events
@@ -271,7 +286,7 @@ and invalidating an old leaf creates a new dispatch generation.
 ## Work Classes And Historical Backpressure
 
 Koed assigns work to four ordered classes: interactive Recall/Memory Questions,
-live Capture Hook Projection, normal embedding/LCM work, and historical
+live Capture Projection, normal embedding/LCM work, and historical
 import/backfill. Lower numeric priority wins. FIFO is only the current
 within-class tie-breaker for both queue backends, not a final semantic ordering
 guarantee. A registered source classifies complete records before its immutable
@@ -332,16 +347,17 @@ content, source paths, queries, credentials, or raw payloads.
 Durable `historical_import_runs` and `historical_import_sources` records own
 state transitions, bounded counters, retry/failure data, source ranges, and
 lifecycle timestamps. Registration immutably records source fingerprint,
-source-session identity, complete-record frontier offset, and prefix hash. New
+source-session identity, complete-record frontier offset, and bounded prefix
+sentinel hash. New
 source registration is serialized with run transitions and is accepted only
 while the run is `discovered`, `eligible`, `queued`, `importing`, or `paused`.
 Terminal `completed`, `failed`, and `skipped` runs cannot gain stranded sources;
 an immutable source may be observed at a moved path after its failed run is
 explicitly retried into `queued`. Historical imported ranges/checkpoint and
-live-tail/recovery cursor are separate
+Transcript Watcher live cursor are separate
 transactional streams; neither can advance, rewind, or overwrite the other.
-Source growth is accepted, while truncation, rotation/prefix mutation, and stale
-submissions fail visibly without changing either stream. Source records
+Source growth is accepted, while truncation, rotation, sentinel-covered prefix
+mutation, and stale submissions fail visibly without changing either stream. Source records
 keep raw source paths and path-like detected Project fields only inside local
 Postgres state. Status and canonical raw/Captured Session provenance use only a
 basename-style redacted label, stable fingerprint, and path-free detected

@@ -61,12 +61,25 @@ Historical-import events include only admission state/reason and aggregate
 raw-ingested, projected, embedding-eligible, embedded, semantic-ready,
 LCM-complete, pending, scanned, and byte counters. Source status also exposes
 registration frontier plus independent historical/live cursor offsets and
-prefix hashes, never transcript records. `/ops/status` reports matching
+bounded prefix sentinel hashes, never transcript records. `/ops/status` reports matching
 `historicalImport` counters with `diagnosticOnly: true`. Historical backlog,
 missing historical telemetry, or a paused historical batch must not change
-`/ready` or readiness state. Logs, status, and metrics must not include
-transcript content, raw payloads, source paths, Memory Question text, API
-Tokens, or local filesystem paths.
+`/ready` or readiness state.
+
+Transcript Watcher writes a local aggregate status snapshot under
+`KOED_HOME/status` containing lifecycle state and timestamps plus scan, file,
+source, batch, record, and advanced-byte counters and one sanitized error code.
+`koed-server status --json` and `doctor --json` separately report only whether
+the watcher is enabled and whether its supervised process is recorded/running.
+Watcher status is diagnostic-only: disabled, missing, stale, or failed watcher
+status never changes API `/ready`, overall readiness, or doctor success. Hook
+wake hints contain only a timestamp and are not evidence of ingestion success.
+
+Logs, status, metrics, wake hints, and support output must not include transcript
+content, Memory content, raw payloads, transcript or local source paths, API
+Tokens, credential values, Memory Question text, or request payloads. Watcher
+failures log only bounded error codes; path and record details remain local data,
+not operational telemetry.
 
 Use the database `audit_events` table for durable operator/audit history such
 as token lifecycle changes, login outcomes, policy changes, and destructive

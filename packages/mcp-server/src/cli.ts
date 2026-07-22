@@ -44,6 +44,7 @@ import {
 import { generatePendingSessionTitles } from "./session-title-worker.js";
 import { startCuratedMemoryReviewService } from "./curated-memory-review-service.js";
 import { resolveCuratedMemoryReviewConfig } from "./curated-memory-review-worker.js";
+import { startCodexTranscriptWatcher } from "./codex-transcript-watcher.js";
 import {
   answerMarkdownFromAnswer,
   citationsFromAnswer,
@@ -277,6 +278,18 @@ if (command === "doctor") {
     );
     process.exit(1);
   }
+}
+
+if (command === "watch-codex-transcripts") {
+  const watcher = startCodexTranscriptWatcher(client);
+  const stop = async () => {
+    await watcher.stop();
+    process.exit(0);
+  };
+  process.once("SIGINT", () => void stop());
+  process.once("SIGTERM", () => void stop());
+  logger.info("Codex Transcript Watcher started");
+  await new Promise(() => undefined);
 }
 
 if (command === "process-local-memory") {

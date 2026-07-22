@@ -27,6 +27,7 @@ import {
   type RawConversationItemRequest
 } from "./conversation-source-types.js";
 import { codexCanonicalConversationItemKey } from "./codex-conversation-source-adapter.js";
+import { signalCodexTranscriptWatcher } from "./codex-transcript-watcher-signal.js";
 
 export interface HookPayload {
   session_id?: string;
@@ -1470,7 +1471,8 @@ const parseTranscriptRecordsText = (text: string): unknown[] => {
 const parseTranscriptLineRecords = (
   lines: string[],
   absoluteStartOffset: number,
-  lineIndexOffset = 0
+  lineIndexOffset = 0,
+  strictJsonLines = false
 ): unknown[] => {
   const records: unknown[] = [];
   let relativeOffset = 0;
@@ -1502,6 +1504,11 @@ const parseTranscriptLineRecords = (
         );
       }
     } catch {
+      if (strictJsonLines) {
+        throw new Error(
+          `Codex transcript contains malformed complete JSONL record at line ${absoluteLineIndex + 1}`
+        );
+      }
       continue;
     }
   }
@@ -1724,6 +1731,8 @@ export const parseTranscriptFileRecords = (input: {
   firstContactAfter?: string;
   readThroughOffset?: number;
   deferPageEndingAssistantEvent?: boolean;
+  strictJsonLines?: boolean;
+  strictMaxBytes?: boolean;
 }): {
   records: unknown[];
   indexOffset: number;
@@ -1806,6 +1815,9 @@ export const parseTranscriptFileRecords = (input: {
       break;
     }
     const attemptedBytes = end - start;
+    if (input.strictMaxBytes) {
+      throw new Error("transcript_batch_record_exceeds_max_bytes");
+    }
     if (attemptedBytes >= maxTranscriptRecordBytes()) {
       throw new Error(
         `Codex transcript record exceeds MEMORY_TRANSCRIPT_MAX_RECORD_BYTES (${maxTranscriptRecordBytes()})`
@@ -1816,7 +1828,12 @@ export const parseTranscriptFileRecords = (input: {
       start + Math.min(maxTranscriptRecordBytes(), attemptedBytes * 2)
     );
   }
-  const parsedRecords = parseTranscriptLineRecords(lines, start, indexOffset);
+  const parsedRecords = parseTranscriptLineRecords(
+    lines,
+    start,
+    indexOffset,
+    input.strictJsonLines
+  );
   const firstContactAfterMs =
     !hasUsableCheckpoint && input.firstContactAfter
       ? Date.parse(input.firstContactAfter)
@@ -3773,6 +3790,7 @@ export const runForegroundCapturePass = (input: {
   payload: HookPayload;
   runPass?: typeof runCapturePass;
   triggerCatchup?: typeof triggerDetachedTranscriptCatchup;
+  signalWatcher?: typeof signalCodexTranscriptWatcher;
   environment?: NodeJS.ProcessEnv;
 }): Promise<Awaited<ReturnType<typeof runCapturePass>>> => {
   if (managedConversationCaptureGuardActive(input.environment)) {
@@ -3794,6 +3812,10 @@ export const runForegroundCapturePass = (input: {
       transcriptCheckpointAdvanced: false
     });
   }
+  const signalWatcher =
+    input.signalWatcher ??
+    (input.runPass ? undefined : signalCodexTranscriptWatcher);
+  signalWatcher?.(input.environment);
   if (!hookTriggersTranscriptCatchup()) {
     return (input.runPass ?? runCapturePass)({
       configPath,

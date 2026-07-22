@@ -2576,9 +2576,19 @@ const createFakeRepository = () => {
     },
     async advanceLiveTranscriptCursor(actor, input) {
       const source = historicalImportSources.get(input.sourceId);
+      if (!source || source.ownerUserId !== actor.userId) {
+        throw Object.assign(new Error("Historical import source not found"), {
+          statusCode: 404
+        });
+      }
       if (
-        !source ||
-        source.ownerUserId !== actor.userId ||
+        source.liveCursorOffset === input.cursorOffset &&
+        source.liveCursorLine === input.cursorLine &&
+        source.liveCursorHash === input.cursorHash
+      ) {
+        return source;
+      }
+      if (
         source.liveCursorOffset !== input.expectedCursorOffset ||
         source.liveCursorHash !== (input.expectedCursorHash ?? null)
       ) {
@@ -2664,6 +2674,30 @@ const createFakeRepository = () => {
     async getHistoricalImportSource(actor, sourceId) {
       const source = historicalImportSources.get(sourceId);
       return source?.ownerUserId === actor.userId ? source : null;
+    },
+    async getHistoricalImportSourceByIdentity(actor, identity) {
+      return (
+        [...historicalImportSources.values()].find(
+          (source) =>
+            source.ownerUserId === actor.userId &&
+            source.aiClient === identity.aiClient &&
+            source.sourceKind === identity.sourceKind &&
+            source.sourceSessionId === identity.sourceSessionId
+        ) ?? null
+      );
+    },
+    async observeHistoricalImportSource(actor, input) {
+      const source = historicalImportSources.get(input.sourceId);
+      if (!source || source.ownerUserId !== actor.userId) return null;
+      source.localSourcePath = input.localSourcePath;
+      source.redactedSourceLabel = `…/${input.localSourcePath
+        .split("/")
+        .filter(Boolean)
+        .at(-1)}`;
+      source.sourceSizeBytes = input.sourceSizeBytes;
+      source.sourceModifiedAt =
+        input.sourceModifiedAt ?? source.sourceModifiedAt;
+      return source;
     },
     async createCapturedSession(actor: ActorContext, input) {
       const id = randomUUID();
@@ -10870,14 +10904,50 @@ describe("account and access flows", () => {
         localSourcePath: "/Users/alice/.codex/sessions/private.jsonl",
         sourceSizeBytes: 100,
         detectedProject: {
+          projectId: "project-history",
           name: "Koed",
-          path: "/Users/alice/private/koed",
           branch: "main"
         }
       }
     });
     const sourceId = jsonBody<{ source: { id: string } }>(sourceResponse).source
       .id;
+    const lookupUrl =
+      "/v1/historical-import-sources/lookup?aiClient=codex&sourceKind=codex&sourceSessionId=historical-session";
+    const lookup = await app.inject({
+      method: "GET",
+      url: lookupUrl,
+      headers: ownerHeaders
+    });
+    const strictLookup = await app.inject({
+      method: "GET",
+      url: `${lookupUrl}&unexpected=true`,
+      headers: ownerHeaders
+    });
+    const unauthenticatedLookup = await app.inject({
+      method: "GET",
+      url: lookupUrl
+    });
+    expect(lookup.statusCode).toBe(200);
+    expect(lookup.body).not.toContain("/Users/alice");
+    expect(
+      jsonBody<{
+        source: {
+          id: string;
+          sourceLabel: string;
+          detectedProject: { projectId: string };
+        };
+      }>(lookup)
+    ).toMatchObject({
+      source: {
+        id: sourceId,
+        sourceLabel: "…/private.jsonl",
+        detectedProject: { projectId: "project-history" }
+      }
+    });
+    expect(strictLookup.statusCode).toBe(400);
+    expect(unauthenticatedLookup.statusCode).toBe(401);
+
     const bypass = await app.inject({
       method: "POST",
       url: "/v1/memory/conversation-items",
@@ -10918,7 +10988,11 @@ describe("account and access flows", () => {
         fullyEmbedded: true,
         semanticReady: false,
         lcmComplete: true,
-        detectedProject: { name: "Koed", branch: "main" }
+        detectedProject: {
+          projectId: "project-history",
+          name: "Koed",
+          branch: "main"
+        }
       })
     ]);
 
@@ -10930,12 +11004,19 @@ describe("account and access flows", () => {
         password: "password123"
       }
     });
+    const outsiderHeaders = { cookie: cookieHeader(outsider) };
     const outsiderRead = await app.inject({
       method: "GET",
       url: `/v1/historical-imports/${runId}`,
-      headers: { cookie: cookieHeader(outsider) }
+      headers: outsiderHeaders
+    });
+    const outsiderLookup = await app.inject({
+      method: "GET",
+      url: lookupUrl,
+      headers: outsiderHeaders
     });
     expect(outsiderRead.statusCode).toBe(404);
+    expect(outsiderLookup.statusCode).toBe(404);
 
     for (const [expectedState, state] of [
       ["discovered", "eligible"],
@@ -10961,7 +11042,8 @@ describe("account and access flows", () => {
       url: "/v1/capture-policies",
       headers: ownerHeaders,
       payload: {
-        targetType: "global",
+        targetType: "project",
+        projectId: "project-history",
         captureState: "disabled",
         visibility: "personal"
       }
@@ -11051,7 +11133,8 @@ describe("account and access flows", () => {
       url: "/v1/capture-policies",
       headers: ownerHeaders,
       payload: {
-        targetType: "global",
+        targetType: "project",
+        projectId: "project-history",
         captureState: "enabled",
         visibility: "personal",
         pauseUntil: null
@@ -11097,6 +11180,51 @@ describe("account and access flows", () => {
         failureReason: "/Users/alice/private.jsonl"
       }
     });
+    const liveCursorPayload = {
+      expectedCursorOffset: 100,
+      expectedCursorHash: "f".repeat(64),
+      cursorOffset: 120,
+      cursorLine: 2,
+      cursorHash: "e".repeat(64),
+      sourceSizeBytes: 120
+    };
+    const liveCursorUrl = `/v1/historical-import-sources/${sourceId}/live-cursor`;
+    const advancedLiveCursor = await app.inject({
+      method: "POST",
+      url: liveCursorUrl,
+      headers: ownerHeaders,
+      payload: liveCursorPayload
+    });
+    const retriedLiveCursor = await app.inject({
+      method: "POST",
+      url: liveCursorUrl,
+      headers: ownerHeaders,
+      payload: liveCursorPayload
+    });
+    const staleLiveCursor = await app.inject({
+      method: "POST",
+      url: liveCursorUrl,
+      headers: ownerHeaders,
+      payload: { ...liveCursorPayload, cursorOffset: 130, sourceSizeBytes: 130 }
+    });
+    const outsiderLiveCursor = await app.inject({
+      method: "POST",
+      url: liveCursorUrl,
+      headers: outsiderHeaders,
+      payload: {
+        ...liveCursorPayload,
+        expectedCursorOffset: 120,
+        expectedCursorHash: "e".repeat(64),
+        cursorOffset: 130,
+        sourceSizeBytes: 130
+      }
+    });
+    const invalidLiveCursor = await app.inject({
+      method: "POST",
+      url: liveCursorUrl,
+      headers: ownerHeaders,
+      payload: { ...liveCursorPayload, unexpected: true }
+    });
     await app.close();
 
     expect(parserBypass.statusCode).toBe(400);
@@ -11126,6 +11254,12 @@ describe("account and access flows", () => {
     expect(replayed.statusCode).toBe(200);
     expect(mutatedReplay.statusCode).toBe(409);
     expect(unsafeFailure.statusCode).toBe(400);
+    expect(advancedLiveCursor.statusCode).toBe(200);
+    expect(advancedLiveCursor.body).not.toContain("/Users/alice");
+    expect(retriedLiveCursor.statusCode).toBe(200);
+    expect(staleLiveCursor.statusCode).toBe(409);
+    expect(outsiderLiveCursor.statusCode).toBe(404);
+    expect(invalidLiveCursor.statusCode).toBe(400);
     expect(unsafeFailure.body).not.toContain("/Users/alice");
     expect(
       jsonBody<{
@@ -11163,6 +11297,23 @@ describe("account and access flows", () => {
       url: "/v1/historical-imports",
       headers
     });
+    const lookup = await app.inject({
+      method: "GET",
+      url: "/v1/historical-import-sources/lookup?aiClient=codex&sourceKind=codex&sourceSessionId=remote-session",
+      headers
+    });
+    const liveCursor = await app.inject({
+      method: "POST",
+      url: "/v1/historical-import-sources/11111111-1111-4111-8111-111111111111/live-cursor",
+      headers,
+      payload: {
+        expectedCursorOffset: 0,
+        cursorOffset: 1,
+        cursorLine: 1,
+        cursorHash: "a".repeat(64),
+        sourceSizeBytes: 1
+      }
+    });
     const rawPath = await app.inject({
       method: "POST",
       url: "/v1/memory/conversation-items",
@@ -11186,6 +11337,8 @@ describe("account and access flows", () => {
     await app.close();
 
     expect(control.statusCode).toBe(404);
+    expect(lookup.statusCode).toBe(404);
+    expect(liveCursor.statusCode).toBe(404);
     expect(rawPath.statusCode).toBe(400);
     expect(rawPath.body).not.toContain("/Users/alice");
   });

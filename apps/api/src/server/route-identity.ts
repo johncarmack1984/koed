@@ -382,6 +382,26 @@ export const routeIdentityContracts = [
     localEdgeDeploymentModes
   ),
   route(
+    "GET",
+    "/v1/historical-import-sources/lookup",
+    "session_or_api_token",
+    "capture",
+    "Look up owner-scoped redacted historical source state by canonical identity.",
+    "none",
+    "implemented",
+    localEdgeDeploymentModes
+  ),
+  route(
+    "PATCH",
+    "/v1/historical-import-sources/{sourceId}/observation",
+    "session_or_api_token",
+    "capture",
+    "Refresh verified owner-scoped local source observation without changing historical state.",
+    "none",
+    "implemented",
+    localEdgeDeploymentModes
+  ),
+  route(
     "PATCH",
     "/v1/historical-import-sources/{sourceId}",
     "session_or_api_token",
