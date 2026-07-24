@@ -1,0 +1,340 @@
+{
+  "fixtureVersion": 3,
+  "notice": "Non-production deterministic PDS V1 fixture. Every private value is fixed test material only.",
+  "protocol": "koed/pds/v1",
+  "references": {
+    "jcs": "RFC 8785 via json-canonicalize@2.0.0",
+    "ed25519": "RFC 8032 test vectors 1 and 2 key material",
+    "x25519": "RFC 7748 section 6.1 Alice/Bob vector",
+    "hkdf": "RFC 5869 HKDF-SHA-256 construction",
+    "aesGcm": "NIST SP 800-38D AES-256-GCM"
+  },
+  "jcsSigning": {
+    "sourceManifest": {
+      "domain": "koed/pds/v1/source-manifest\n",
+      "canonicalPayloadUtf8": "{\"closedSession\":{\"captureMethod\":\"supported_capture_hook\",\"closed\":true,\"observedClosedAt\":\"2026-07-15T00:00:02.000Z\",\"sourceAdapter\":\"codex\",\"sourceAdapterVersion\":\"1\",\"sourceClosedAt\":\"2026-07-15T00:00:01.000Z\",\"sourceCreatedAt\":\"2026-07-15T00:00:00.000Z\"},\"contentEpoch\":\"3\",\"deletionFloorToken\":\"5vaQmlye8E4OsU61njLXRK94sOm_yC26uueiGQHZu2M\",\"logicalMemoryId\":\"6A-UBrkDyCYgd7QLVHFg8GKDw1OwvEMw73b5qU7-1BY\",\"originDeploymentId\":\"deployment-alice\",\"originDeviceId\":\"device-alice\",\"originSignature\":{\"signature\":\"pptJVAGp2ha9ukCUBRBbbMSsyNnd6wnAlQtps6glwujqf6jpoKis_G_8m_p6hvTuKJnV5hwoSHtC9_6EJQzfCw\",\"signerKeyId\":\"device-fixture-signing\"},\"packageId\":\"4PlDjEoJxpZI-RMuvq_wK94HzDX58SbJxUjrpRGx2Pg\",\"projectAliasManifest\":{\"epoch\":\"3\",\"tokens\":[\"flV7fh_IMZUsqQig6k74gf2omzO5sZUlc67G_hTU7wo\"],\"version\":\"1\"},\"protocol\":\"koed/pds/v1\",\"rawClosure\":{\"rawByteCount\":\"12\",\"recordCount\":\"1\",\"records\":[{\"observedAt\":\"2026-07-15T00:00:01.000Z\",\"ordinal\":\"0\",\"payload\":\"SGVsbG8sIFBEUyEK\",\"payloadHash\":\"dtKRZEwhd_sF8NMbGqeu5fEDJfQvsU8x7OCzHldJsqg\",\"sourceNativeItemId\":\"item-1\",\"sourceTimestamp\":\"2026-07-15T00:00:00.000Z\"}]},\"sourceClosureHash\":\"3N3hukQUH6UF05_Ne770dI-NZRXjh7rXKtvb861ATa8\",\"sourceFingerprint\":\"ddDVvDeEXrlPT81rZXeCF_Z3AMTgZyq5_dp0EucIMss\",\"sourceNativeSessionId\":\"codex-thread-42\",\"sourceSequence\":\"7\",\"sourceType\":\"captured_session\",\"terminal\":{\"cursor\":\"1\",\"itemCount\":\"1\"}}",
+      "packageIdPreimageUtf8": "{\"closedSession\":{\"captureMethod\":\"supported_capture_hook\",\"closed\":true,\"observedClosedAt\":\"2026-07-15T00:00:02.000Z\",\"sourceAdapter\":\"codex\",\"sourceAdapterVersion\":\"1\",\"sourceClosedAt\":\"2026-07-15T00:00:01.000Z\",\"sourceCreatedAt\":\"2026-07-15T00:00:00.000Z\"},\"contentEpoch\":\"3\",\"deletionFloorToken\":\"5vaQmlye8E4OsU61njLXRK94sOm_yC26uueiGQHZu2M\",\"logicalMemoryId\":\"6A-UBrkDyCYgd7QLVHFg8GKDw1OwvEMw73b5qU7-1BY\",\"originDeploymentId\":\"deployment-alice\",\"originDeviceId\":\"device-alice\",\"projectAliasManifest\":{\"epoch\":\"3\",\"tokens\":[\"flV7fh_IMZUsqQig6k74gf2omzO5sZUlc67G_hTU7wo\"],\"version\":\"1\"},\"protocol\":\"koed/pds/v1\",\"rawClosure\":{\"rawByteCount\":\"12\",\"recordCount\":\"1\",\"records\":[{\"observedAt\":\"2026-07-15T00:00:01.000Z\",\"ordinal\":\"0\",\"payload\":\"SGVsbG8sIFBEUyEK\",\"payloadHash\":\"dtKRZEwhd_sF8NMbGqeu5fEDJfQvsU8x7OCzHldJsqg\",\"sourceNativeItemId\":\"item-1\",\"sourceTimestamp\":\"2026-07-15T00:00:00.000Z\"}]},\"sourceClosureHash\":\"3N3hukQUH6UF05_Ne770dI-NZRXjh7rXKtvb861ATa8\",\"sourceFingerprint\":\"ddDVvDeEXrlPT81rZXeCF_Z3AMTgZyq5_dp0EucIMss\",\"sourceNativeSessionId\":\"codex-thread-42\",\"sourceSequence\":\"7\",\"sourceType\":\"captured_session\",\"terminal\":{\"cursor\":\"1\",\"itemCount\":\"1\"}}",
+      "packageId": "4PlDjEoJxpZI-RMuvq_wK94HzDX58SbJxUjrpRGx2Pg",
+      "manifestHash": "K5nO4hYutNdL_6JQZ1kbRClpTaGyIUEcwVwS2xzcWzA",
+      "sourceClosureHash": "3N3hukQUH6UF05_Ne770dI-NZRXjh7rXKtvb861ATa8",
+      "ed25519": {
+        "seedHex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "publicKeyHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "rfc8032EmptyMessageSignatureHex": "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+      }
+    }
+  },
+  "signedRecords": {
+    "sourceManifest": {
+      "canonicalPayloadUtf8": "{\"closedSession\":{\"captureMethod\":\"supported_capture_hook\",\"closed\":true,\"observedClosedAt\":\"2026-07-15T00:00:02.000Z\",\"sourceAdapter\":\"codex\",\"sourceAdapterVersion\":\"1\",\"sourceClosedAt\":\"2026-07-15T00:00:01.000Z\",\"sourceCreatedAt\":\"2026-07-15T00:00:00.000Z\"},\"contentEpoch\":\"3\",\"deletionFloorToken\":\"5vaQmlye8E4OsU61njLXRK94sOm_yC26uueiGQHZu2M\",\"logicalMemoryId\":\"6A-UBrkDyCYgd7QLVHFg8GKDw1OwvEMw73b5qU7-1BY\",\"originDeploymentId\":\"deployment-alice\",\"originDeviceId\":\"device-alice\",\"originSignature\":{\"signature\":\"pptJVAGp2ha9ukCUBRBbbMSsyNnd6wnAlQtps6glwujqf6jpoKis_G_8m_p6hvTuKJnV5hwoSHtC9_6EJQzfCw\",\"signerKeyId\":\"device-fixture-signing\"},\"packageId\":\"4PlDjEoJxpZI-RMuvq_wK94HzDX58SbJxUjrpRGx2Pg\",\"projectAliasManifest\":{\"epoch\":\"3\",\"tokens\":[\"flV7fh_IMZUsqQig6k74gf2omzO5sZUlc67G_hTU7wo\"],\"version\":\"1\"},\"protocol\":\"koed/pds/v1\",\"rawClosure\":{\"rawByteCount\":\"12\",\"recordCount\":\"1\",\"records\":[{\"observedAt\":\"2026-07-15T00:00:01.000Z\",\"ordinal\":\"0\",\"payload\":\"SGVsbG8sIFBEUyEK\",\"payloadHash\":\"dtKRZEwhd_sF8NMbGqeu5fEDJfQvsU8x7OCzHldJsqg\",\"sourceNativeItemId\":\"item-1\",\"sourceTimestamp\":\"2026-07-15T00:00:00.000Z\"}]},\"sourceClosureHash\":\"3N3hukQUH6UF05_Ne770dI-NZRXjh7rXKtvb861ATa8\",\"sourceFingerprint\":\"ddDVvDeEXrlPT81rZXeCF_Z3AMTgZyq5_dp0EucIMss\",\"sourceNativeSessionId\":\"codex-thread-42\",\"sourceSequence\":\"7\",\"sourceType\":\"captured_session\",\"terminal\":{\"cursor\":\"1\",\"itemCount\":\"1\"}}",
+      "recordHash": "mA4sNk7uBGTuLrlPVtZK0VFiNgvFIR7DDZrZWo8yUR0",
+      "plans": [
+        {
+          "domain": "koed/pds/v1/source-manifest\n",
+          "wrapper": "originSignature",
+          "removeFields": ["originSignature"],
+          "publicKeyHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+        }
+      ]
+    },
+    "groupStatement": {
+      "canonicalPayloadUtf8": "{\"authority\":{\"keyId\":\"authority-fixture\",\"signature\":\"mz54b9KbgPI8t_fbRclb-h2hXmGpDrIKxX2HJB9I-qBqih_CzR_7TSlsEjJ_E54KhNepDCUS8NlikghB-wFFDg\"},\"authorization\":{\"signature\":\"rsqoQSaThrIsJiX0DRsult3AegGdK-Unx_8aT2SibnTsaJZQQzcS-toX1PhC3AMO_MAVMKHKQZYs5zuyIJTOBA\",\"signerKeyId\":\"device-initial-signing\"},\"draft\":{\"body\":{\"authorityKeyId\":\"authority-fixture\",\"authorityPublicKey\":\"PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw\",\"initialDeviceId\":\"device-initial\",\"initialDeviceKemKeyId\":\"device-initial-kem\",\"initialDeviceKemPublicKey\":\"gxOG16p5m6_8C3JrYj3BwfgGYZzj6b9v1mNo_I5LiVI\",\"initialDeviceSigningKeyId\":\"device-initial-signing\",\"initialDeviceSigningPublicKey\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\",\"initialEpoch\":\"1\",\"initialKeyCommitment\":\"6YIw60mYYi4Sdlj_g1ktImwNatfRhpEcyfnCGs7DMMU\",\"operationFamilies\":[\"pds_relay\"],\"recoveryKemKeyId\":\"recovery-fixture-kem\",\"recoveryKemPublicKey\":\"f-z4XSfx8qv1A4UeXmwbDvecZXz40jYRuCoeSM5iRzU\",\"recoveryKitHash\":\"__________________________________________8\",\"recoveryKitVerified\":true,\"recoverySigningKeyId\":\"recovery-signing-fixture\",\"recoverySigningPublicKey\":\"6xEKLv-cig7akNj0cZGJzw7WrtzEu0hjLzQ_k-rMTLg\"},\"groupId\":\"group-fixture-01\",\"kind\":\"genesis\",\"previousHash\":null,\"protocol\":\"koed/pds/v1\",\"sequence\":\"1\"}}",
+      "recordHash": "VK2A2eVwzCTVZnCu0slwERpg4Vw7hvgemICIFaHpk54",
+      "plans": [
+        {
+          "domain": "koed/pds/v1/group-statement/draft\n",
+          "wrapper": "authorization",
+          "publicKeyHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+          "removeFields": ["authorization", "authority"]
+        },
+        {
+          "domain": "koed/pds/v1/group-statement/final\n",
+          "wrapper": "authority",
+          "publicKeyHex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+          "removeFields": ["authority"]
+        }
+      ]
+    },
+    "membershipCertificate": {
+      "canonicalPayloadUtf8": "{\"authoritySignature\":{\"keyId\":\"authority-fixture\",\"signature\":\"zciEfvuwQIf-qaz3R-SfEefXqLGLwbwiyLEtjj-tYL4eZqZcUItlTXqSQx59xIT1BsE4nUNF7_xoP4mVGjmECQ\"},\"deviceId\":\"device-second\",\"deviceKemKeyId\":\"device-second-kem\",\"deviceKemPublicKey\":\"dzb6eoGfRWwtQblfRuVCbKZCmuTpkXfQ50yP0mZj9w4\",\"deviceSigningKeyId\":\"device-second-signing\",\"deviceSigningPublicKey\":\"W1OZx41V57Jew9teyyRSSzH5VkiJ095iTZM4kqPQzto\",\"epoch\":\"2\",\"expiresAt\":\"2026-07-15T00:05:00.000Z\",\"groupId\":\"group-fixture-01\",\"issuedAt\":\"2026-07-15T00:00:00.000Z\",\"operationFamilies\":[\"pds_relay\"],\"protocol\":\"koed/pds/v1\",\"statementHash\":\"fGSYCNVf4FUxIatSPpb4WhhgUVXikCDlbtTN4JAx-3o\",\"statementSequence\":\"2\"}",
+      "recordHash": "xrkM3I13iBQxbGwmmgpPz-OgP2mrle9da7dRwZzztOg",
+      "plans": [
+        {
+          "domain": "koed/pds/v1/membership-certificate\n",
+          "wrapper": "authoritySignature",
+          "publicKeyHex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+          "removeFields": ["authoritySignature"]
+        }
+      ]
+    },
+    "keyBundle": {
+      "canonicalPayloadUtf8": "{\"authority\":{\"keyId\":\"authority-fixture\",\"signature\":\"-_cjZZsdLpz1Q_3e3tFxqKP9KWVRFLBz-GvVMJ3h5miI6wT02GazJq9JiHFktWL7HEEL61-_zHnxvPc0L2jcCg\"},\"authorization\":{\"signature\":\"bp8C3yjqa0z1OY7pyy82d0yK6JWY693NulTyfxEz-XhnWMy2o76Hv74cjLqN1DuLuOPVdMw91IUgD5U8UX62BA\",\"signerKeyId\":\"device-initial-signing\"},\"draft\":{\"envelopes\":[{\"ciphertext\":\"Ih_ELfx0pb-aMwlQrQZ3QvXNAWxrI36mzM1QUpf1LgIWRcR72CTv2xlheXeJIh7B4KHXtugIvnWz8SNzBkaBxn24jplB1paVar_xTMc0Uh8poxt3XmHfspaQjHEJjJBjdT_XiUeGD2pZfskQmaRNUTi-Ztg-UxrqVMYsKKxmScGo07f5QXQKtDNZ4wEu5VA7lNCTvR1hsCjmcGb9rAgfYuD9gCWc2BPlSefzvdLFdKt8DlWeLEKBzYLYczASiG9fHJ67aJ0x2I0sp0-Yr8524beqdRVqdN6kgUxNehiBurAhzSRjzlVB3VYJvwigAANp1MqOLv0-cI3gcm5iENTh7d8oq0o\",\"envelopeContext\":\"koed/pds/v1/key-bundle-envelope\",\"ephemeralPublicKey\":\"OiJojaOzXJocL4cerKaK-XfpO3U4CV4lGzYqiKhIX0g\",\"nonce\":\"gJs8ew0BrWnKqI4v\",\"recipientId\":\"device-initial\",\"recipientKemKeyId\":\"device-initial-kem\",\"recipientKind\":\"device\",\"tag\":\"pBZgc9yBWQ2Klx-hWXQI8g\"},{\"ciphertext\":\"OhnH2UlywCWwoO3wAqvwsaqz5ekAh_MMS8UKbcfLJsSaaLRdQohh7wtQABdDYONrDMMX-kBGnAwLqRLrw-V8q9483BePhQ6Hu7qINeqnCIN8GG1Oa0m21-v2VpcVwwcvtS2c-ijmSHHEMBNL-Hnp1hbtGoZyPW9lxj90Qlb1-HZYMHRAJvPWWQow8GnnmA8Nz4DiUsV4-uzzrm7osxA0ZszQoNq19N1vAwLbbnawUpJUqUi8plWEKEBOMjpjvmpaRQwGBPkhDwipJj3G8H-fTU_q2Ehfn5J0xhruQpb9LH0Zj1YIto8BNDUb9oQpR5jPkR_ZaQ9bwADiN7GONZYNqPRcTJY\",\"envelopeContext\":\"koed/pds/v1/key-bundle-envelope\",\"ephemeralPublicKey\":\"dbwC2cs1I-I9yl6GvF93wSi8Ta1ag5hjNtKD4OtERW4\",\"nonce\":\"lBZ3Cq55lBSP62H6\",\"recipientId\":\"device-second\",\"recipientKemKeyId\":\"device-second-kem\",\"recipientKind\":\"device\",\"tag\":\"73HXeY5ruyrV1fx_VgzF4A\"},{\"ciphertext\":\"-Ym596R-rxL75WESi9RhqCAYXLJlghZjYXjdawQoybX2ZNE3kzR3nq-tj56SBJqViFF5qtfHbD-Zt0TkMJGV9eoGE5de-gmc1G85U2ZH_rXu_ZB17Z6dInLwhqXCIvvQoXQS6st8LnNEu5V_7nYvMzSAvrPKiq_T9lDbPelfFmaOqRnc6fbIOTdVqpRvN7N1I_MrPymOlAyTfvpR3MmHNiFwkJKSlms8sEfchB_coEt8GTUlZMl4-hitiWJgIGJPXZQjAeEPqIf_jTdDbKanidnOfbmwSBv6Vn_5EV1YIzpoIaoxwowwFADgpZmgYTMlq1IpM1cGP_uRLQreo3meohLGUjc\",\"envelopeContext\":\"koed/pds/v1/key-bundle-envelope\",\"ephemeralPublicKey\":\"OLOhMPgV_zro0Ve5RORWMacFZc2U4G3OlTc35ecOSWg\",\"nonce\":\"k4iLaiGRlezxErFA\",\"recipientId\":\"recovery-fixture\",\"recipientKemKeyId\":\"recovery-fixture-kem\",\"recipientKind\":\"recovery\",\"tag\":\"azKDfHGgvrNSsw0U_Sr4RA\"}],\"epoch\":\"2\",\"epochKeyCommitment\":\"Yw3NKWbEM2aRElRIu7JbT_QSpJxzLbLIq8G4WBvXEN0\",\"groupId\":\"group-fixture-01\",\"keyType\":\"group-secret-set\",\"projectAliasKeyCommitment\":\"3rDjjO0eQd5vkucOgMQY0tNWr6qpnib1k528fT70dyo\",\"protocol\":\"koed/pds/v1\",\"recipientSnapshot\":[\"device-initial\",\"device-second\",\"recovery-fixture\"],\"recipientSnapshotHash\":\"Jbp1lD2Iv-UbTsSeJdlFA7wcvwdtokCRC67QYy-cSMA\",\"sourceFingerprintKeyCommitment\":\"AtRJox-7JnyPNS6ZaKeePl_JXBu-qlAv1kVOveWkvtw\",\"tombstoneFloorKeyCommitment\":\"n3LqDPSVNuPGbHh_cFGG35pDeAg3U66VNtZbOtf83cQ\",\"transitionKind\":\"add-device\",\"version\":\"1\"}}",
+      "recordHash": "qw9dZ1JWapm2mkUh0L-cCcL9_MungatimoufVwY3H3c",
+      "plans": [
+        {
+          "domain": "koed/pds/v1/key-bundle/draft\n",
+          "wrapper": "authorization",
+          "publicKeyHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+          "removeFields": ["authorization", "authority"]
+        },
+        {
+          "domain": "koed/pds/v1/key-bundle/final\n",
+          "wrapper": "authority",
+          "publicKeyHex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+          "removeFields": ["authority"]
+        }
+      ]
+    },
+    "tombstone": {
+      "canonicalPayloadUtf8": "{\"authority\":{\"keyId\":\"authority-fixture\",\"signature\":\"wlkRZKNhlSxzlCrPpqlCTS2v82bh8CbkQ8B_Ge4iw824QEp7UignXOZTjOOd2XRaSddZLHopdQihHvy9q_FEDQ\"},\"authorization\":{\"signature\":\"Vt_I5DSZpm5LRY1E0ogLzsqRUdVE6rt0GYOuAKc7r6FBzk-EciBCvNM8f_UG-MoVcL1FIobXAW9aRXHmfof8DQ\",\"signerKeyId\":\"device-initial-signing\"},\"draft\":{\"activeDeviceSnapshot\":[\"device-initial\",\"device-second\"],\"closureHashes\":[\"3N3hukQUH6UF05_Ne770dI-NZRXjh7rXKtvb861ATa8\"],\"deletionFloorToken\":\"5vaQmlye8E4OsU61njLXRK94sOm_yC26uueiGQHZu2M\",\"groupId\":\"group-fixture-01\",\"issuedAt\":\"2026-07-15T00:00:03.000Z\",\"logicalMemoryId\":\"6A-UBrkDyCYgd7QLVHFg8GKDw1OwvEMw73b5qU7-1BY\",\"protocol\":\"koed/pds/v1\",\"sourceFingerprint\":\"ddDVvDeEXrlPT81rZXeCF_Z3AMTgZyq5_dp0EucIMss\",\"statementHash\":\"fGSYCNVf4FUxIatSPpb4WhhgUVXikCDlbtTN4JAx-3o\",\"tombstoneSequence\":\"1\"}}",
+      "recordHash": "Ofb2mwEp1h-drPf7XZAWONbWope2KK_nPPHTLaMLNoE",
+      "plans": [
+        {
+          "domain": "koed/pds/v1/tombstone/draft\n",
+          "wrapper": "authorization",
+          "publicKeyHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+          "removeFields": ["authorization", "authority"]
+        },
+        {
+          "domain": "koed/pds/v1/tombstone/final\n",
+          "wrapper": "authority",
+          "publicKeyHex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+          "removeFields": ["authority"]
+        }
+      ]
+    },
+    "packageAck": {
+      "canonicalPayloadUtf8": "{\"ackedAt\":\"2026-07-15T00:00:05.000Z\",\"intendedRecipientSnapshotHash\":\"VXcnvXDsK1-LpbtXO1d566zAsMlGxSlF9R-8wPlB0aw\",\"packageId\":\"4PlDjEoJxpZI-RMuvq_wK94HzDX58SbJxUjrpRGx2Pg\",\"protocol\":\"koed/pds/v1\",\"recipientDeviceId\":\"device-initial\",\"relayAcceptedAt\":\"2026-07-15T00:00:04.000Z\",\"result\":\"materialized\",\"signature\":{\"signature\":\"ZihHa38tahya6IO7gcSksRdKQfa9bVvUBQ--G8dTmWlEQZvNAViXJfyAfHw8FjaPKnD8hnYfWtz2jl85TT3hAA\",\"signerKeyId\":\"device-initial-signing\"},\"sourceManifestHash\":\"K5nO4hYutNdL_6JQZ1kbRClpTaGyIUEcwVwS2xzcWzA\"}",
+      "recordHash": "GAjGl1yUAE3XTs5zaJ-6n51J3FKraPFsokLdfyASRac",
+      "plans": [
+        {
+          "domain": "koed/pds/v1/package-ack\n",
+          "wrapper": "signature",
+          "publicKeyHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+          "removeFields": ["signature"]
+        }
+      ]
+    },
+    "conflictResolution": {
+      "canonicalPayloadUtf8": "{\"authority\":{\"keyId\":\"authority-fixture\",\"signature\":\"l9bkenIdVaaMRzC0bGM7C1rQoowBTk5yWFEXQ4px5HhxOxrV66jVVW91bN_CWR4cVWOK8GfpLy2haFMktmb5Dg\"},\"authorization\":{\"signature\":\"bH3Bro_46FObC0Xc7z5n8m4AIPOwI-ZEvfyZSAzdVgZqTHBsfWBrYXudZL9p7nCc-ocTw5njhPwEiaYnX3GMBg\",\"signerKeyId\":\"device-initial-signing\"},\"draft\":{\"candidateClosureHashes\":[\"3N3hukQUH6UF05_Ne770dI-NZRXjh7rXKtvb861ATa8\",\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"],\"groupId\":\"group-fixture-01\",\"issuedAt\":\"2026-07-15T00:00:06.000Z\",\"protocol\":\"koed/pds/v1\",\"resolution\":\"select\",\"selectedClosureHash\":\"3N3hukQUH6UF05_Ne770dI-NZRXjh7rXKtvb861ATa8\",\"sourceFingerprint\":\"ddDVvDeEXrlPT81rZXeCF_Z3AMTgZyq5_dp0EucIMss\",\"statementHash\":\"fGSYCNVf4FUxIatSPpb4WhhgUVXikCDlbtTN4JAx-3o\"}}",
+      "recordHash": "mkdUxPa52OV7OMjgCGA-m9DcB0aeHnmx21YgPQinYeM",
+      "plans": [
+        {
+          "domain": "koed/pds/v1/conflict-resolution/draft\n",
+          "wrapper": "authorization",
+          "publicKeyHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+          "removeFields": ["authorization", "authority"]
+        },
+        {
+          "domain": "koed/pds/v1/conflict-resolution/final\n",
+          "wrapper": "authority",
+          "publicKeyHex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+          "removeFields": ["authority"]
+        }
+      ]
+    },
+    "genesis": {
+      "canonicalPayloadUtf8": "{\"authority\":{\"keyId\":\"authority-fixture\",\"signature\":\"mz54b9KbgPI8t_fbRclb-h2hXmGpDrIKxX2HJB9I-qBqih_CzR_7TSlsEjJ_E54KhNepDCUS8NlikghB-wFFDg\"},\"authorization\":{\"signature\":\"rsqoQSaThrIsJiX0DRsult3AegGdK-Unx_8aT2SibnTsaJZQQzcS-toX1PhC3AMO_MAVMKHKQZYs5zuyIJTOBA\",\"signerKeyId\":\"device-initial-signing\"},\"draft\":{\"body\":{\"authorityKeyId\":\"authority-fixture\",\"authorityPublicKey\":\"PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw\",\"initialDeviceId\":\"device-initial\",\"initialDeviceKemKeyId\":\"device-initial-kem\",\"initialDeviceKemPublicKey\":\"gxOG16p5m6_8C3JrYj3BwfgGYZzj6b9v1mNo_I5LiVI\",\"initialDeviceSigningKeyId\":\"device-initial-signing\",\"initialDeviceSigningPublicKey\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\",\"initialEpoch\":\"1\",\"initialKeyCommitment\":\"6YIw60mYYi4Sdlj_g1ktImwNatfRhpEcyfnCGs7DMMU\",\"operationFamilies\":[\"pds_relay\"],\"recoveryKemKeyId\":\"recovery-fixture-kem\",\"recoveryKemPublicKey\":\"f-z4XSfx8qv1A4UeXmwbDvecZXz40jYRuCoeSM5iRzU\",\"recoveryKitHash\":\"__________________________________________8\",\"recoveryKitVerified\":true,\"recoverySigningKeyId\":\"recovery-signing-fixture\",\"recoverySigningPublicKey\":\"6xEKLv-cig7akNj0cZGJzw7WrtzEu0hjLzQ_k-rMTLg\"},\"groupId\":\"group-fixture-01\",\"kind\":\"genesis\",\"previousHash\":null,\"protocol\":\"koed/pds/v1\",\"sequence\":\"1\"}}",
+      "recordHash": "VK2A2eVwzCTVZnCu0slwERpg4Vw7hvgemICIFaHpk54",
+      "plans": [
+        {
+          "domain": "koed/pds/v1/group-statement/draft\n",
+          "wrapper": "authorization",
+          "publicKeyHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+          "removeFields": ["authorization", "authority"]
+        },
+        {
+          "domain": "koed/pds/v1/group-statement/final\n",
+          "wrapper": "authority",
+          "publicKeyHex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+          "removeFields": ["authority"]
+        }
+      ]
+    },
+    "addDevice": {
+      "canonicalPayloadUtf8": "{\"authority\":{\"keyId\":\"authority-fixture\",\"signature\":\"bHwjmY96XFZHdVv5umAKQvuuYIbko5pk-g3Ik5uM6ogOy35VOQDXgUlh95sqsYPSNIi1EQrr-bVTdToUwCBRDg\"},\"authorization\":{\"signature\":\"BItzHl6ghwApNWwSpFl9H9_mWVeomJqgJgMe6Ya-cC3Gnh32G--332evNljrOTN43aAeY0OpJEbb49hIFDOwBw\",\"signerKeyId\":\"device-initial-signing\"},\"draft\":{\"body\":{\"deviceId\":\"device-second\",\"deviceKemKeyId\":\"device-second-kem\",\"deviceKemPublicKey\":\"dzb6eoGfRWwtQblfRuVCbKZCmuTpkXfQ50yP0mZj9w4\",\"deviceSigningKeyId\":\"device-second-signing\",\"deviceSigningPublicKey\":\"W1OZx41V57Jew9teyyRSSzH5VkiJ095iTZM4kqPQzto\",\"keyBundleHash\":\"qw9dZ1JWapm2mkUh0L-cCcL9_MungatimoufVwY3H3c\",\"nextEpoch\":\"2\",\"operationFamilies\":[\"pds_relay\"],\"previousEpoch\":\"1\"},\"groupId\":\"group-fixture-01\",\"kind\":\"add-device\",\"previousHash\":\"VK2A2eVwzCTVZnCu0slwERpg4Vw7hvgemICIFaHpk54\",\"protocol\":\"koed/pds/v1\",\"sequence\":\"2\"}}",
+      "recordHash": "fGSYCNVf4FUxIatSPpb4WhhgUVXikCDlbtTN4JAx-3o",
+      "plans": [
+        {
+          "domain": "koed/pds/v1/group-statement/draft\n",
+          "wrapper": "authorization",
+          "publicKeyHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+          "removeFields": ["authorization", "authority"]
+        },
+        {
+          "domain": "koed/pds/v1/group-statement/final\n",
+          "wrapper": "authority",
+          "publicKeyHex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+          "removeFields": ["authority"]
+        }
+      ]
+    }
+  },
+  "hkdfRfc5869Case1": {
+    "ikmHex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+    "saltHex": "000102030405060708090a0b0c",
+    "infoHex": "f0f1f2f3f4f5f6f7f8f9",
+    "length": "42",
+    "okmHex": "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+  },
+  "aes256GcmNist": {
+    "keyHex": "0000000000000000000000000000000000000000000000000000000000000000",
+    "nonceHex": "000000000000000000000000",
+    "aadHex": "",
+    "plaintextHex": "00000000000000000000000000000000",
+    "ciphertextHex": "cea7403d4d606b6e074ec5d3baf39d18",
+    "tagHex": "d0d1c8a799996bf0265b98b5d48ab919"
+  },
+  "x25519": {
+    "alicePrivateKeyHex": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+    "alicePublicKeyHex": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+    "bobPrivateKeyHex": "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb",
+    "bobPublicKeyHex": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+    "sharedSecretHex": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+    "allZeroPublicKeyHex": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "compositeRecipientEnvelope": {
+    "groupId": "group-fixture-01",
+    "recipientEpoch": "3",
+    "packageId": "pkg-fixture-001",
+    "senderDeviceId": "device-alice",
+    "recipientDeviceId": "device-bob",
+    "saltHex": "f9c6d077b8fc55f979797bb5f1766195bd3b9fd4fdf36f773c3efce543372918",
+    "infoHex": "6b6f65642f7064732f76312f656e76656c6f70652f6b6579000000000000000003706b672d666978747572652d303031006465766963652d626f62006465766963652d616c696365",
+    "wrappingKeyHex": "273d0543aac7ac2e0845a038dc12bfcc9c044c34a1b59146761585d6d5a9c1a9",
+    "contentEncryptionKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "nonceHex": "1af38c2dc2b96ffdd8669409",
+    "aadUtf8": "{\"packageId\":\"pkg-fixture-001\",\"recipientDeviceId\":\"device-bob\",\"recipientEpoch\":\"3\",\"senderDeviceId\":\"device-alice\"}",
+    "ciphertextHex": "60a9829d4ae0da0c7233777de107694ed69e91087be6cbb8774b02b4c7fe37c5",
+    "tagHex": "923000750e8a4aca040f43d69118673a",
+    "rewrappedRecipientEnvelope": {
+      "recipientEpoch": "4",
+      "infoHex": "6b6f65642f7064732f76312f656e76656c6f70652f6b6579000000000000000004706b672d666978747572652d303031006465766963652d626f62006465766963652d616c696365",
+      "wrappingKeyHex": "c10677243171e0923e240840f7d7985861bb1c8f4a7c64632cdfc26a4fd0ff3e",
+      "nonceHex": "000102030405060708090a0b",
+      "aadUtf8": "{\"packageId\":\"pkg-fixture-001\",\"recipientDeviceId\":\"device-bob\",\"recipientEpoch\":\"4\",\"senderDeviceId\":\"device-alice\"}",
+      "ciphertextHex": "32afceeae94d6965652c50e7f597cb2da762da05270f3c7fa57c0e44cd37d047",
+      "tagHex": "1726792b561734972ddb30a89cce4096"
+    }
+  },
+  "sourceFingerprint": {
+    "keyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "tombstoneKeyHex": "f0e0d0c0b0a090807060504030201000112233445566778899aabbccddeeff00",
+    "projectAliasKeyHex": "0303030303030303030303030303030303030303030303030303030303030303",
+    "sourceType": "captured_session",
+    "sourceNativeSessionId": "codex-thread-42",
+    "digestBase64url": "ddDVvDeEXrlPT81rZXeCF_Z3AMTgZyq5_dp0EucIMss",
+    "logicalMemoryId": "6A-UBrkDyCYgd7QLVHFg8GKDw1OwvEMw73b5qU7-1BY",
+    "deletionFloorToken": "5vaQmlye8E4OsU61njLXRK94sOm_yC26uueiGQHZu2M"
+  },
+  "membershipCertificate": {
+    "issuedAt": "2026-07-15T00:00:00.000Z",
+    "expiresAt": "2026-07-15T00:05:00.000Z",
+    "maxLifetimeSeconds": "604800",
+    "clockSkewSeconds": "300"
+  },
+  "stateFixtures": {
+    "replay": {
+      "first": {
+        "packageId": "pkg-fixture-001",
+        "manifestHash": "r1jMb6bUBvYEAHmtTA7u30i3i-6mpLo7A2BKWb2I7HM"
+      },
+      "same": {
+        "packageId": "pkg-fixture-001",
+        "manifestHash": "r1jMb6bUBvYEAHmtTA7u30i3i-6mpLo7A2BKWb2I7HM",
+        "expected": "idempotent"
+      },
+      "changed": {
+        "packageId": "pkg-fixture-001",
+        "manifestHash": "HWR0W8GSOJ0cwwUvT7Y-_uIDzQvpGrq4Qb1YOWgY6jQ",
+        "expected": "quarantine"
+      }
+    },
+    "convergence": {
+      "sameClosure": {
+        "fingerprint": "fp-1",
+        "closureHash": "closure-a",
+        "expected": "converge"
+      },
+      "differentClosure": {
+        "fingerprint": "fp-1",
+        "closureHash": "closure-b",
+        "existingClosureHash": "closure-a",
+        "expected": "quarantine"
+      }
+    },
+    "equivocation": {
+      "trusted": {
+        "sequence": "7",
+        "head": "head-a"
+      },
+      "received": {
+        "sequence": "7",
+        "head": "head-b",
+        "expected": "freeze"
+      }
+    },
+    "tombstone": {
+      "floor": {
+        "logicalMemoryId": "6A-UBrkDyCYgd7QLVHFg8GKDw1OwvEMw73b5qU7-1BY",
+        "deletionFloorToken": "5vaQmlye8E4OsU61njLXRK94sOm_yC26uueiGQHZu2M"
+      },
+      "stalePackage": {
+        "logicalMemoryId": "6A-UBrkDyCYgd7QLVHFg8GKDw1OwvEMw73b5qU7-1BY",
+        "deletionFloorToken": "5vaQmlye8E4OsU61njLXRK94sOm_yC26uueiGQHZu2M",
+        "expected": "reject"
+      },
+      "differentPackage": {
+        "logicalMemoryId": "other",
+        "deletionFloorToken": "other",
+        "expected": "allow"
+      }
+    },
+    "packageAck": {
+      "intendedRecipientSnapshot": ["device-initial", "device-second"],
+      "acknowledgedRecipient": "device-initial",
+      "revokedAfterUploadRecipient": "device-second",
+      "expiresAt": "2026-08-14T00:00:04.000Z",
+      "expectedAllAckCleanup": "delete-after-7-days",
+      "expectedRevocationWaiver": "waive-after-countersigned-revoke",
+      "expectedExpiry": "delete-and-reupload-for-current-snapshot"
+    }
+  },
+  "keyBundleFixture": {
+    "plaintextSecretSet": {
+      "epochSecret": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "sourceFingerprintKey": "ERERERERERERERERERERERERERERERERERERERERERE",
+      "tombstoneFloorKey": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI",
+      "projectAliasKey": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM"
+    },
+    "recipientPrivateKemKeys": {
+      "device-initial": "68a9ef458680cecb2ff03ba960c501f21d5f0fb3c38f944a11fc623821dd3651",
+      "device-second": "a8182d1c0c06bc4418b2d079062574e1019528d27178155c839ed06e5bd34568",
+      "recovery-fixture": "486e05325f7207095c7fe67748f0e2cd85ddcc82d3cf850ed3c14d488504fd60"
+    },
+    "derivation": {
+      "saltHex": "8538e93393e9d412f0f6219dda7674841203e21ffbb6ab5f86772419fcc1f49b",
+      "infoEncoding": "UTF8(\"koed/pds/v1/key-bundle/key\\0\") || uint64be(epoch) || UTF8(recipientId) || 0x00 || UTF8(recipientKind) || 0x00 || UTF8(recipientKemKeyId) || 0x00 || UTF8(keyType) || 0x00 || UTF8(recipientSnapshotHash)",
+      "aadFields": [
+        "protocol",
+        "version",
+        "groupId",
+        "epoch",
+        "recipientId",
+        "recipientKind",
+        "recipientKemKeyId",
+        "keyType",
+        "recipientSnapshotHash"
+      ]
+    }
+  },
+  "nonProductionKeyMaterial": {
+    "initialDeviceSigningSeedHex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+    "authoritySigningSeedHex": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+    "secondDeviceSigningSeedHex": "1692e24d42a9555ae8c8f16fbd16958b47140a232dc1dd2fe70afb1ca0cba330",
+    "recoverySigningSeedHex": "d4e4b231d1a14647bd13a808ddc41f5e0b05152ab3130c826c05e6b9fbda6cb4",
+    "initialDeviceKemPrivateHex": "68a9ef458680cecb2ff03ba960c501f21d5f0fb3c38f944a11fc623821dd3651",
+    "secondDeviceKemPrivateHex": "a8182d1c0c06bc4418b2d079062574e1019528d27178155c839ed06e5bd34568",
+    "recoveryKemPrivateHex": "486e05325f7207095c7fe67748f0e2cd85ddcc82d3cf850ed3c14d488504fd60"
+  }
+}

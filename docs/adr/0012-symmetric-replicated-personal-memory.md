@@ -1,6 +1,6 @@
 # Symmetric Replicated Personal Memory Across Devices
 
-Status: Proposed for discussion.
+Status: Accepted.
 
 Related decisions:
 
@@ -9,6 +9,7 @@ Related decisions:
 - [0008 Explorer-First Auth And Device Enrollment](./0008-explorer-first-auth-and-device-enrollment.md)
 - [0009 Commercial SaaS Encryption And Key Management](./0009-commercial-saas-encryption-key-management.md)
 - [0010 Managed SaaS Queryable Vector Boundary](./0010-managed-saas-queryable-vectors.md)
+- [Personal Device Sync Protocol V1](../personal-device-sync-protocol.md)
 
 Related planning and foundations:
 
@@ -59,12 +60,21 @@ local-first capture and avoiding general multi-primary database replication.
 
 ## Decision
 
-Koed should use **symmetric replicated Personal Memory** for trusted devices
+Koed uses **symmetric replicated Personal Memory** for trusted devices
 associated with one **Local Personal Identity**. This is one user-facing
 personal profile across devices, not a set of locally selectable Users.
 
-The V1 replication model should be a relay-assisted, source-owned replicated
-log of immutable Captured Session packages:
+V1 is frozen by [Personal Device Sync Protocol V1](../personal-device-sync-protocol.md):
+relay-required full replication of future closed Captured Sessions; Ed25519
+signatures; X25519/HKDF-SHA-256/AES-256-GCM recipient envelopes with
+role-separated keys; active-device or recovery-root authorization plus Authority
+countersignature; conflict quarantine; current protocol version only; bounded
+relay/tombstone retention; no first-slice LCM Summary replication; and only one
+unambiguous canonical Project alias auto-match. That normative specification
+controls where this ADR's earlier exploratory language differs.
+
+The V1 replication model is a relay-assisted, source-owned replicated log of
+immutable Captured Session packages:
 
 - No personal device is the permanent Personal Memory authority.
 - Every associated device remains a normal local `koed-server` and can capture,
@@ -81,9 +91,8 @@ log of immutable Captured Session packages:
 - The relay supports discovery, offline delivery, resumable chunks, and
   anti-entropy cursors. It is not a plaintext Memory store, Projection service,
   recall authority, Team authority, or source of truth.
-- Direct peer transfer may be added later as a transport optimization. It must
-  use the same package, identity, authorization, cursor, and replay contracts as
-  relay transfer.
+- Relay transfer is required in V1. Direct peer transfer is non-V1 and requires
+  a later protocol decision; it cannot become an implicit relay fallback.
 - Personal multi-device association does not create or modify Team Membership,
   Workspace Access, Share Grants, Team retention, or Project-to-Team Workspace
   mappings.
@@ -107,17 +116,17 @@ Cross-Identity Sync is an umbrella term with separate product modes:
 
 These modes share only proven common foundations: logical-memory and replica
 provenance, encrypted resumable transport, durable inbox/outbox work,
-idempotency, retry, and readiness/freshness gates. They must retain distinct
+idempotency, retry, and readiness/freshness gates. They retain distinct
 identity, key-management, package-closure, lifecycle, and anti-entropy
-contracts. In particular, a hosted target's independently generated LCM Summary
-does not replace this ADR's hash-bound source LCM Summary artifact.
+contracts. A hosted target's independently generated LCM Summary is not a PDS
+source record; PDS LCM Summary replication is non-V1.
 
 ## Personal Device Group Authority And Association
 
 A symmetric data plane still needs a neutral identity and key control plane.
-Koed should use a **Personal Device Group Authority** that is not any personal
-device and cannot decrypt replicated Memory. It may be deployed with the relay,
-self-hosted separately, or operated by Koed, but those deployment choices must
+Koed uses a **Personal Device Group Authority** that is not any personal device
+and cannot decrypt replicated Memory. It may be deployed with the relay,
+self-hosted separately, or operated by Koed, but every deployment choice must
 implement the same protocol.
 
 The authority:
@@ -173,9 +182,10 @@ package exchange may continue only while a cached signed membership statement
 is unexpired, which bounds revocation delay.
 
 Personal Device Association is a same-Local-Personal-Identity,
-cross-deployment specialization of Cross-Identity Sync. It keeps one logical
-Memory lifespan across deployment-local identities; it is not Fork/Import and
-does not imply Team sharing.
+cross-deployment specialization of Cross-Identity Sync. It is not Directed
+Hosted Cross-Identity Sync: it keeps one logical Memory lifespan across
+deployment-local identities without directed hosted target semantics. It is not
+Fork/Import and does not imply Team sharing.
 
 A device necessarily has its own database subject, device id, and device key.
 Those are replication and revocation implementation details, not locally
@@ -200,7 +210,7 @@ Memory synchronization. The association must record at least:
 - device public key or equivalent verifier;
 - allowed personal operation families;
 - creation, validation, expiry, and revocation state;
-- current key epoch and package compatibility range;
+- current key epoch and current-protocol compatibility status;
 - auditable consent and policy state.
 
 Email equality, hostname, operating-system account, local path, Git remote, or
@@ -220,42 +230,40 @@ ordinary config, or support diagnostics.
 
 Device association and synchronization consent are separate.
 
-The Local Personal Identity owns an explicit Personal Sync Policy that selects
-eligible devices, source classes, and time boundaries. V1 may offer an opt-in
-policy for future closed Captured Sessions, but association alone synchronizes
-nothing. A Remote Account Link likewise synchronizes nothing. Historical
-backfill requires a separate, bounded consent step.
+The Local Personal Identity owns explicit Personal Sync Policy for the Personal
+Device Group and future closed Captured Sessions. Association alone synchronizes
+nothing; after V1 policy activation, every eligible Session replicates to every
+active group device. V1 has no per-device placement/exclusion setting. A Remote
+Account Link likewise synchronizes nothing. Historical backfill is non-V1.
 
 Effective Capture Policy, Capture Target, Capture State, and Capture Pause still
 gate whether source activity may become Memory. Personal Sync Policy decides
 whether already eligible Personal Memory may be replicated. A setup flow that
-enables full replication must state clearly that every selected device will
-receive decryptable Personal Memory replicas. Device-specific exclusions,
-pause, revocation, and status must remain visible.
+enables PDS must state clearly that every active group device receives
+decryptable Personal Memory replicas. Pause, revocation, and status must remain
+visible; removing a device from group is required to stop its future receipt.
 
 ## Replication Unit And Ownership
 
-V1 should replicate one Captured Session at a time. Personal Device Sync uses
-its own versioned package protocol; it must not treat a directed hosted
-projected-event package as its source closure.
+V1 replicates one Captured Session at a time. Personal Device Sync uses its own
+versioned package protocol; it must not treat a directed hosted projected-event
+package as its source closure.
 
-A package should contain the closed source set needed to reconstruct that
-Session's Personal Memory representation, including where applicable:
+A package contains the closed source set needed to reconstruct that Session's
+Personal Memory representation, including:
 
 - Captured Session metadata and stable source identity;
 - raw Conversation source items;
 - Project metadata sanitized for the replication boundary;
-- source-owned LCM Summary versions where policy permits;
+- no LCM Summary in V1; source-owned LCM Summary replication is deferred;
 - invalidation and group-level personal-deletion tombstones;
 - source sequence and package cursors;
 - provenance, integrity, and idempotency metadata.
 
-Memory Events, Memory Nodes, LCM Placeholders, Projection outputs, embeddings,
-and indexes are derived locally and are not replicated. LCM Summary text is an
-exception because synthesis is not deterministic: an accepted summary version
-is a source-owned artifact, bound to the hash of its complete source closure.
-A receiving device applies it only when that closure hash matches; otherwise it
-fails closed and requests a compatible package.
+Memory Events, Memory Nodes, LCM Placeholders, LCM Summaries, Projection
+outputs, embeddings, and indexes are derived locally and are not replicated in
+V1. Source-owned LCM Summary replication is deferred; receiving devices run
+local LCM Summary work from validated source closure.
 
 The package format separates source provenance from transport encryption. The
 origin signs an immutable content manifest containing the logical source id,
@@ -294,8 +302,8 @@ identity or authorization boundary.
 
 ## Consistency Model
 
-Koed should use eventual consistency with per-origin ordering rather than a
-global total order.
+Koed uses eventual consistency with per-origin ordering rather than a global
+total order.
 
 - Every origin device has a monotonic source sequence.
 - Package ids include stable origin deployment identity, source sequence, and
@@ -357,9 +365,8 @@ conflicting source closures, cloned profiles, and deletion after convergence.
 
 ## Relay Boundary
 
-The recommended transport is an encrypted mailbox/relay because direct device
-connectivity is unreliable across NAT, sleep, roaming, firewalls, and offline
-periods.
+V1 requires encrypted mailbox/relay transport because direct device connectivity
+is unreliable across NAT, sleep, roaming, firewalls, and offline periods.
 
 The relay may retain only what is required for delivery and recovery:
 
@@ -386,8 +393,8 @@ allowlists, downgrade resistance, and redacted operational logging. Compromise
 of relay storage should reveal encrypted bytes and bounded redacted metadata
 only.
 
-A self-hosted relay, Koed-managed relay, or direct peer transport can implement
-the same protocol. Relay deployment choice is separate from Memory ownership.
+A self-hosted relay or Koed-managed relay can implement V1. Direct peer
+transport is non-V1. Relay deployment choice is separate from Memory ownership.
 
 ## Local Materialization And Recall
 
@@ -409,10 +416,9 @@ A device being offline must not block capture or recall from already
 materialized local Memory. New Memory from another offline device becomes
 visible after relay delivery and local processing complete.
 
-Partial replication may be considered later. V1 should prefer full replication
-of eligible Captured Sessions to every associated device because selective
-placement complicates recall completeness, deletion, key rotation, and user
-expectations.
+Partial replication is non-V1. V1 replicates every eligible Captured Session
+to every active group device; selective placement would compromise recall
+completeness, deletion, key rotation, and user expectations.
 
 ## Project Context Association
 
@@ -459,9 +465,9 @@ make already downloaded plaintext disappear from a device that previously had
 legitimate access. UI and policy must state that limitation clearly.
 
 Group membership changes require a new key epoch. Remaining devices must stop
-encrypting new packages to revoked members. Historical package re-encryption,
-retention, and purge need explicit policy and cannot be inferred from credential
-revocation.
+encrypting new packages to revoked members. Historical package re-encryption is
+non-V1; V1 relay and tombstone retention is fixed by protocol profile and cannot
+be inferred from credential revocation.
 
 An authenticated User deletion request creates an active-device- or
 recovery-root-authorized, authority-countersigned monotonic tombstone. A
@@ -488,17 +494,13 @@ Share Grant and Team retention model from ADR 0004.
 
 ## Historical Import
 
-Historical AI-client import should remain a local ingestion path when KOE-317
-and its children are implemented.
-
-Imported Conversations become normal local Captured Sessions with stable source
-and origin-device provenance. Import alone does not grant synchronization
-consent or upload source data. When synchronization policy permits, imported
-Sessions use the same package and idempotency path as live-captured Sessions.
-Hook/import overlap must deduplicate before replication so it cannot create two
-logical Memory lifespans on one origin. Cross-origin duplicate observations use
-the group-stable fingerprint and convergence rules from the consistency model;
-local deduplication is not a substitute for that group-level boundary.
+Historical AI-client import remains a local ingestion path when KOE-317 and its
+children are implemented. PDS V1 never replicates imported Sessions: it admits
+only Sessions first closed after PDS policy activation. Import alone does not
+grant synchronization consent or upload source data. A later PDS profile must
+specify bounded import consent, closure, retention, and idempotency before an
+imported Session can replicate. Hook/import overlap must still deduplicate
+locally so it cannot create two logical Memory lifespans on one origin.
 
 ## Alternative: Designated Personal Hub
 
@@ -534,11 +536,9 @@ and becomes a concentrated plaintext target, while symmetric replication gives
 every selected device a decryptable replica and therefore expands endpoint
 exposure. Neither model removes trust; they place it differently.
 
-The Hub design should be preferred if implementation cost, constrained devices,
-or operational simplicity outweigh device symmetry. This ADR proposes symmetric
-replication because avoiding a privileged personal device is considered the
-stronger long-term product property. Acceptance of this ADR should explicitly
-confirm that trade-off.
+The Hub design is not selected: symmetric replication avoids privileged personal
+device and is accepted as stronger long-term product property despite added
+implementation and operational cost.
 
 ## Consequences
 
@@ -558,7 +558,7 @@ Costs:
 - more replicas and repeated Projection/embedding work;
 - per-device cursors, anti-entropy, key distribution, and compatibility state;
 - harder revocation and deletion semantics;
-- more migration and mixed-version cases;
+- more upgrade and current-version coordination cases;
 - greater storage and bandwidth use;
 - more complex stale/partial/error UX;
 - wider security and two-node/N-device test matrix.
@@ -585,7 +585,7 @@ This decision does not add:
 
 ## Required Follow-Up Work
 
-Acceptance should create or amend implementation work for:
+Follow-up implementation work:
 
 1. stable deployment/device identity and cloned-`KOED_HOME` handling;
 2. secure Desktop and headless credential storage;
@@ -613,25 +613,3 @@ package-closure, or deletion semantics unchanged. KOE-269 should own supported
 headless pairing, Remote Account Link enrollment, and recovery surfaces.
 KOE-317 and its children should preserve origin deployment/device provenance and
 must not imply synchronization consent.
-
-## Discussion Required Before Acceptance
-
-Reviewers should explicitly decide:
-
-- whether avoiding a designated Personal Hub is a core product requirement;
-- whether V1 requires a relay or may begin with explicitly reachable peers;
-- whether full eligible-session replication to every associated device is
-  acceptable for storage, privacy, and bandwidth;
-- whether the active-device/user-held-recovery-root governance ceremony and
-  absence of an operator recovery bypass are acceptable product constraints;
-- whether replica re-serving plus bounded relay retention provides sufficient
-  replacement-device recovery without server-side key escrow;
-- how long an encrypted relay retains undelivered packages and acknowledged
-  tombstones;
-- which Project alias ambiguities always require confirmation;
-- what mixed-version window is supported during rolling device upgrades;
-- whether conflicting closures for one group-stable source fingerprint should
-  remain quarantined until explicit resolution in V1;
-- how one Local Personal Identity, its device-specific implementation subjects,
-  and its explicitly linked remote Users are represented without local
-  multi-user setup or automatic account merging.
