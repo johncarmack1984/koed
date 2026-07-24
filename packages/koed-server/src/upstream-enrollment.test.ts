@@ -1,12 +1,13 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   readLocalEdgeClientCredentialAuthorization,
   readUpstreamCredentialAuthorization
 } from "@koed/shared";
 import { resolveKoedServerPaths } from "./paths.js";
+import { ensureDeviceIdentity } from "./device-identity.js";
 import {
   refreshUpstreamBackendCapabilities,
   registerUpstreamBackend,
@@ -17,14 +18,23 @@ import {
   cancelUpstreamEnrollment,
   disconnectUpstreamBackendEnrollment,
   getUpstreamEnrollmentStatus,
+  invalidateUpstreamEnrollmentReferences,
   startUpstreamEnrollment
 } from "./upstream-enrollment.js";
 
 const temps: string[] = [];
+const proofTemps: string[] = [];
+const proofEnvRestores: Array<string | undefined> = [];
 
 const tempPaths = () => {
   const root = mkdtempSync(resolve(tmpdir(), "koed-upstream-enroll-"));
+  const proofRoot = mkdtempSync(
+    resolve(tmpdir(), "koed-upstream-enroll-proof-")
+  );
+  proofEnvRestores.push(process.env.KOED_DEVICE_PROOF_DIR);
+  process.env.KOED_DEVICE_PROOF_DIR = resolve(proofRoot, "proof");
   temps.push(root);
+  proofTemps.push(proofRoot);
   return resolveKoedServerPaths({ KOED_HOME: root, KOED_REPO_ROOT: root });
 };
 
@@ -183,10 +193,78 @@ const registerValidatedBackend = async () => {
 afterEach(() => {
   for (const path of temps.splice(0)) {
     rmSync(path, { recursive: true, force: true });
+    rmSync(`${path}-proof-root`, { recursive: true, force: true });
+  }
+  for (const path of proofTemps.splice(0)) {
+    rmSync(path, { recursive: true, force: true });
+  }
+  const previousProofDir = proofEnvRestores.pop();
+  if (previousProofDir === undefined) {
+    delete process.env.KOED_DEVICE_PROOF_DIR;
+  } else {
+    process.env.KOED_DEVICE_PROOF_DIR = previousProofDir;
   }
 });
 
 describe("upstream enrollment orchestration", () => {
+  it("uses verified device instance ID for enrollment and gates unhealthy polling", async () => {
+    const paths = await registerValidatedBackend();
+    updateUpstreamBackendRoutePolicy(paths, "team-vps", {
+      teamWorkspaceRead: "enabled"
+    });
+    const identity = await ensureDeviceIdentity(paths);
+    let enrolledDeviceId: string | null = null;
+    const enrollmentFetchWithVerifiedDevice = async (
+      input: Parameters<typeof globalThis.fetch>[0],
+      init?: Parameters<typeof globalThis.fetch>[1]
+    ) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      if (
+        init?.method === "POST" &&
+        new URL(url).pathname === "/v1/local-edge/device-enrollments/challenges"
+      ) {
+        const body: unknown = JSON.parse(String(init.body));
+        enrolledDeviceId =
+          body &&
+          typeof body === "object" &&
+          "device_instance_id" in body &&
+          typeof body.device_instance_id === "string"
+            ? body.device_instance_id
+            : null;
+      }
+      return enrollmentFetch()(input, init);
+    };
+    const started = await startUpstreamEnrollment(paths, "team-vps", {
+      now: () => new Date("2026-01-01T00:01:00.000Z"),
+      randomId: () => "verified-device-id",
+      fetch: enrollmentFetchWithVerifiedDevice
+    });
+
+    expect(started.ok, started.message).toBe(true);
+    expect(started.state).toBe("pending");
+    expect(enrolledDeviceId).toBe(identity.deviceInstanceId);
+
+    rmSync(`${paths.koedHome}-proof`, { recursive: true, force: true });
+    rmSync(`${paths.koedHome}-proof-root`, { recursive: true, force: true });
+    rmSync(process.env.KOED_DEVICE_PROOF_DIR!, {
+      recursive: true,
+      force: true
+    });
+    const blockedFetch = vi.fn();
+    await expect(
+      getUpstreamEnrollmentStatus(paths, "team-vps", {
+        now: () => new Date("2026-01-01T00:02:00.000Z"),
+        fetch: blockedFetch
+      })
+    ).resolves.toMatchObject({ ok: false, state: "failed" });
+    expect(blockedFetch).not.toHaveBeenCalled();
+  });
+
   it("fails closed until capabilities are fresh and route policy is explicit", async () => {
     const paths = await registerValidatedBackend();
 
@@ -492,6 +570,30 @@ describe("upstream enrollment orchestration", () => {
       backend: { id: "team-vps" },
       enrollment: { requestId: "enroll-cancel", state: "canceled" }
     });
+  });
+
+  it("disables local credentials and records pending remote revocation without self-revoking", async () => {
+    const paths = await registerValidatedBackend();
+    updateUpstreamBackendRoutePolicy(paths, "team-vps", {
+      teamWorkspaceRead: "enabled"
+    });
+    const started = await startUpstreamEnrollment(paths, "team-vps", {
+      now: () => new Date("2026-01-01T00:01:00.000Z"),
+      fetch: enrollmentFetch()
+    });
+    const reference = started.enrollment!.credential.reference!;
+
+    await expect(
+      invalidateUpstreamEnrollmentReferences(paths, {
+        now: () => new Date("2026-01-01T00:02:00.000Z")
+      })
+    ).resolves.toEqual({ pendingRemoteRevocation: true });
+    expect(
+      readUpstreamCredentialAuthorization(paths.koedHome, reference)
+    ).toBeNull();
+    expect(
+      readLocalEdgeClientCredentialAuthorization(paths.koedHome, "team-vps")
+    ).toBeNull();
   });
 
   it("disconnects by disabling route policy and marking local enrollment revoked", async () => {

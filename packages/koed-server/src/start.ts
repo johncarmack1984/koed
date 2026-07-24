@@ -39,6 +39,7 @@ import {
   type KoedServerPaths
 } from "./paths.js";
 import { allocateAndPersistLocalPorts } from "./ports.js";
+import { ensureDeviceIdentity } from "./device-identity.js";
 import { collectKoedServerStatus } from "./status.js";
 import { stopKoedServer } from "./stop.js";
 import { acquireKoedServerSupervisorLock } from "./supervisor-lock.js";
@@ -737,6 +738,7 @@ export const startKoedServer = async ({
     );
     return;
   }
+  await ensureDeviceIdentity(paths, { environment });
   const supervisorStartedAt = new Date().toISOString();
   const appRuntime = resolveKoedAppRuntime(paths, environment);
   assertKoedAppRuntimeAvailable(appRuntime, paths);

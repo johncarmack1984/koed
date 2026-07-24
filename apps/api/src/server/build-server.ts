@@ -52,8 +52,11 @@ import {
 } from "../memory/index.js";
 import {
   createEnvelopeEncryptionProviderFromEnvironment,
+  inspectDeviceIdentityAtKoedHome,
+  reconcileDeviceIdentityDeployment,
   embeddingDispatchKey,
   readUpstreamCredentialAuthorization,
+  type DeviceIdentityInspection,
   type EnvelopeEncryptionProvider,
   lcmCompactQueueName,
   memoryEmbedQueueName,
@@ -90,6 +93,8 @@ interface BuildServerOptions {
   upstreamBackendsPath?: string;
   fetch?: typeof fetch;
   resolveUpstreamAuthorization?: ApiRouteContext["localEdge"]["resolveUpstreamAuthorization"];
+  remoteOperationsAllowed?: ApiRouteContext["localEdge"]["remoteOperationsAllowed"];
+  inspectDeploymentIdentity?: () => DeviceIdentityInspection;
   workosClient?: WorkosAuthKitClient;
   envelopeEncryptionProvider?: EnvelopeEncryptionProvider;
 }
@@ -213,6 +218,14 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
           envelopeEncryptionProvider
         })
       : null);
+  if (repository && !options.repository) {
+    const legacyDeployment = await repository.getLocalSyncDeployment();
+    reconcileDeviceIdentityDeployment({
+      koedHome: config.koedHome,
+      protocolDeploymentId: legacyDeployment?.protocolDeploymentId ?? null,
+      environment: process.env
+    });
+  }
   const createQueue = <TJobData>(name: string) =>
     createMemoryJobQueue<TJobData>(name, {
       backend: config.queueBackend,
@@ -405,9 +418,27 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
       resolveCapturePolicyForRequest,
       rejectUnsupportedCapturePolicy
     },
+    deploymentIdentity: {
+      inspect:
+        options.inspectDeploymentIdentity ??
+        (() =>
+          inspectDeviceIdentityAtKoedHome({
+            koedHome: config.koedHome,
+            environment: process.env
+          }))
+    },
     localEdge: {
       upstreamBackendsPath:
         options.upstreamBackendsPath ?? config.upstreamBackendsPath,
+      remoteOperationsAllowed:
+        options.remoteOperationsAllowed ??
+        (config.test
+          ? () => true
+          : () =>
+              inspectDeviceIdentityAtKoedHome({
+                koedHome: config.koedHome,
+                environment: process.env
+              }).remoteOperationsAllowed),
       fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
       resolveUpstreamAuthorization:
         options.resolveUpstreamAuthorization ??
