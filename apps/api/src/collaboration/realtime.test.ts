@@ -31,7 +31,7 @@ const realtimeFamilyCases = [
   ["workspace_lifecycle_access", "control", null],
   ["thread_lifecycle", "collaboration_event", "thread_upserted"],
   ["message_created", "collaboration_event", "message_created"],
-  ["read_state_updated", "collaboration_event", "read_state_updated"],
+  ["receipt_state_updated", "collaboration_event", "receipt_state_updated"],
   ["share_grant_lifecycle", "collaboration_event", "shared_session_upserted"],
   ["representation_changed", "collaboration_event", "shared_session_upserted"],
   ["memory_event_available", "collaboration_event", "shared_session_upserted"],
@@ -52,7 +52,7 @@ const realtimeFamilyCases = [
     (
       | "thread_upserted"
       | "message_created"
-      | "read_state_updated"
+      | "receipt_state_updated"
       | "shared_session_upserted"
       | null
     )
@@ -97,7 +97,7 @@ const event = (input: {
   return {
     id: randomUUID(),
     cursor: input.cursor,
-    protocolVersion: 1,
+    protocolVersion: 2,
     family: input.family ?? "message_created",
     scope: input.scope,
     personalOwnerUserId: input.scope === "personal" ? randomUUID() : null,
@@ -186,7 +186,7 @@ const createRepositoryFixture = () => {
   ): StoredSubscription => ({
     id: randomUUID(),
     binding,
-    protocolVersion: 1,
+    protocolVersion: 2,
     scope: scope.scope,
     personalOwnerUserId: scope.scope === "personal" ? ids.alice : null,
     teamId: scope.scope === "team" ? scope.teamId : null,
@@ -277,6 +277,7 @@ const createRepositoryFixture = () => {
         id: input.messageId,
         threadId: input.threadId,
         threadSequence: matching.cursor,
+        audienceVersion: 1,
         scope: matching.scope,
         personalOwnerUserId: matching.personalOwnerUserId,
         teamId: matching.teamId,
@@ -285,6 +286,7 @@ const createRepositoryFixture = () => {
         senderPrincipalId: sender.id,
         senderUserId: sender.id,
         senderDisplayName: sender.displayName,
+        recipientStatus: null,
         bodyText: "Authorized realtime message",
         metadata: {},
         provenance: { kind: "user_message", id: matching.id },
@@ -292,9 +294,12 @@ const createRepositoryFixture = () => {
         updatedAt: matching.occurredAt
       };
     }),
-    getReadStateForRealtime: vi.fn<
-      CollaborationRealtimeMaterializationRepository["getReadStateForRealtime"]
+    getReceiptStateForRealtime: vi.fn<
+      CollaborationRealtimeMaterializationRepository["getReceiptStateForRealtime"]
     >(async () => null),
+    listMessageReceiptsForRealtime: vi.fn<
+      CollaborationRealtimeMaterializationRepository["listMessageReceiptsForRealtime"]
+    >(async () => []),
     getPersonalMemoryForRealtime: vi.fn<
       CollaborationRealtimeMaterializationRepository["getPersonalMemoryForRealtime"]
     >(async () => null),
@@ -331,6 +336,9 @@ const createRepositoryFixture = () => {
       throw new Error("unused");
     },
     async listMessages() {
+      throw new Error("unused");
+    },
+    async advanceDeliveryState() {
       throw new Error("unused");
     },
     async advanceReadState() {
@@ -1314,19 +1322,24 @@ describe("collaboration realtime protocol", () => {
         teamId: fixture.ids.teamA,
         teamWorkspaceId: fixture.ids.workspace,
         threadId,
-        messageId: null,
+        messageId: threadId,
         actorPrincipalId: fixture.ids.alice,
-        resourceType: "collaboration_read_state",
+        resourceType: "collaboration_receipt_state",
         resourceId: `${threadId}:${fixture.ids.alice}`,
-        family: "read_state_updated"
+        family: "receipt_state_updated"
       })
     );
-    fixture.materializationRepository.getReadStateForRealtime.mockResolvedValue(
+    fixture.materializationRepository.getReceiptStateForRealtime.mockResolvedValue(
       {
         threadId,
         userId: fixture.ids.alice,
-        lastReadMessageId: null,
+        lastDeliveredMessageId: threadId,
+        lastDeliveredSequence: 4,
+        lastDeliveredAt: iso,
+        lastReadMessageId: threadId,
         lastReadSequence: 4,
+        lastReadAt: iso,
+        unreadCount: 0,
         version: 2,
         updatedAt: iso
       }
@@ -1345,7 +1358,7 @@ describe("collaboration realtime protocol", () => {
     });
     expect(eventData(delivered, "collaboration_event")).toMatchObject({
       update: {
-        type: "read_state_updated",
+        type: "receipt_state_updated",
         readState: { threadId, sequence: 4 }
       }
     });
@@ -1624,7 +1637,8 @@ describe("collaboration realtime protocol", () => {
     const repository = {
       isEventAuthorized: vi.fn(async () => true),
       getMessageForRealtime: vi.fn(async () => null),
-      getReadStateForRealtime: vi.fn(async () => null),
+      getReceiptStateForRealtime: vi.fn(async () => null),
+      listMessageReceiptsForRealtime: vi.fn(async () => []),
       getPersonalMemoryForRealtime: vi.fn<
         CollaborationRealtimeMaterializationRepository["getPersonalMemoryForRealtime"]
       >(async () => ({
@@ -1676,6 +1690,7 @@ describe("collaboration realtime protocol", () => {
       const threadId = randomUUID();
       const messageId =
         family === "message_created" ||
+        family === "receipt_state_updated" ||
         family === "shared_session_discussion_activity"
           ? randomUUID()
           : null;
@@ -1687,8 +1702,8 @@ describe("collaboration realtime protocol", () => {
         "lcm_rollup_available"
       ].includes(family);
       const resourceType =
-        family === "read_state_updated"
-          ? "collaboration_read_state"
+        family === "receipt_state_updated"
+          ? "collaboration_receipt_state"
           : family === "thread_lifecycle"
             ? "collaboration_thread"
             : family === "message_created" ||
@@ -1715,7 +1730,7 @@ describe("collaboration realtime protocol", () => {
           threadId:
             family === "thread_lifecycle" ||
             family === "message_created" ||
-            family === "read_state_updated"
+            family === "receipt_state_updated"
               ? threadId
               : family === "shared_session_discussion_activity"
                 ? fixture.ids.companionThread
@@ -1728,7 +1743,7 @@ describe("collaboration realtime protocol", () => {
           resourceId:
             family === "thread_lifecycle"
               ? threadId
-              : family === "read_state_updated"
+              : family === "receipt_state_updated"
                 ? `${threadId}:${fixture.ids.alice}`
                 : sharedFamily
                   ? fixture.ids.shareGrant
@@ -1741,13 +1756,18 @@ describe("collaboration realtime protocol", () => {
           workspaceChannelThread(fixture)
         );
       }
-      if (family === "read_state_updated") {
-        fixture.materializationRepository.getReadStateForRealtime.mockResolvedValue(
+      if (family === "receipt_state_updated") {
+        fixture.materializationRepository.getReceiptStateForRealtime.mockResolvedValue(
           {
             threadId,
             userId: fixture.ids.alice,
-            lastReadMessageId: null,
+            lastDeliveredMessageId: threadId,
+            lastDeliveredSequence: 9,
+            lastDeliveredAt: iso,
+            lastReadMessageId: threadId,
             lastReadSequence: 9,
+            lastReadAt: iso,
+            unreadCount: 0,
             version: 3,
             updatedAt: iso
           }
@@ -1860,7 +1880,7 @@ describe("collaboration realtime protocol", () => {
       eventName: "control"
     });
     expect(eventData(stream, "control")).toEqual({
-      protocolVersion: 1,
+      protocolVersion: 2,
       subscription: { id: snapshot.subscription.id },
       reason: "requires_snapshot"
     });
@@ -1892,7 +1912,7 @@ describe("collaboration realtime protocol", () => {
     });
 
     expect(eventData(body, "control")).toEqual({
-      protocolVersion: 1,
+      protocolVersion: 2,
       subscription: { id: snapshot.subscription.id },
       reason: "requires_snapshot"
     });
@@ -2116,7 +2136,7 @@ describe("collaboration realtime protocol", () => {
       fixture.events.slice(0, 3).map(({ id }) => id)
     );
     expect(eventData(firstBody, "control")).toEqual({
-      protocolVersion: 1,
+      protocolVersion: 2,
       subscription: { id: snapshot.subscription.id },
       reason: "backpressure"
     });
@@ -2347,7 +2367,7 @@ describe("collaboration realtime protocol", () => {
 
       expect(Date.now() - revokedAt).toBeLessThan(250);
       expect(eventData(body, "access_revoked")).toEqual({
-        protocolVersion: 1,
+        protocolVersion: 2,
         subscription: { id: snapshot.subscription.id },
         reason: "access_revoked"
       });
@@ -2398,7 +2418,7 @@ describe("collaboration realtime protocol", () => {
       const body = await stream.readUntil("access_revoked", 500);
 
       expect(eventData(body, "access_revoked")).toEqual({
-        protocolVersion: 1,
+        protocolVersion: 2,
         subscription: { id: snapshot.subscription.id },
         reason: "access_revoked"
       });
@@ -2504,7 +2524,7 @@ describe("collaboration realtime protocol", () => {
       const body = await stream.readUntil("control", 500);
 
       expect(eventData(body, "control")).toEqual({
-        protocolVersion: 1,
+        protocolVersion: 2,
         subscription: { id: snapshot.subscription.id },
         reason: "requires_snapshot"
       });
@@ -2579,7 +2599,7 @@ describe("collaboration realtime protocol", () => {
       const body = await stream.readUntil("access_revoked", 500);
 
       expect(eventData(body, "access_revoked")).toEqual({
-        protocolVersion: 1,
+        protocolVersion: 2,
         subscription: { id: snapshot.subscription.id },
         reason: "access_revoked"
       });
@@ -2668,7 +2688,7 @@ describe("collaboration realtime protocol", () => {
       await new Promise((resolve) => setTimeout(resolve, 15));
 
       expect(eventData(body, "access_revoked")).toEqual({
-        protocolVersion: 1,
+        protocolVersion: 2,
         subscription: { id: snapshot.subscription.id },
         reason: "access_revoked"
       });
