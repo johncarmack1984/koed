@@ -17,6 +17,7 @@ import {
   collaborationRendererCommandSchema,
   collaborationRendererEventSchema,
   collaborationSnapshotSchema,
+  collaborationTeamPresenceStatusCatalogueSchema,
   collaborationThreadSchema,
   collaborationTeamPersonSchema,
   collaborationTopicDescriptionSchema,
@@ -27,6 +28,7 @@ import {
   type CollaborationCommandResult,
   type CollaborationRendererCommand
 } from "./collaboration-contract.js";
+import { teamPresenceStatusCatalogue } from "./team-presence.js";
 
 const ids = {
   request: "00000000-0000-4000-8000-000000000001",
@@ -277,6 +279,7 @@ const snapshot = () => ({
     protocolVersion: COLLABORATION_CONTRACT_VERSION
   },
   limits: limits(),
+  teamPresenceStatusCatalogue,
   navigation: {
     personalOwner: {
       ...participant(),
@@ -509,6 +512,14 @@ describe("collaboration renderer commands", () => {
       collaborationTeamPersonSchema.parse({
         ...participant(),
         presence: "available",
+        teamPresence: {
+          mode: "auto",
+          manualStatus: "available",
+          activityLevel: "active",
+          lastActivityAt: "2026-01-01T00:00:00.000Z",
+          nextTransitionAt: "2026-01-01T00:05:00.001Z",
+          preferenceVersion: 1
+        },
         management: {
           membershipId: ids.membership,
           email: "OWNER@EXAMPLE.TEST",
@@ -585,13 +596,13 @@ describe("collaboration renderer commands", () => {
 
   it("accepts named Personal and Team commands and normalizes their text", () => {
     const personal = collaborationRendererCommandSchema.parse({
-      contractVersion: 2,
+      contractVersion: COLLABORATION_CONTRACT_VERSION,
       requestId: ids.request,
       command: "collaboration.create_personal_channel",
       input: { name: " Cafe\u0301 ", topic: " Notes " }
     });
     const team = collaborationRendererCommandSchema.parse({
-      contractVersion: 2,
+      contractVersion: COLLABORATION_CONTRACT_VERSION,
       requestId: ids.request,
       command: "collaboration.create_workspace_channel",
       input: {
@@ -617,7 +628,7 @@ describe("collaboration renderer commands", () => {
     ).toBe("http://localhost:3300");
     expect(
       collaborationRendererCommandSchema.safeParse({
-        contractVersion: 2,
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
         requestId: ids.request,
         command: "collaboration.connect_backend",
         input: { remoteUrl: "http://127.0.0.1:3300" }
@@ -654,7 +665,7 @@ describe("collaboration renderer commands", () => {
     ]) {
       expect(
         collaborationRendererCommandSchema.safeParse({
-          contractVersion: 2,
+          contractVersion: COLLABORATION_CONTRACT_VERSION,
           requestId: ids.request,
           command: "collaboration.connect_backend",
           input: { remoteUrl: "https://team.example.test", ...forbidden }
@@ -843,7 +854,7 @@ describe("collaboration renderer commands", () => {
     for (const value of commands) {
       expect(
         collaborationRendererCommandSchema.safeParse({
-          contractVersion: 2,
+          contractVersion: COLLABORATION_CONTRACT_VERSION,
           requestId: ids.request,
           ...value
         }).success,
@@ -860,7 +871,7 @@ describe("collaboration renderer commands", () => {
     ]) {
       expect(
         collaborationRendererCommandSchema.safeParse({
-          contractVersion: 2,
+          contractVersion: COLLABORATION_CONTRACT_VERSION,
           requestId: ids.request,
           command: "collaboration.disable_member",
           input: {
@@ -966,7 +977,7 @@ describe("collaboration renderer commands", () => {
     ] as const) {
       expect(
         collaborationRendererCommandSchema.safeParse({
-          contractVersion: 2,
+          contractVersion: COLLABORATION_CONTRACT_VERSION,
           requestId: ids.request,
           command: "collaboration.request_action_grant",
           input: { intent }
@@ -976,7 +987,7 @@ describe("collaboration renderer commands", () => {
     }
     expect(
       collaborationRendererCommandSchema.safeParse({
-        contractVersion: 2,
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
         requestId: ids.request,
         command: "collaboration.await_action_grant",
         input: { actionGrant: actionGrant() }
@@ -984,7 +995,7 @@ describe("collaboration renderer commands", () => {
     ).toBe(true);
     expect(
       collaborationRendererCommandSchema.safeParse({
-        contractVersion: 2,
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
         requestId: ids.request,
         command: "collaboration.cancel_action_grant",
         input: { actionGrant: actionGrant() }
@@ -992,7 +1003,7 @@ describe("collaboration renderer commands", () => {
     ).toBe(true);
     expect(
       collaborationRendererCommandSchema.safeParse({
-        contractVersion: 2,
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
         requestId: ids.request,
         command: "collaboration.request_action_grant",
         input: {
@@ -1024,7 +1035,7 @@ describe("collaboration renderer commands", () => {
       };
       expect(
         collaborationRendererCommandSchema.safeParse({
-          contractVersion: 2,
+          contractVersion: COLLABORATION_CONTRACT_VERSION,
           requestId: ids.request,
           command: "collaboration.request_action_grant",
           input: {
@@ -1038,7 +1049,7 @@ describe("collaboration renderer commands", () => {
       ).toBe(false);
       expect(
         collaborationRendererCommandSchema.safeParse({
-          contractVersion: 2,
+          contractVersion: COLLABORATION_CONTRACT_VERSION,
           requestId: ids.request,
           command: "collaboration.create_workspace",
           input: { ...workspaceInput, actionGrant: actionGrant() }
@@ -1068,7 +1079,7 @@ describe("collaboration renderer commands", () => {
     ]) {
       expect(
         collaborationRendererCommandSchema.safeParse({
-          contractVersion: 2,
+          contractVersion: COLLABORATION_CONTRACT_VERSION,
           requestId: ids.request,
           command: "collaboration.preview_shared_memory",
           input
@@ -1080,7 +1091,7 @@ describe("collaboration renderer commands", () => {
   it("rejects duplicate group-DM participants and malformed IDs", () => {
     expect(
       collaborationRendererCommandSchema.safeParse({
-        contractVersion: 2,
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
         requestId: ids.request,
         command: "collaboration.start_group_direct_message",
         input: {
@@ -1091,7 +1102,7 @@ describe("collaboration renderer commands", () => {
     ).toBe(false);
     expect(
       collaborationRendererCommandSchema.safeParse({
-        contractVersion: 2,
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
         requestId: "not-a-uuid",
         command: "collaboration.load",
         input: {}
@@ -1108,7 +1119,7 @@ describe("collaboration renderer commands", () => {
     );
     expect(
       collaborationRendererCommandSchema.safeParse({
-        contractVersion: 2,
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
         requestId: ids.request,
         command: "collaboration.acknowledge_delivery",
         input: {
@@ -1125,7 +1136,7 @@ describe("collaboration renderer commands", () => {
   it("requires explicit Personal or Team thread references", () => {
     expect(
       collaborationRendererCommandSchema.safeParse({
-        contractVersion: 2,
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
         requestId: ids.request,
         command: "collaboration.send_message",
         input: {
@@ -1137,7 +1148,7 @@ describe("collaboration renderer commands", () => {
     ).toBe(true);
     expect(
       collaborationRendererCommandSchema.safeParse({
-        contractVersion: 2,
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
         requestId: ids.request,
         command: "collaboration.send_message",
         input: {
@@ -1151,7 +1162,7 @@ describe("collaboration renderer commands", () => {
 
   it("binds a retry to the original client message identity and exact body", () => {
     const retry = {
-      contractVersion: 2,
+      contractVersion: COLLABORATION_CONTRACT_VERSION,
       requestId: ids.request,
       command: "collaboration.retry_message",
       input: {
@@ -1185,6 +1196,17 @@ describe("collaboration snapshots and DTOs", () => {
       ...participant(ids.otherUser, "Bob"),
       presence: "available" as const
     };
+    const remoteTeamPerson = {
+      ...remotePrincipal,
+      teamPresence: {
+        mode: "auto" as const,
+        manualStatus: "available" as const,
+        activityLevel: "active" as const,
+        lastActivityAt: "2026-01-01T00:00:00.000Z",
+        nextTransitionAt: "2026-01-01T00:05:00.001Z",
+        preferenceVersion: 1
+      }
+    };
     const withTeam = {
       ...snapshot(),
       navigation: {
@@ -1197,7 +1219,7 @@ describe("collaboration snapshots and DTOs", () => {
             role: "member" as const,
             lifecycle: "active" as const,
             unreadCount: 0,
-            people: [remotePrincipal],
+            people: [remoteTeamPerson],
             directMessages: [],
             workspaces: [],
             version: 1
@@ -1242,6 +1264,70 @@ describe("collaboration snapshots and DTOs", () => {
             }
           ]
         }
+      }).success
+    ).toBe(false);
+  });
+
+  it("returns a versioned Presence catalogue and safely degrades future status keys", () => {
+    const remotePrincipal = {
+      ...participant(ids.otherUser, "Bob"),
+      presence: "away" as const
+    };
+    const parsed = collaborationSnapshotSchema.parse({
+      ...snapshot(),
+      teamPresenceStatusCatalogue: {
+        version: 2,
+        statuses: [
+          ...teamPresenceStatusCatalogue.statuses,
+          { key: "heads_down", label: "Heads down" }
+        ]
+      },
+      navigation: {
+        ...snapshot().navigation,
+        teamPrincipal: remotePrincipal,
+        teams: [
+          {
+            id: ids.team,
+            name: "Remote Team",
+            role: "member",
+            lifecycle: "active",
+            unreadCount: 0,
+            people: [
+              {
+                ...remotePrincipal,
+                teamPresence: {
+                  mode: "manual",
+                  manualStatus: "heads_down",
+                  activityLevel: null,
+                  lastActivityAt: null,
+                  nextTransitionAt: null,
+                  preferenceVersion: 2
+                }
+              }
+            ],
+            directMessages: [],
+            workspaces: [],
+            version: 1
+          }
+        ]
+      }
+    });
+
+    expect(parsed.teamPresenceStatusCatalogue.version).toBe(2);
+    expect(parsed.teamPresenceStatusCatalogue.statuses).toContainEqual({
+      key: "heads_down",
+      label: "Heads down"
+    });
+    expect(
+      parsed.navigation.teams[0]?.people[0]?.teamPresence.manualStatus
+    ).toBe("unknown");
+    expect(
+      collaborationTeamPresenceStatusCatalogueSchema.safeParse({
+        version: 2,
+        statuses: [
+          { key: "available", label: "Available" },
+          { key: "available", label: "Duplicate" }
+        ]
       }).success
     ).toBe(false);
   });
@@ -1387,7 +1473,7 @@ describe("collaboration results and realtime", () => {
   it("accepts command-correlated success and safe failure results", () => {
     expect(
       collaborationCommandResultSchema.safeParse({
-        contractVersion: 2,
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
         requestId: ids.request,
         command: "collaboration.load",
         ok: true,
@@ -1396,7 +1482,7 @@ describe("collaboration results and realtime", () => {
     ).toBe(true);
     expect(
       collaborationCommandResultSchema.safeParse({
-        contractVersion: 2,
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
         requestId: ids.request,
         command: "collaboration.load",
         ok: false,
@@ -1410,7 +1496,7 @@ describe("collaboration results and realtime", () => {
     ).toBe(true);
     expect(
       collaborationCommandResultSchema.safeParse({
-        contractVersion: 2,
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
         requestId: ids.request,
         command: "collaboration.load",
         ok: false,
@@ -1428,7 +1514,7 @@ describe("collaboration results and realtime", () => {
   it("correlates canonical backend connection results", () => {
     expect(
       collaborationCommandResultSchema.safeParse({
-        contractVersion: 2,
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
         requestId: ids.request,
         command: "collaboration.connect_backend",
         ok: true,
@@ -1443,7 +1529,7 @@ describe("collaboration results and realtime", () => {
     ).toBe(true);
     expect(
       collaborationCommandResultSchema.safeParse({
-        contractVersion: 2,
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
         requestId: ids.request,
         command: "collaboration.connect_backend",
         ok: true,
@@ -1458,7 +1544,7 @@ describe("collaboration results and realtime", () => {
     ).toBe(false);
     expect(
       collaborationCommandResultSchema.safeParse({
-        contractVersion: 2,
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
         requestId: ids.request,
         command: "collaboration.connect_backend",
         ok: false,
@@ -1604,7 +1690,7 @@ describe("collaboration results and realtime", () => {
     for (const value of results) {
       expect(
         collaborationCommandResultSchema.safeParse({
-          contractVersion: 2,
+          contractVersion: COLLABORATION_CONTRACT_VERSION,
           requestId: ids.request,
           ok: true,
           ...value
@@ -1615,7 +1701,7 @@ describe("collaboration results and realtime", () => {
 
     expect(
       collaborationCommandResultSchema.safeParse({
-        contractVersion: 2,
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
         requestId: ids.request,
         command: "collaboration.list_invitations",
         ok: true,
@@ -1629,7 +1715,7 @@ describe("collaboration results and realtime", () => {
 
   it("accepts typed updates and rejects mismatched protected scope", () => {
     const update = {
-      contractVersion: 2,
+      contractVersion: COLLABORATION_CONTRACT_VERSION,
       type: "update" as const,
       subscriptionId: ids.subscription,
       deliveryId: ids.delivery,
@@ -1665,9 +1751,9 @@ describe("collaboration results and realtime", () => {
     ).toBe(false);
   });
 
-  it("keeps Personal Memory sync updates on contract version 2 and owner-only resources", () => {
+  it("keeps Personal Memory sync updates on the current contract version and owner-only resources", () => {
     const update = {
-      contractVersion: 2,
+      contractVersion: COLLABORATION_CONTRACT_VERSION,
       type: "update" as const,
       subscriptionId: ids.subscription,
       deliveryId: ids.delivery,
@@ -1718,7 +1804,7 @@ describe("collaboration results and realtime", () => {
 
   it("keeps revocation and backpressure controls content-free", () => {
     const control = {
-      contractVersion: 2,
+      contractVersion: COLLABORATION_CONTRACT_VERSION,
       type: "control" as const,
       subscriptionId: ids.subscription,
       occurredAt: timestamp,

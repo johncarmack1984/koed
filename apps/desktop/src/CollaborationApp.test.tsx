@@ -177,6 +177,17 @@ const person = (id: string, displayName: string) => ({
   presence: "available" as const,
   membershipState: "enabled" as const
 });
+const teamPerson = (value: ReturnType<typeof person>) => ({
+  ...value,
+  teamPresence: {
+    mode: "auto" as const,
+    manualStatus: "available" as const,
+    activityLevel: "active" as const,
+    lastActivityAt: at,
+    nextTransitionAt: "2026-07-17T08:35:00.001Z",
+    preferenceVersion: 1
+  }
+});
 const mark = person(ids.mark, "Mark Fixture");
 const remoteMark = person(ids.remoteMark, "Mark Fixture");
 const alex = person(ids.alex, "Alex Chen");
@@ -195,7 +206,7 @@ const managedPerson = (
   access: "disabled" | "read" | "write" = "write",
   version = 1
 ) => ({
-  ...value,
+  ...teamPerson(value),
   management: {
     membershipId: `${ids.membership.slice(0, -1)}${
       value.id === ids.remoteMark ? "1" : value.id === ids.alex ? "2" : "3"
@@ -471,7 +482,7 @@ const baseSnapshot = (): CollaborationSnapshot =>
           membershipVersion: 1,
           lifecycle: "active",
           unreadCount: 0,
-          people: [remoteMark],
+          people: [teamPerson(remoteMark)],
           directMessages: [],
           workspaces: [],
           version: 1
@@ -842,6 +853,23 @@ const createClient = (initial = baseSnapshot()): MockClient => {
       access: input.access,
       version: (input.expectedVersion ?? 0) + 1
     })),
+    setTeamPresence: vi.fn(async (input) => {
+      const person = current.navigation.teams
+        .find((team) => team.id === input.teamId)!
+        .people.find(
+          (candidate) => candidate.id === current.navigation.teamPrincipal?.id
+        )!;
+      return {
+        ...person,
+        teamPresence: {
+          ...person.teamPresence,
+          mode: input.mode,
+          manualStatus: input.manualStatus,
+          preferenceVersion: input.expectedVersion + 1
+        }
+      };
+    }),
+    reportTeamActivity: vi.fn(async (teamIds) => teamIds),
     createPersonalChannel: vi.fn(async () => current),
     renameThread: vi.fn(async ({ thread, name }) =>
       updatePersonalChannel({
@@ -1072,6 +1100,7 @@ describe("CollaborationApp", () => {
     container.remove();
     delete window.koedDesktop;
     vi.restoreAllMocks();
+    vi.useRealTimers();
     (
       globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
     ).IS_REACT_ACT_ENVIRONMENT = false;
@@ -1500,11 +1529,18 @@ describe("CollaborationApp", () => {
                 role: "member",
                 membershipVersion: 3,
                 people: team.people.map(
-                  ({ id, displayName, presence, membershipState }) => ({
+                  ({
                     id,
                     displayName,
                     presence,
-                    membershipState
+                    membershipState,
+                    teamPresence
+                  }) => ({
+                    id,
+                    displayName,
+                    presence,
+                    membershipState,
+                    teamPresence
                   })
                 )
               }
@@ -1516,11 +1552,18 @@ describe("CollaborationApp", () => {
         people:
           selected.view.kind === "team_people"
             ? selected.view.people.map(
-                ({ id, displayName, presence, membershipState }) => ({
+                ({
                   id,
                   displayName,
                   presence,
-                  membershipState
+                  membershipState,
+                  teamPresence
+                }) => ({
+                  id,
+                  displayName,
+                  presence,
+                  membershipState,
+                  teamPresence
                 })
               )
             : []
@@ -1546,6 +1589,171 @@ describe("CollaborationApp", () => {
       teamId: ids.team,
       expectedVersion: 3
     });
+  });
+
+  it("renders Team presence and lets the current User choose one manual status", async () => {
+    const selected = viewFor(baseSnapshot(), {
+      kind: "team_people",
+      teamId: ids.team
+    });
+    const setPresence = (
+      person: CollaborationSnapshot["navigation"]["teams"][number]["people"][number]
+    ) =>
+      person.id === ids.remoteMark
+        ? {
+            ...person,
+            presence: "available" as const,
+            teamPresence: {
+              mode: "manual" as const,
+              manualStatus: "available" as const,
+              activityLevel: null,
+              lastActivityAt: null,
+              nextTransitionAt: null,
+              preferenceVersion: 7
+            }
+          }
+        : person.id === ids.riley
+          ? {
+              ...person,
+              presence: "away" as const,
+              teamPresence: {
+                mode: "manual" as const,
+                manualStatus: "out_of_office" as const,
+                activityLevel: null,
+                lastActivityAt: null,
+                nextTransitionAt: null,
+                preferenceVersion: 2
+              }
+            }
+          : person;
+    const presenceSnapshot = collaborationSnapshotSchema.parse({
+      ...selected,
+      navigation: {
+        ...selected.navigation,
+        teams: selected.navigation.teams.map((team) =>
+          team.id === ids.team
+            ? { ...team, people: team.people.map(setPresence) }
+            : team
+        )
+      },
+      view:
+        selected.view.kind === "team_people"
+          ? { ...selected.view, people: selected.view.people.map(setPresence) }
+          : selected.view
+    });
+    const client = await render(createClient(presenceSnapshot));
+
+    const auto = document.body.querySelector<HTMLInputElement>(
+      '.collab-presence-auto input[type="checkbox"]'
+    );
+    expect(auto?.checked).toBe(false);
+    expect(
+      document.body.querySelector('[title="Out of office"]')
+    ).not.toBeNull();
+    expect(
+      document.body
+        .querySelector<HTMLButtonElement>('button[aria-label="Available"]')
+        ?.getAttribute("aria-pressed")
+    ).toBe("true");
+
+    await click(container, "Do not disturb");
+    expect(client.setTeamPresence).toHaveBeenCalledWith({
+      teamId: ids.team,
+      mode: "manual",
+      manualStatus: "do_not_disturb",
+      expectedVersion: 7
+    });
+  });
+
+  it("advances automatic Team presence through every threshold without another server event", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(at));
+    const selected = viewFor(baseSnapshot(), {
+      kind: "team_people",
+      teamId: ids.teamTwo
+    });
+    await render(createClient(selected));
+
+    expect(document.body.querySelector('[title="Active"]')).not.toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
+    });
+    expect(
+      document.body.querySelector('[title="Recently active"]')
+    ).not.toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(25 * 60 * 1000);
+    });
+    expect(document.body.querySelector('[title="Idle"]')).not.toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(90 * 60 * 1000);
+    });
+    expect(document.body.querySelector('[title="Inactive"]')).not.toBeNull();
+    expect(
+      document.body.querySelector(".collab-person-identity > span")?.textContent
+    ).toContain("offline");
+  });
+
+  it("renders pushed activity against the current clock", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.parse(at) + 3 * 60 * 60 * 1000));
+    const client = createClient(
+      viewFor(baseSnapshot(), {
+        kind: "team_people",
+        teamId: ids.teamTwo
+      })
+    );
+    await render(client);
+    expect(document.body.querySelector('[title="Inactive"]')).not.toBeNull();
+
+    const current = requireCurrent(client);
+    const activityAt = new Date(Date.now()).toISOString();
+    const updatePeople = (
+      people: CollaborationSnapshot["navigation"]["teams"][number]["people"]
+    ) =>
+      people.map((person) => ({
+        ...person,
+        presence: "available" as const,
+        teamPresence: {
+          ...person.teamPresence,
+          activityLevel: "active" as const,
+          lastActivityAt: activityAt,
+          nextTransitionAt: new Date(Date.now() + 5 * 60 * 1000).toISOString()
+        }
+      }));
+    await act(async () =>
+      client.emit({
+        ...current,
+        navigation: {
+          ...current.navigation,
+          teams: current.navigation.teams.map((team) =>
+            team.id === ids.teamTwo
+              ? { ...team, people: updatePeople(team.people) }
+              : team
+          )
+        },
+        view:
+          current.view.kind === "team_people"
+            ? { ...current.view, people: updatePeople(current.view.people) }
+            : current.view
+      })
+    );
+
+    expect(document.body.querySelector('[title="Active"]')).not.toBeNull();
+  });
+
+  it("reports foreground activity when an already-focused view mounts", async () => {
+    const client = await render();
+
+    await vi.waitFor(() =>
+      expect(client.reportTeamActivity).toHaveBeenCalledWith([
+        ids.team,
+        ids.teamTwo
+      ])
+    );
   });
 
   it("shows safe denied and conflict states without exposing internal errors", async () => {

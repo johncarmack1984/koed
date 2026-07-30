@@ -60,6 +60,18 @@ const person = (personId = ids.user, displayName = "Mark") => ({
   membershipState: "enabled" as const
 });
 
+const teamPerson = (personId = ids.user, displayName = "Mark") => ({
+  ...person(personId, displayName),
+  teamPresence: {
+    mode: "auto" as const,
+    manualStatus: "available" as const,
+    activityLevel: "active" as const,
+    lastActivityAt: timestamp,
+    nextTransitionAt: "2026-07-17T08:35:00.001Z",
+    preferenceVersion: 1
+  }
+});
+
 const participant = (personId = ids.user, displayName = "Mark") => {
   const value = person(personId, displayName);
   return {
@@ -152,7 +164,7 @@ const fixture = (options?: {
           role: "owner",
           lifecycle: "active",
           unreadCount: 0,
-          people: [person(ids.remoteUser), person(ids.other, "Alex")],
+          people: [teamPerson(ids.remoteUser), teamPerson(ids.other, "Alex")],
           directMessages: [],
           version: 1,
           workspaces: [
@@ -1964,6 +1976,275 @@ describe("collaboration renderer client", () => {
     await waitFor(() =>
       expect(client.current()?.navigation.personal.memory).toEqual([entry])
     );
+    client.dispose();
+  });
+
+  it("merges a pushed Team person without dropping management metadata or reordering the roster", async () => {
+    const initial = fixture();
+    const management = {
+      membershipId: ids.membership,
+      email: "managed@example.test",
+      role: "owner" as const,
+      status: "enabled" as const,
+      version: 4,
+      workspaceAccess: [
+        {
+          workspaceId: ids.workspace,
+          userId: ids.remoteUser,
+          access: "write" as const,
+          version: 2
+        }
+      ]
+    };
+    const managedPeople = initial.navigation.teams[0]!.people.map((person) =>
+      person.id === ids.remoteUser ? { ...person, management } : person
+    );
+    const managedSnapshot = collaborationSnapshotSchema.parse({
+      ...initial,
+      navigation: {
+        ...initial.navigation,
+        teams: initial.navigation.teams.map((team) => ({
+          ...team,
+          people: managedPeople
+        }))
+      },
+      selection: { kind: "team_people", teamId: ids.team },
+      view: { kind: "team_people", teamId: ids.team, people: managedPeople }
+    });
+    const mock = createBridge(managedSnapshot);
+    const client = createCollaborationRendererClient(mock.bridge);
+    await client.load();
+    const updatedPerson = {
+      ...teamPerson(ids.remoteUser),
+      presence: "away" as const,
+      teamPresence: {
+        mode: "manual" as const,
+        manualStatus: "do_not_disturb" as const,
+        activityLevel: null,
+        lastActivityAt: null,
+        nextTransitionAt: null,
+        preferenceVersion: 2
+      }
+    };
+
+    mock.emit({
+      contractVersion: COLLABORATION_CONTRACT_VERSION,
+      type: "update",
+      subscriptionId: ids.teamSubscription,
+      deliveryId: delivery(4),
+      eventId: id(31),
+      occurredAt: timestamp,
+      family: "team_presence_changed",
+      resource: {
+        scope: "team",
+        teamId: ids.team,
+        workspaceId: null,
+        threadId: null,
+        messageId: null,
+        sharedSessionId: null,
+        shareGrantId: null
+      },
+      update: {
+        type: "team_person_upserted",
+        teamId: ids.team,
+        person: updatedPerson
+      }
+    });
+
+    await waitFor(() =>
+      expect(
+        client
+          .current()
+          ?.navigation.teams[0]?.people.map((candidate) => candidate.id)
+      ).toEqual([ids.remoteUser, ids.other])
+    );
+    expect(
+      client.current()?.navigation.teams[0]?.people[0]?.teamPresence
+    ).toMatchObject({
+      mode: "manual",
+      manualStatus: "do_not_disturb",
+      preferenceVersion: 2
+    });
+    expect(
+      client.current()?.navigation.teams[0]?.people[0]?.management
+    ).toEqual(management);
+    const current = client.current();
+    expect(
+      current?.view.kind === "team_people"
+        ? current.view.people[0]?.management
+        : null
+    ).toEqual(management);
+    client.dispose();
+  });
+
+  it("does not let a delayed presence command overwrite a newer pushed preference", async () => {
+    const initial = fixture();
+    const people = initial.navigation.teams[0]!.people;
+    const mock = createBridge(
+      collaborationSnapshotSchema.parse({
+        ...initial,
+        selection: { kind: "team_people", teamId: ids.team },
+        view: { kind: "team_people", teamId: ids.team, people }
+      })
+    );
+    const client = createCollaborationRendererClient(mock.bridge);
+    await client.load();
+    let resolveCommand!: (result: CollaborationCommandResult) => void;
+    let commandRequestId = "";
+    mock.command.mockImplementationOnce(
+      (command) =>
+        new Promise<CollaborationCommandResult>((resolve) => {
+          commandRequestId = command.requestId;
+          resolveCommand = resolve;
+        })
+    );
+
+    const pending = client.setTeamPresence({
+      teamId: ids.team,
+      mode: "manual",
+      manualStatus: "do_not_disturb",
+      expectedVersion: 1
+    });
+    const pushedPerson = {
+      ...teamPerson(ids.remoteUser),
+      teamPresence: {
+        mode: "manual" as const,
+        manualStatus: "out_of_office" as const,
+        activityLevel: null,
+        lastActivityAt: null,
+        nextTransitionAt: null,
+        preferenceVersion: 3
+      }
+    };
+    mock.emit({
+      contractVersion: COLLABORATION_CONTRACT_VERSION,
+      type: "update",
+      subscriptionId: ids.teamSubscription,
+      deliveryId: delivery(5),
+      eventId: id(32),
+      occurredAt: timestamp,
+      family: "team_presence_changed",
+      resource: {
+        scope: "team",
+        teamId: ids.team,
+        workspaceId: null,
+        threadId: null,
+        messageId: null,
+        sharedSessionId: null,
+        shareGrantId: null
+      },
+      update: {
+        type: "team_person_upserted",
+        teamId: ids.team,
+        person: pushedPerson
+      }
+    });
+    await waitFor(() =>
+      expect(
+        client.current()?.navigation.teams[0]?.people[0]?.teamPresence
+          .preferenceVersion
+      ).toBe(3)
+    );
+
+    resolveCommand(
+      collaborationCommandResultSchema.parse({
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
+        requestId: commandRequestId,
+        command: "collaboration.set_team_presence",
+        ok: true,
+        data: {
+          person: {
+            ...teamPerson(ids.remoteUser),
+            teamPresence: {
+              mode: "manual",
+              manualStatus: "do_not_disturb",
+              activityLevel: null,
+              lastActivityAt: null,
+              nextTransitionAt: null,
+              preferenceVersion: 2
+            }
+          }
+        }
+      })
+    );
+    await pending;
+
+    expect(
+      client.current()?.navigation.teams[0]?.people[0]?.teamPresence
+    ).toMatchObject({
+      manualStatus: "out_of_office",
+      preferenceVersion: 3
+    });
+    client.dispose();
+  });
+
+  it("reloads authoritative presence after an optimistic preference conflict", async () => {
+    const mock = createBridge();
+    const client = createCollaborationRendererClient(mock.bridge);
+    await client.load();
+    const authoritativePerson = {
+      ...teamPerson(ids.remoteUser),
+      teamPresence: {
+        mode: "manual" as const,
+        manualStatus: "out_of_office" as const,
+        activityLevel: null,
+        lastActivityAt: null,
+        nextTransitionAt: null,
+        preferenceVersion: 4
+      }
+    };
+    const authoritative = collaborationSnapshotSchema.parse({
+      ...fixture(),
+      navigation: {
+        ...fixture().navigation,
+        teams: fixture().navigation.teams.map((team) => ({
+          ...team,
+          people: team.people.map((candidate) =>
+            candidate.id === ids.remoteUser ? authoritativePerson : candidate
+          )
+        }))
+      }
+    });
+    mock.setSnapshot(authoritative);
+    mock.command.mockImplementationOnce(async (command) =>
+      collaborationCommandResultSchema.parse({
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
+        requestId: command.requestId,
+        command: "collaboration.set_team_presence",
+        ok: false,
+        error: {
+          code: "conflict",
+          userMessage: collaborationSafeErrorMessages.conflict,
+          retryable: true,
+          retryAfterMs: null
+        }
+      })
+    );
+
+    await expect(
+      client.setTeamPresence({
+        teamId: ids.team,
+        mode: "manual",
+        manualStatus: "do_not_disturb",
+        expectedVersion: 1
+      })
+    ).rejects.toMatchObject({ code: "conflict" });
+    expect(
+      client.current()?.navigation.teams[0]?.people[0]?.teamPresence
+    ).toMatchObject({
+      manualStatus: "out_of_office",
+      preferenceVersion: 4
+    });
+    expect(
+      mock.command.mock.calls.filter(
+        ([command]) => command.command === "collaboration.load"
+      )
+    ).toHaveLength(2);
+    expect(
+      mock.command.mock.calls.filter(
+        ([command]) => command.command === "collaboration.load"
+      )[1]?.[0].input
+    ).toEqual({ forceRemoteNavigation: true });
     client.dispose();
   });
 

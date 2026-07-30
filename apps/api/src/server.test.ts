@@ -55,6 +55,7 @@ import type {
 } from "@koed/db";
 import { createDbPool, createMemorySourceRepository } from "@koed/db";
 import {
+  COLLABORATION_CONTRACT_VERSION,
   RAW_CONVERSATION_TRANSPORT_CHUNK_MAX_BYTES,
   RAW_CONVERSATION_TRANSPORT_CHUNK_MAX_COUNT,
   canonicalizePdsJson,
@@ -1556,6 +1557,11 @@ const createFakeRepository = () => {
           ...membership,
           email: users.get(membership.userId)?.email ?? "",
           displayName: users.get(membership.userId)?.displayName ?? null,
+          avatarReference: null,
+          presenceMode: "auto" as const,
+          manualPresenceStatus: "available" as const,
+          presenceVersion: 1,
+          lastHumanActivityAt: null,
           workspaceAccess: [...teamWorkspaceAccess.values()]
             .filter(
               (access) =>
@@ -1654,7 +1660,10 @@ const createFakeRepository = () => {
           displayName: users.get(candidate.userId)?.displayName ?? null,
           avatarReference: null,
           status: "enabled" as const,
-          presence: "unknown" as const
+          presenceMode: "auto" as const,
+          manualPresenceStatus: "available" as const,
+          presenceVersion: 1,
+          lastHumanActivityAt: null
         }));
     },
     async createTeamInvite(actor, input) {
@@ -5283,7 +5292,7 @@ describe("api health", () => {
       },
       protocols: {
         collaborationRealtime: {
-          version: 2,
+          version: COLLABORATION_CONTRACT_VERSION,
           transport: "sse",
           snapshotEndpoint: "/v1/collaboration/realtime/snapshot",
           streamEndpoint: "/v1/collaboration/realtime/stream",

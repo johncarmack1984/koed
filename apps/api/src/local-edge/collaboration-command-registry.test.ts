@@ -169,6 +169,17 @@ const expectedRegistry: Record<CollaborationCommandName, ExpectedDescriptor> = {
     scope: "team",
     desktop: write
   },
+  "collaboration.set_team_presence": {
+    scope: "team",
+    desktop: write,
+    teamOperation: true,
+    teamResultMatcher: true
+  },
+  "collaboration.report_team_activity": {
+    scope: "team",
+    desktop: write,
+    teamOperation: true
+  },
   "collaboration.subscribe": { scope: "dynamic", desktop: read },
   "collaboration.unsubscribe": { scope: "unsupported", desktop: write },
   "collaboration.acknowledge_delivery": {
@@ -339,5 +350,34 @@ describe("collaboration command registry", () => {
         topic: "Launch"
       })
     ).toBe(false);
+
+    const setPresence = command("collaboration.set_team_presence", {
+      teamId,
+      mode: "manual",
+      manualStatus: "do_not_disturb",
+      expectedVersion: 2
+    });
+    expect(teamCollaborationOperationFor(setPresence)).toEqual({
+      operationFamily: "team_chat_read",
+      method: "PUT",
+      path: `/v1/teams/${teamId}/presence/me`,
+      body: {
+        mode: "manual",
+        manualStatus: "do_not_disturb",
+        expectedVersion: 2
+      },
+      resultKey: "person"
+    });
+
+    const reportActivity = command("collaboration.report_team_activity", {
+      teamIds: [teamId]
+    });
+    expect(teamCollaborationOperationFor(reportActivity)).toEqual({
+      operationFamily: "team_chat_read",
+      method: "POST",
+      path: "/v1/teams/presence/activity",
+      body: { teamIds: [teamId] },
+      resultKey: "acceptedTeamIds"
+    });
   });
 });

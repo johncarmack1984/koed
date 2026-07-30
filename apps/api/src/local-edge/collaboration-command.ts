@@ -23,6 +23,7 @@ import {
   collaborationReadStateSchema,
   collaborationRendererCommandSchema,
   collaborationSafeErrorMessages,
+  collaborationTeamPresenceStatusCatalogueSchema,
   collaborationThreadSchema,
   fetchBoundedJsonObject,
   isLoopbackHostname,
@@ -207,6 +208,8 @@ type SupportedCommand = Extract<
   | { command: "collaboration.create_workspace_channel" }
   | { command: "collaboration.start_direct_message" }
   | { command: "collaboration.start_group_direct_message" }
+  | { command: "collaboration.set_team_presence" }
+  | { command: "collaboration.report_team_activity" }
   | { command: "collaboration.rename_thread" }
   | { command: "collaboration.update_thread_topic" }
   | { command: "collaboration.archive_thread" }
@@ -428,12 +431,35 @@ const remoteMembershipSchema = z
   })
   .passthrough();
 
+const remoteTeamPresenceSchema = z
+  .object({
+    mode: z.enum(["auto", "manual"]),
+    manualStatus: z.union([
+      z.enum(["available", "do_not_disturb", "out_of_office"]),
+      z
+        .string()
+        .trim()
+        .min(1)
+        .max(64)
+        .regex(/^[a-z][a-z0-9_]*$/)
+        .transform(() => "unknown" as const)
+    ]),
+    activityLevel: z
+      .enum(["active", "recently_active", "idle", "inactive"])
+      .nullable(),
+    lastActivityAt: z.string().datetime().nullable(),
+    nextTransitionAt: z.string().datetime().nullable(),
+    preferenceVersion: z.number().int().safe().positive()
+  })
+  .strict();
+
 const remoteRosterMemberSchema = z
   .object({
     userId: z.uuid(),
     displayName: z.string().nullable(),
     status: z.literal("enabled"),
-    presence: z.literal("unknown").optional()
+    presence: z.enum(["available", "away", "offline"]),
+    teamPresence: remoteTeamPresenceSchema
   })
   .passthrough();
 
@@ -456,6 +482,8 @@ const remoteManagementMemberSchema = z
     version: z.number().int().safe().positive(),
     email: z.email(),
     displayName: z.string().nullable(),
+    presence: z.enum(["available", "away", "offline"]),
+    teamPresence: remoteTeamPresenceSchema,
     workspaceAccess: z.array(remoteManagementWorkspaceAccessSchema).max(250)
   })
   .passthrough();
@@ -514,6 +542,7 @@ const remoteSharedGrantIndexSchema = z
 const remoteTeamNavigationSchema = z
   .object({
     principal: remotePrincipalSchema,
+    teamPresenceStatusCatalogue: collaborationTeamPresenceStatusCatalogueSchema,
     teams: z
       .array(
         z
@@ -1201,6 +1230,14 @@ const targetResultValue = (
 ): unknown => {
   if (operation.resultKey === "thread") return targetThreadFrom(value, command);
   if (operation.resultKey === "message") return targetMessageFrom(value);
+  if (operation.resultKey === "person") {
+    const person = remoteRosterMemberSchema.safeParse(value);
+    return person.success ? remotePersonFrom(person.data) : null;
+  }
+  if (operation.resultKey === "acceptedTeamIds") {
+    const accepted = z.array(z.uuid()).max(50).safeParse(value);
+    return accepted.success ? accepted.data : null;
+  }
   return targetReadStateFrom(value);
 };
 
@@ -1284,7 +1321,8 @@ const remotePersonFrom = (
 ): Record<string, unknown> => ({
   id: value.userId,
   displayName: displayNameFrom(value, "Team member"),
-  presence: "offline",
+  presence: value.presence,
+  teamPresence: value.teamPresence,
   membershipState: "enabled"
 });
 
@@ -1293,7 +1331,8 @@ const remoteManagedPersonFrom = (
 ): Record<string, unknown> => ({
   id: value.userId,
   displayName: displayNameFrom(value, "Team member"),
-  presence: "offline",
+  presence: value.presence,
+  teamPresence: value.teamPresence,
   membershipState: value.status === "enabled" ? "enabled" : "disabled",
   management: {
     membershipId: value.id,
@@ -1837,6 +1876,9 @@ const loadRemoteTeamNavigation = async (input: {
   context: TeamReadContext;
 }): Promise<{
   snapshotRevision: string;
+  teamPresenceStatusCatalogue: z.infer<
+    typeof collaborationTeamPresenceStatusCatalogueSchema
+  >;
   teamPrincipal: Record<string, unknown>;
   teams: Record<string, unknown>[];
 }> => {
@@ -2013,9 +2055,16 @@ const loadRemoteTeamNavigation = async (input: {
         }))
       }
     ),
+    teamPresenceStatusCatalogue: payload.teamPresenceStatusCatalogue,
     teamPrincipal: principal,
     teams: navigationTeams
   };
+};
+
+type ConnectedRemoteTeamNavigation = Awaited<
+  ReturnType<typeof loadRemoteTeamNavigation>
+> & {
+  backendId: string;
 };
 
 const loadPersonalSelection = async (input: {
@@ -2442,12 +2491,7 @@ const personalSubscriptionFromRecord = (
 
 const snapshotWithRemoteNavigation = (
   personalSnapshot: Record<string, unknown>,
-  remote: {
-    backendId: string;
-    snapshotRevision: string;
-    teamPrincipal: Record<string, unknown>;
-    teams: Record<string, unknown>[];
-  } | null,
+  remote: ConnectedRemoteTeamNavigation | null,
   unavailableBackendId: string | null = null,
   reportValidationFailure?: (
     issues: Array<{ code: string; message: string; path: string[] }>
@@ -2473,6 +2517,9 @@ const snapshotWithRemoteNavigation = (
     ...personalSnapshot,
     snapshotRevision:
       remote?.snapshotRevision ?? personalSnapshot.snapshotRevision,
+    ...(remote
+      ? { teamPresenceStatusCatalogue: remote.teamPresenceStatusCatalogue }
+      : {}),
     connection: remote
       ? {
           state: "live",
@@ -2873,22 +2920,12 @@ export const registerCollaborationCommandRoute = (
     string,
     {
       storedAt: number;
-      value: {
-        backendId: string;
-        snapshotRevision: string;
-        teamPrincipal: Record<string, unknown>;
-        teams: Record<string, unknown>[];
-      };
+      value: ConnectedRemoteTeamNavigation;
     }
   >();
   const remoteNavigationInFlight = new Map<
     string,
-    Promise<{
-      backendId: string;
-      snapshotRevision: string;
-      teamPrincipal: Record<string, unknown>;
-      teams: Record<string, unknown>[];
-    }>
+    Promise<ConnectedRemoteTeamNavigation>
   >();
   const REMOTE_NAVIGATION_CACHE_MAX = 32;
   const REMOTE_NAVIGATION_CACHE_RETENTION_MS = 15 * 60_000;
@@ -3211,14 +3248,10 @@ export const registerCollaborationCommandRoute = (
           );
         };
         const composePersonalSnapshot = async (
-          personalSnapshot: Record<string, unknown>
+          personalSnapshot: Record<string, unknown>,
+          forceRemoteNavigation = false
         ): Promise<CollaborationSnapshot | null> => {
-          let remote: {
-            backendId: string;
-            snapshotRevision: string;
-            teamPrincipal: Record<string, unknown>;
-            teams: Record<string, unknown>[];
-          } | null = null;
+          let remote: ConnectedRemoteTeamNavigation | null = null;
           let unavailableBackendId: string | null = null;
           const registeredBackend = options.teamCollaborationEnabled
             ? activeUpstreamBackend(readRegistry(options.upstreamBackendsPath))
@@ -3234,7 +3267,7 @@ export const registerCollaborationCommandRoute = (
                 remote = await loadCachedRemoteTeamNavigation({
                   credential,
                   context,
-                  force: false
+                  force: forceRemoteNavigation
                 });
                 unavailableBackendId = null;
               }
@@ -3288,7 +3321,10 @@ export const registerCollaborationCommandRoute = (
             }
             personalSnapshot = remotePersonalSnapshot;
           }
-          const snapshot = await composePersonalSnapshot(personalSnapshot);
+          const snapshot = await composePersonalSnapshot(
+            personalSnapshot,
+            command.input.forceRemoteNavigation === true
+          );
           return snapshot
             ? (personalSuccessResult(command, { snapshot }) ??
                 failureResult(command, safeError("internal_error")))
