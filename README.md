@@ -162,6 +162,7 @@ add-ons.
 - [Backup and restore](docs/backup-restore.md)
 - [Hosted backups](docs/hosted-backups.md)
 - [Upgrades](docs/upgrades.md)
+- [CI and release validation](docs/ci-validation.md)
 - [Codex integration](docs/codex-integration.md)
 - [Claude Code integration](docs/claude-code-integration.md)
 - [Curated Memory](docs/curated-memory.md)
