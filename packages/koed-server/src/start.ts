@@ -13,7 +13,7 @@ import {
   writeFileSync
 } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import {
   LOCAL_PERSONAL_USER_EMAIL,
   readDesktopLocalCredentialAuthorization,
@@ -26,16 +26,15 @@ import {
 } from "./app-runtime.js";
 import { resolveKoedServerConfig, type KoedServerConfig } from "./config.js";
 import {
-  loadExplorerCredential,
+  loadLocalAppCredential,
   resolveActiveIntegrationApiToken,
   resolveLocalApiToken,
-  writeExplorerCredential
+  writeLocalAppCredential
 } from "./credentials.js";
 import {
   environmentWithRepoEnv,
   loadRepoEnv,
-  resolveApiUrl,
-  resolveExplorerUrl
+  resolveApiUrl
 } from "./env-file.js";
 import { startLocalEmbeddingRuntime } from "./local-embedding-runtime.js";
 import { resolveLocalModelManifest } from "./local-models-runtime.js";
@@ -52,12 +51,13 @@ import {
 import { allocateAndPersistLocalPorts } from "./ports.js";
 import { ensureDeviceIdentity } from "./device-identity.js";
 import { collectKoedServerStatus } from "./status.js";
-import { acquireKoedServerSupervisorLock } from "./supervisor-lock.js";
+import {
+  acquireKoedServerSupervisorLock,
+  releaseKoedServerSupervisorLock
+} from "./supervisor-lock.js";
 import { maintainSupervisorLog } from "./supervisor-log.js";
 import { monitorSupervisorExitRequest } from "./supervisor-exit-request.js";
 import type { KoedServerRuntimeState } from "./types.js";
-
-const currentDir = dirname(fileURLToPath(import.meta.url));
 
 type SpawnSyncLike = (
   command: string,
@@ -218,7 +218,7 @@ const provisionDesktopApiTokenWithRepository = async (
   return withDesktopApiTokenRepository(runtime, environment, async (repo) => {
     const owner = await resolveActiveDesktopOwner(repo);
     provisionDesktopLocalCredential(paths, owner.id);
-    const existing = loadExplorerCredential(paths);
+    const existing = loadLocalAppCredential(paths);
     if (existing) {
       const existingOwner = await repo.getApiTokenUser(
         hashApiToken(apiTokenPepper, existing.apiToken)
@@ -242,7 +242,7 @@ const provisionDesktopApiTokenWithRepository = async (
       scopes: [],
       audit: { actorUserId: null, actorType: "local_operator_script" }
     });
-    writeExplorerCredential(paths, {
+    writeLocalAppCredential(paths, {
       apiToken: token,
       provisionedAt: new Date().toISOString(),
       source: "environment"
@@ -409,13 +409,6 @@ const corsOrigins = (
     .flatMap((value) => value?.split(",") ?? [])
     .map((value) => value.trim())
     .filter(Boolean);
-  try {
-    const explorerOrigin = new URL(resolveExplorerUrl(environment, repoEnv))
-      .origin;
-    configured.push(explorerOrigin);
-  } catch {
-    // Keep configured origins only.
-  }
   configured.push("koed://app");
   return Array.from(new Set(configured)).join(",");
 };
@@ -468,7 +461,7 @@ const localServiceEnv = (
   return {
     ...process.env,
     ...repoEnv,
-    ...(apiToken ? { VITE_KOED_API_TOKEN: apiToken.token } : {}),
+    ...(apiToken ? { MEMORY_API_TOKEN: apiToken.token } : {}),
     ...environment,
     NODE_ENV:
       environment.API_NODE_ENV ??
@@ -738,12 +731,12 @@ const localServiceEnv = (
       repoEnv.EMBEDDING_RERANKER_PROMPT_CACHE_ENABLED,
     CORS_ORIGINS: corsOrigins(environment, repoEnv),
     COOKIE_SECURE: prefixedApiEnv(environment, repoEnv, "COOKIE_SECURE"),
-    EXPLORER_PUBLIC_URL:
-      prefixedApiEnv(environment, repoEnv, "EXPLORER_PUBLIC_URL") ??
-      resolveExplorerUrl(environment, repoEnv),
-    MEMORY_API_URL: resolveApiUrl(environment, repoEnv),
-    EXPLORER_API_BASE_URL: resolveApiUrl(environment, repoEnv),
-    VITE_KOED_API_BASE_URL: resolveApiUrl(environment, repoEnv)
+    BROWSER_PUBLIC_URL: prefixedApiEnv(
+      environment,
+      repoEnv,
+      "BROWSER_PUBLIC_URL"
+    ),
+    MEMORY_API_URL: resolveApiUrl(environment, repoEnv)
   };
 };
 
@@ -937,7 +930,6 @@ export const startKoedServer = async ({
   environment = {
     ...environment,
     API_HOST_PORT: allocatedPortEnvironment.API_HOST_PORT,
-    EXPLORER_WEB_HOST_PORT: allocatedPortEnvironment.EXPLORER_WEB_HOST_PORT,
     POSTGRES_HOST_PORT: allocatedPortEnvironment.POSTGRES_HOST_PORT,
     EMBEDDING_SERVICE_HOST_PORT:
       allocatedPortEnvironment.EMBEDDING_SERVICE_HOST_PORT,
@@ -953,7 +945,7 @@ export const startKoedServer = async ({
     ? null
     : resolveLocalApiToken(environment, repoEnv);
   if (apiToken) {
-    writeExplorerCredential(paths, {
+    writeLocalAppCredential(paths, {
       apiToken: apiToken.token,
       provisionedAt: new Date().toISOString(),
       source: apiToken.source
@@ -973,7 +965,7 @@ export const startKoedServer = async ({
   const runtimeServices = useBundledLocalDependencies
     ? ["postgres-native", "embedding-service-native"]
     : [];
-  const appServices = ["api", "worker", "explorer"];
+  const appServices = ["api", "worker"];
   const childEnv = initialServiceEnv;
 
   if (appRuntime.kind === "source") {
@@ -992,7 +984,7 @@ export const startKoedServer = async ({
     ? null
     : resolveLocalApiToken(environment, refreshedRepoEnv);
   if (refreshedApiToken) {
-    writeExplorerCredential(paths, {
+    writeLocalAppCredential(paths, {
       apiToken: refreshedApiToken.token,
       provisionedAt: new Date().toISOString(),
       source: refreshedApiToken.source
@@ -1005,7 +997,6 @@ export const startKoedServer = async ({
     paths
   );
   const apiUrl = resolveApiUrl(environment, refreshedRepoEnv);
-  const explorerUrl = resolveExplorerUrl(environment, refreshedRepoEnv);
 
   let startedNativePostgres = false;
   let nativeEmbeddingProcess: ChildProcess | undefined;
@@ -1044,7 +1035,6 @@ export const startKoedServer = async ({
       const cleanupErrors: string[] = [];
       const shutdownOrder = [
         "codexTranscriptWatcher",
-        "explorer",
         "worker",
         "api",
         "embeddingService"
@@ -1149,8 +1139,6 @@ export const startKoedServer = async ({
           "--filter",
           "@koed/embedding-service",
           "--filter",
-          "@koed/explorer",
-          "--filter",
           "@koed/mcp-server",
           "build"
         ],
@@ -1188,24 +1176,6 @@ export const startKoedServer = async ({
       }
     }
 
-    const explorerPort = (() => {
-      if (environment.EXPLORER_WEB_HOST_PORT) {
-        return environment.EXPLORER_WEB_HOST_PORT;
-      }
-      if (refreshedRepoEnv.EXPLORER_WEB_HOST_PORT) {
-        return refreshedRepoEnv.EXPLORER_WEB_HOST_PORT;
-      }
-      try {
-        return new URL(explorerUrl).port || "5174";
-      } catch {
-        return "5174";
-      }
-    })();
-    const explorerHost =
-      environment.EXPLORER_WEB_HOST ??
-      refreshedRepoEnv.EXPLORER_WEB_HOST ??
-      "127.0.0.1";
-
     const api =
       appRuntime.kind === "packaged"
         ? spawnManagedProcess(
@@ -1233,7 +1203,6 @@ export const startKoedServer = async ({
       startedAt: supervisorStartedAt,
       repoRoot: paths.repoRoot,
       apiUrl,
-      explorerUrl,
       runtimeMode: config.runtimeMode,
       dependencyMode: config.dependencyMode,
       automaticPorts: desktopManagedLocal,
@@ -1290,8 +1259,7 @@ export const startKoedServer = async ({
       );
       if (desktopApiToken) {
         Object.assign(refreshedEnv, {
-          MEMORY_API_TOKEN: desktopApiToken,
-          VITE_KOED_API_TOKEN: desktopApiToken
+          MEMORY_API_TOKEN: desktopApiToken
         });
       }
     }
@@ -1317,49 +1285,10 @@ export const startKoedServer = async ({
             resolve(paths.repoRoot, "apps/worker")
           );
     manageChild("worker", worker);
-    const explorer =
-      appRuntime.kind === "packaged"
-        ? spawnManagedProcess(
-            paths,
-            "Explorer",
-            process.execPath,
-            [
-              resolve(currentDir, "explorer-static-server.js"),
-              appRuntime.explorerDist,
-              "--host",
-              explorerHost,
-              "--port",
-              explorerPort,
-              "--api-url",
-              apiUrl
-            ],
-            refreshedEnv,
-            spawn,
-            appRuntime.explorerDist
-          )
-        : spawnManagedProcess(
-            paths,
-            "Explorer",
-            process.execPath,
-            [
-              resolve(paths.repoRoot, "node_modules/vite/bin/vite.js"),
-              "preview",
-              "--host",
-              explorerHost,
-              "--port",
-              explorerPort
-            ],
-            refreshedEnv,
-            spawn,
-            resolve(paths.repoRoot, "apps/explorer")
-          );
-    manageChild("explorer", explorer);
-
     runtime.services = [...runtimeServices, ...appServices];
     runtime.processes = {
       ...runtime.processes,
-      worker: worker.pid ?? 0,
-      explorer: explorer.pid ?? 0
+      worker: worker.pid ?? 0
     };
     persistRuntime();
 
@@ -1370,7 +1299,6 @@ export const startKoedServer = async ({
           state: "starting",
           koedHome: paths.koedHome,
           apiUrl,
-          explorerUrl,
           services: runtime.services
         },
         null,
@@ -1465,6 +1393,6 @@ export const startKoedServer = async ({
     if (runtimeStateWritten && runtimeStateOwnedByCurrentProcess()) {
       rmSync(paths.runtimeStatePath, { force: true });
     }
-    rmSync(supervisorLock.lockPath, { force: true });
+    releaseKoedServerSupervisorLock(supervisorLock);
   }
 };

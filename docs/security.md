@@ -50,7 +50,8 @@ is redacted and raw payload bytes remain encrypted. Future support bundles and
 object payloads must use the same package envelope before they can carry raw
 customer content.
 
-Cross-Identity Sync encrypts each bounded package chunk to the target
+Cross-Identity Sync limits each plaintext package chunk to 1 MiB and each
+complete package to 64 MiB. It encrypts each bounded chunk to the target
 deployment's versioned RSA-OAEP recipient key in addition to transport TLS. The
 target recipient private key is itself wrapped by the configured root envelope
 provider. The source, browser, MCP Server, Capture Hook, database, queue rows,
@@ -222,13 +223,16 @@ Shared Memory definitions keep Personal Memory ownership, Cross-Identity Sync
 provenance, Workspace Access, source-owner consent, Share Grant authority, and
 materialized representations as separate checks. Preview admission verifies the
 exact owner-private replica and destination policies. It remains Direct only
-when the source-owner policy is unchanged; creating or replacing that policy is
-Step-up because replacement pauses active consents and invalidates affected
-Share Grants. Share and representation-change admission validate the persisted
-preview, three-policy intersection, current share permission, and exact grant
-version. Raw `memory_events` sharing and fidelity increases remain Step-up,
-while derived sharing, fidelity decreases, and owner revocation remain Native
-review.
+and persists only an inactive, artifact-bound source-owner policy proposal.
+The final reviewed bundle revalidates and activates that exact proposal in the
+same transaction as consent and grant mutation; only then can replacement pause
+active consents and invalidate affected Share Grants. Share and
+representation-change admission validate the persisted preview, proposed
+three-policy intersection, current share permission, and exact grant version.
+First-time raw `memory_events` shares use one Step-up at the final share
+decision; their preview remains Direct. Derived shares use Native review.
+Representation fidelity increases remain Step-up, while fidelity decreases and
+owner revocation remain Native review.
 Consent is not a requestable catalog action: supported Desktop flows bind it
 inside the exact share or representation-change bundle and consume the one-use
 Action Grant atomically with both repository stages. Revocation is authorized
@@ -248,8 +252,14 @@ confirmation cannot authorize one another or a different hold.
 Every tier retains device/backend binding, exact scope and request hashes,
 short expiry, one-use consumption, replay protection, authoritative execution
 checks, and audit. Browser activation routes accept only stored Step-up grants.
-Terminal browser results are inert, render before any permitted close attempt,
-and expose neither reusable credentials nor Action Grant secrets. See
+The API process serves the narrow approval pages on the authentication origin;
+there is no cross-origin browser approval client. Page responses use a
+restrictive Content Security Policy, deny framing, suppress referrers and
+caching, and disable MIME sniffing. Browser decision writes retain same-origin
+and CSRF enforcement. The pages use no service worker or browser storage, and
+activation selectors are redacted to route templates in structured request and
+error logs. Terminal browser results are inert and expose neither reusable
+credentials nor Action Grant secrets. See
 [ADR 0024](adr/0024-tiered-desktop-action-approval.md).
 
 Desktop renders the schema-validated authoritative review DTO generically. Its

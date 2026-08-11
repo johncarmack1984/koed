@@ -147,7 +147,7 @@ afterEach(() => {
     "KOED_DEPLOYMENT_PROFILE",
     "KOED_RUNTIME_MODE",
     "KOED_DEPENDENCY_MODE",
-    "EXPLORER_PUBLIC_URL",
+    "BROWSER_PUBLIC_URL",
     "CORS_ORIGINS",
     "API_CORS_ORIGINS",
     "WORKOS_AUTHKIT_ENABLED",
@@ -5217,9 +5217,6 @@ describe("api health", () => {
         publicStatus: "/self-host/status",
         capabilities: "/v1/capabilities",
         openapi: "/openapi.json"
-      },
-      explorer: {
-        defaultUrl: "http://localhost:5174"
       }
     });
     expect(response.body).not.toContain("/sensitive/local/path");
@@ -6565,8 +6562,37 @@ describe("account and access flows", () => {
     await app.close();
 
     expect(login.statusCode).toBe(302);
+    const transientCookies = isStringArray(login.headers["set-cookie"])
+      ? login.headers["set-cookie"]
+      : typeof login.headers["set-cookie"] === "string"
+        ? [login.headers["set-cookie"]]
+        : [];
+    expect(transientCookies).toHaveLength(2);
+    expect(transientCookies).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("koed_workos_state="),
+        expect.stringContaining("koed_workos_return_to=")
+      ])
+    );
+    for (const transientCookie of transientCookies) {
+      expect(transientCookie).toContain("Path=/;");
+      expect(transientCookie).toContain("HttpOnly");
+      expect(transientCookie).toContain("Secure");
+      expect(transientCookie).toContain("SameSite=Lax");
+    }
     expect(callback.statusCode).toBe(302);
     expect(callback.headers.location).toBe("/settings");
+    const sessionCookie = (
+      isStringArray(callback.headers["set-cookie"])
+        ? callback.headers["set-cookie"]
+        : [callback.headers["set-cookie"]]
+    ).find(
+      (value): value is string =>
+        typeof value === "string" && value.startsWith("cm_session=")
+    );
+    expect(sessionCookie).toContain("HttpOnly");
+    expect(sessionCookie).toContain("Secure");
+    expect(sessionCookie).toContain("SameSite=Lax");
     const meBody = jsonBody<{
       user: { email: string; displayName: string | null };
     }>(me);
@@ -6681,24 +6707,24 @@ describe("account and access flows", () => {
     expect(callback.headers.location).toBe("/");
   });
 
-  it("allows WorkOS to return to the configured public Explorer origin", async () => {
+  it("rejects cross-origin WorkOS return targets even when a browser URL is configured", async () => {
     process.env.KOED_DEPLOYMENT_PROFILE = "koed_managed_cloud";
     process.env.WORKOS_AUTHKIT_ENABLED = "true";
     process.env.WORKOS_CLIENT_ID = "client_test_123";
     process.env.WORKOS_API_KEY = "sk_test_hidden";
     process.env.WORKOS_REDIRECT_URI =
       "https://api.example.test/auth/workos/callback";
-    process.env.EXPLORER_PUBLIC_URL = "https://app.example.test/koed";
+    process.env.BROWSER_PUBLIC_URL = "https://app.example.test";
     const workosClient: WorkosAuthKitClient = {
       getAuthorizationUrl: ({ state }) =>
         `https://workos.example.test/authorize?state=${state}`,
       async authenticateWithCode() {
         return {
           user: {
-            id: "user_explorer_return",
-            email: "explorer-return@example.test",
+            id: "user_browser_return",
+            email: "browser-return@example.test",
             emailVerified: true,
-            firstName: "Explorer",
+            firstName: "Browser",
             lastName: "Return",
             profile: {}
           },
@@ -6719,14 +6745,14 @@ describe("account and access flows", () => {
     const callback = await app.inject({
       method: "GET",
       url:
-        "/auth/workos/callback?code=auth-code-explorer-return&state=" +
+        "/auth/workos/callback?code=auth-code-browser-return&state=" +
         new URL(login.headers.location as string).searchParams.get("state"),
       headers: browserSessionHeaders(cookieJarHeader(login))
     });
     await app.close();
 
     expect(callback.statusCode).toBe(302);
-    expect(callback.headers.location).toBe(returnTo);
+    expect(callback.headers.location).toBe("/");
   });
 
   it("rejects WorkOS callbacks with invalid state or email-only account matches", async () => {
@@ -6797,6 +6823,11 @@ describe("account and access flows", () => {
       url: "/auth/register",
       payload: { email: "solo@example.com", password: "password123" }
     });
+    const login = await app.inject({
+      method: "POST",
+      url: "/auth/login",
+      payload: { email: "solo@example.com", password: "password123" }
+    });
     const cookie = cookieHeader(registered);
     const me = await app.inject({
       method: "GET",
@@ -6812,6 +6843,19 @@ describe("account and access flows", () => {
     await app.close();
 
     expect(registered.statusCode).toBe(200);
+    expect(login.statusCode).toBe(200);
+    expect(login.headers["cache-control"]).toBe("no-store");
+    const localSessionCookie = (
+      isStringArray(login.headers["set-cookie"])
+        ? login.headers["set-cookie"]
+        : [login.headers["set-cookie"]]
+    ).find(
+      (value): value is string =>
+        typeof value === "string" && value.startsWith("cm_session=")
+    );
+    expect(localSessionCookie).toContain("HttpOnly");
+    expect(localSessionCookie).toContain("Secure");
+    expect(localSessionCookie).toContain("SameSite=Lax");
     expect(jsonBody<{ user: { email: string } }>(me).user.email).toBe(
       "solo@example.com"
     );
@@ -7667,7 +7711,7 @@ describe("account and access flows", () => {
   });
 
   it("enrolls and revokes device credentials independently from API Tokens", async () => {
-    process.env.EXPLORER_PUBLIC_URL = "https://app.example.test/koed";
+    process.env.BROWSER_PUBLIC_URL = "https://app.example.test/koed";
     const app = await buildServer({ repository: createFakeRepository() });
     const registered = await app.inject({
       method: "POST",
@@ -9039,7 +9083,7 @@ describe("account and access flows", () => {
       headers: browserSessionHeaders(cookie),
       payload: {
         event: "first_memory_answer_completed",
-        surface: "explorer",
+        surface: "api",
         deploymentProfile: "private_vps",
         teamId: team.id,
         metadata: {
@@ -9053,7 +9097,7 @@ describe("account and access flows", () => {
       headers: browserSessionHeaders(cookie),
       payload: {
         event: "first_memory_answer_completed",
-        surface: "explorer",
+        surface: "api",
         metadata: {
           promptText: "this must not be accepted"
         }
@@ -9065,7 +9109,7 @@ describe("account and access flows", () => {
       headers: browserSessionHeaders(cookie),
       payload: {
         event: "first_memory_answer_completed",
-        surface: "explorer",
+        surface: "api",
         metadata: {
           source: "raw memory sentinel should never enter analytics"
         }
@@ -9107,7 +9151,7 @@ describe("account and access flows", () => {
       headers: browserSessionHeaders(cookieHeader(otherRegistered)),
       payload: {
         event: "workspace_created",
-        surface: "explorer",
+        surface: "api",
         teamId: team.id
       }
     });
@@ -9183,7 +9227,7 @@ describe("account and access flows", () => {
         {
           event: "first_memory_answer_completed",
           count: 1,
-          surfaces: { explorer: 1 },
+          surfaces: { api: 1 },
           deploymentProfiles: { private_vps: 1 }
         }
       ]
@@ -9199,7 +9243,7 @@ describe("account and access flows", () => {
   });
 
   it("rejects cross-origin browser-session writes without blocking bearer API tokens", async () => {
-    process.env.CORS_ORIGINS = "http://console.example.test";
+    process.env.BROWSER_PUBLIC_URL = "http://console.example.test/koed";
 
     const app = await buildServer({ repository: createFakeRepository() });
     const registered = await app.inject({
@@ -9309,6 +9353,28 @@ describe("account and access flows", () => {
     expect(rejectedLogin.statusCode).toBe(403);
     expect(rejectedInviteAccept.statusCode).toBe(401);
     expect(cookieHeader(rejectedInviteAccept)).toBe("");
+  });
+
+  it("rejects a malformed stored password hash without failing the request", async () => {
+    const repository = createFakeRepository();
+    await repository.createUser({
+      email: "fixture-login@example.com",
+      passwordHash: "team-saas-fixture-v1:password-not-for-login"
+    });
+    const app = await buildServer({ repository });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/auth/login",
+      payload: {
+        email: "fixture-login@example.com",
+        password: "password123"
+      }
+    });
+    await app.close();
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toEqual({ error: "Invalid email or password" });
   });
 
   it("does not treat root-level API_CORS_ORIGINS as an API process setting", async () => {
@@ -14085,7 +14151,7 @@ describe("account and access flows", () => {
     });
     const session = jsonBody<SessionResponse>(sessionResponse).session;
     for (const content of [
-      "Can we add early generated titles for Explorer chats?",
+      "Can we add early generated titles for Desktop chats?",
       "Can those generated titles avoid waiting for LCM summaries?",
       "Please make manual renames keep winning over generated names."
     ]) {
@@ -14112,7 +14178,7 @@ describe("account and access flows", () => {
       url: `/v1/memory/session-titles/${session.id}`,
       headers,
       payload: {
-        title: "Explorer Titles",
+        title: "Desktop Titles",
         titleModel: "codex-app-server:test",
         titlePromptVersion: "session-title-codex-json-v1"
       }
@@ -14129,9 +14195,7 @@ describe("account and access flows", () => {
       jsonBody<{ sessions: Array<{ id: string }> }>(pending).sessions
     ).toEqual([expect.objectContaining({ id: session.id })]);
     expect(submitted.statusCode).toBe(200);
-    expect(jsonBody<{ title: string }>(submitted).title).toBe(
-      "Explorer Titles"
-    );
+    expect(jsonBody<{ title: string }>(submitted).title).toBe("Desktop Titles");
     expect(
       jsonBody<{ sessions: Array<{ id: string }> }>(pendingAfterSubmit).sessions
     ).toHaveLength(0);
@@ -14523,7 +14587,7 @@ describe("account and access flows", () => {
         project_id: "project-1",
         project_name: "Koed",
         thread_id: "thread-1",
-        thread_name: "Explorer",
+        thread_name: "Desktop",
         local_memory_worker_config: {
           provider: "codex",
           model: "gpt-5.4",

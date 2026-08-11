@@ -6778,6 +6778,34 @@ export const createMemorySourceRepository = (
               'role', msg.role,
               'transcriptItemId', msg.transcript_item_id,
               'displaySource', 'message'
+            ) || coalesce(
+              (
+                select jsonb_strip_nulls(jsonb_build_object(
+                  'approvalReviewTranscriptDisplay',
+                  ci.metadata -> 'approvalReviewTranscriptDisplay',
+                  'approvalReview',
+                  case
+                    when ci.metadata ->> 'approvalReview' = 'true'
+                      then 'true'::jsonb
+                    else null
+                  end
+                ))
+                from conversation_items ci
+                where ci.owner_user_id = msg.owner_user_id
+                  and ci.visibility = msg.visibility
+                  and msg.idempotency_key = 'message:' || coalesce(
+                    ci.metadata ->> 'canonicalConversationItemKey',
+                    ci.canonical_item_key,
+                    ci.logical_source_id
+                  )
+                  and (
+                    ci.metadata ? 'approvalReviewTranscriptDisplay'
+                    or ci.metadata ->> 'approvalReview' = 'true'
+                  )
+                order by ci.created_at asc, ci.id asc
+                limit 1
+              ),
+              '{}'::jsonb
             ) as metadata
           from messages msg
           cross join cursor_order co
@@ -7215,19 +7243,34 @@ export const createMemorySourceRepository = (
             me.session_id,
             coalesce(s.source_runtime, me.source_runtime) as source_ai_client,
             case
-              when coalesce(me.payload #>> '{metadata,threadKind}', s.metadata ->> 'threadKind') = 'subagent'
+              when coalesce(
+                me.payload #>> '{metadata,threadKind}',
+                me.payload #>> '{metadata,thread_kind}',
+                me.payload #>> '{metadata,threadSource}',
+                me.payload #>> '{metadata,thread_source}',
+                s.metadata ->> 'threadKind',
+                s.metadata ->> 'thread_kind',
+                s.metadata ->> 'threadSource',
+                s.metadata ->> 'thread_source'
+              ) = 'subagent'
                 then 'subagent'
               else 'conversation'
             end as thread_kind,
             coalesce(
               me.payload #>> '{metadata,parentThreadId}',
+              me.payload #>> '{metadata,parent_thread_id}',
               me.payload #>> '{metadata,parentExternalSessionId}',
+              me.payload #>> '{metadata,parent_external_session_id}',
               s.metadata ->> 'parentThreadId',
-              s.metadata ->> 'parentExternalSessionId'
+              s.metadata ->> 'parent_thread_id',
+              s.metadata ->> 'parentExternalSessionId',
+              s.metadata ->> 'parent_external_session_id'
             ) as parent_thread_id,
             coalesce(
               me.payload #>> '{metadata,parentSessionId}',
-              s.metadata ->> 'parentSessionId'
+              me.payload #>> '{metadata,parent_session_id}',
+              s.metadata ->> 'parentSessionId',
+              s.metadata ->> 'parent_session_id'
             ) as parent_session_id,
             coalesce(me.source_event_time, me.captured_at) as event_order_at,
             me.captured_at,
@@ -7278,11 +7321,24 @@ export const createMemorySourceRepository = (
             s.id as session_id,
             s.source_runtime as source_ai_client,
             case
-              when s.metadata ->> 'threadKind' = 'subagent' then 'subagent'
+              when coalesce(
+                s.metadata ->> 'threadKind',
+                s.metadata ->> 'thread_kind',
+                s.metadata ->> 'threadSource',
+                s.metadata ->> 'thread_source'
+              ) = 'subagent' then 'subagent'
               else 'conversation'
             end as thread_kind,
-            coalesce(s.metadata ->> 'parentThreadId', s.metadata ->> 'parentExternalSessionId') as parent_thread_id,
-            s.metadata ->> 'parentSessionId' as parent_session_id,
+            coalesce(
+              s.metadata ->> 'parentThreadId',
+              s.metadata ->> 'parent_thread_id',
+              s.metadata ->> 'parentExternalSessionId',
+              s.metadata ->> 'parent_external_session_id'
+            ) as parent_thread_id,
+            coalesce(
+              s.metadata ->> 'parentSessionId',
+              s.metadata ->> 'parent_session_id'
+            ) as parent_session_id,
             null::timestamptz as event_order_at,
             s.created_at as captured_at,
             s.created_at as order_at,

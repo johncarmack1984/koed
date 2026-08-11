@@ -19,6 +19,7 @@ import {
   LcmSummaryFrame,
   MemoryEventFrame,
   MemorySourceParts,
+  SecureMarkdown,
   VirtualizedTimeline,
   type MarkdownPlatformAdapters
 } from "@koed/memory-ui";
@@ -66,6 +67,11 @@ import {
   CollaborationClientError,
   type CollaborationRendererClient
 } from "../../collaboration/renderer-client.js";
+import { sharedMemoryConversationEvents } from "../../collaboration/shared-memory-conversation.js";
+import {
+  ConversationRows,
+  ConversationTimeline
+} from "../../NativeConversationSurface.js";
 import {
   MessageComposer as RouteMessageComposer,
   ThreadRoute,
@@ -91,13 +97,16 @@ export type CollaborationModalState =
     }
   | { kind: "workspace_channel"; teamId: string; workspaceId: string }
   | { kind: "direct_message"; teamId: string; group: boolean }
-  | { kind: "share_personal_memory"; sessionId: string }
+  | {
+      kind: "share_personal_memory";
+      localEntry?: PersonalMemoryEntry;
+      sessionId: string;
+    }
   | { kind: "connection" };
 
 export const modalIsAuthorized = (
   modal: CollaborationModalState,
-  snapshot: CollaborationSnapshot,
-  localPersonalSessionIds: ReadonlySet<string>
+  snapshot: CollaborationSnapshot
 ): boolean => {
   if (modal.kind === "edit_personal_channel") {
     return snapshot.navigation.personal.channels.some(
@@ -123,10 +132,18 @@ export const modalIsAuthorized = (
     );
   }
   if (modal.kind === "share_personal_memory") {
+    const snapshotEntry = snapshot.navigation.personal.memory.some(
+      (entry) => entry.id === modal.sessionId
+    );
+    const localEntry = modal.localEntry;
     return (
-      localPersonalSessionIds.has(modal.sessionId) ||
-      snapshot.navigation.personal.memory.some(
-        (entry) => entry.id === modal.sessionId
+      snapshotEntry ||
+      Boolean(
+        localEntry &&
+        localEntry.id === modal.sessionId &&
+        localEntry.logicalMemoryId === null &&
+        !localEntry.hasSynchronizedRevision &&
+        localEntry.syncState === "not_started"
       )
     );
   }
@@ -221,8 +238,8 @@ const principalIdForThread = (
 
 const representationLabel = (value: SharedMemoryRepresentation): string => {
   if (value === "memory_events") return "Memory Events";
-  if (value === "lcm_leaves") return "LCM leaves";
-  return "LCM rollups";
+  if (value === "lcm_leaves") return "LCM Leaves";
+  return "LCM Rollups";
 };
 
 const liveStateLabel = (value: SharedMemorySession["liveState"]): string =>
@@ -245,10 +262,12 @@ const representationStateLabel = (
 
 function Modal({
   children,
+  className,
   label,
   onClose
 }: {
   children: ReactNode;
+  className?: string;
   label: string;
   onClose: () => void;
 }) {
@@ -258,7 +277,7 @@ function Modal({
       <DialogPopup
         aria-label={label}
         aria-modal="true"
-        className="collab-modal"
+        className={`collab-modal${className ? ` ${className}` : ""}`}
         initialFocus={() =>
           popupRef.current?.querySelector<HTMLElement>(
             "input:not([disabled]), textarea:not([disabled]), select:not([disabled]), .collab-command-list button:not([disabled]), .collab-modal-actions button:not([disabled])"
@@ -1488,7 +1507,32 @@ export function SharedMemoryIndex({
   );
 }
 
-function SourceItemRow({ item }: { item: SharedMemorySourceItem }) {
+function SharedSourceMarkdown({
+  markdownAdapters,
+  source
+}: {
+  markdownAdapters: MarkdownPlatformAdapters;
+  source: string;
+}) {
+  return (
+    <SecureMarkdown
+      adapters={markdownAdapters}
+      className="shared-memory-markdown"
+      source={source}
+      oversizedFallback={
+        <p role="alert">This source item is too large to display safely.</p>
+      }
+    />
+  );
+}
+
+function SourceItemRow({
+  item,
+  markdownAdapters
+}: {
+  item: SharedMemorySourceItem;
+  markdownAdapters: MarkdownPlatformAdapters;
+}) {
   if (item.representation === "memory_events") {
     return (
       <MemoryEventFrame
@@ -1506,7 +1550,15 @@ function SourceItemRow({ item }: { item: SharedMemorySourceItem }) {
         scope="workspace"
       >
         <MemorySourceParts
-          parts={item.sourceItems}
+          parts={item.sourceItems.map((source) => ({
+            ...source,
+            body: (
+              <SharedSourceMarkdown
+                markdownAdapters={markdownAdapters}
+                source={source.body}
+              />
+            )
+          }))}
           renderIcon={(source) =>
             source.sourceKind === "tool_call" ||
             source.sourceKind === "tool_result" ? (
@@ -1524,7 +1576,12 @@ function SourceItemRow({ item }: { item: SharedMemorySourceItem }) {
       occurredAt={item.occurredAt}
       representation={item.representation}
       sourceCount={item.sourceCount}
-      summary={<p>{item.summaryText}</p>}
+      summary={
+        <SharedSourceMarkdown
+          markdownAdapters={markdownAdapters}
+          source={item.summaryText}
+        />
+      }
       timeLabel={formatTime(item.occurredAt)}
     />
   );
@@ -1532,16 +1589,19 @@ function SourceItemRow({ item }: { item: SharedMemorySourceItem }) {
 
 function SourceTimeline({
   client,
+  markdownAdapters,
   page,
   session
 }: {
   client: CollaborationRendererClient;
+  markdownAdapters: MarkdownPlatformAdapters;
   page: SharedMemorySourcePage;
   session: SharedMemorySession;
 }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const rows = page.items;
+  const conversationEvents = sharedMemoryConversationEvents(rows);
   if (session.sourceState === "loading") {
     return (
       <StateView
@@ -1616,18 +1676,39 @@ function SourceTimeline({
         <div className="collab-empty-inline">No source items available.</div>
       ) : null}
       {rows.length > 0 ? (
-        <VirtualizedTimeline
-          ariaLabel={`${representationLabel(session.representation)} source items`}
-          className="collab-source-list collab-virtual-list"
-          estimatedItemHeight={132}
-          events={rows}
-          hasOlderEvents={page.hasOlder}
-          hasNewerEvents={page.hasNewer}
-          onLoadOlder={() => loadPage("older")}
-          onLoadNewer={() => loadPage("newer")}
-          renderEvent={(item) => <SourceItemRow key={item.id} item={item} />}
-          threadKey={`${session.id}:${session.representation}`}
-        />
+        session.representation === "memory_events" ? (
+          <ConversationTimeline
+            ariaLabel="Memory Events source items"
+            className="collab-source-list collab-virtual-list native-timeline-scroll shared-conversation-timeline"
+            events={conversationEvents}
+            hasOlderEvents={page.hasOlder}
+            hasNewerEvents={page.hasNewer}
+            markdownAdapters={markdownAdapters}
+            onLoadOlder={() => loadPage("older")}
+            onLoadNewer={() => loadPage("newer")}
+            scope="workspace"
+            threadKey={`${session.id}:${session.representation}`}
+          />
+        ) : (
+          <VirtualizedTimeline
+            ariaLabel={`${representationLabel(session.representation)} source items`}
+            className="collab-source-list collab-virtual-list"
+            estimatedItemHeight={132}
+            events={rows}
+            hasOlderEvents={page.hasOlder}
+            hasNewerEvents={page.hasNewer}
+            onLoadOlder={() => loadPage("older")}
+            onLoadNewer={() => loadPage("newer")}
+            renderEvent={(item) => (
+              <SourceItemRow
+                key={item.id}
+                item={item}
+                markdownAdapters={markdownAdapters}
+              />
+            )}
+            threadKey={`${session.id}:${session.representation}`}
+          />
+        )
       ) : null}
       {page.hasNewer ? (
         <div className="collab-history-control collab-newer-control">
@@ -1820,7 +1901,12 @@ export function SharedSessionView({
             <strong>{representationLabel(session.representation)}</strong>
             <span>{representationStateLabel(session.representationState)}</span>
           </header>
-          <SourceTimeline client={client} page={source} session={session} />
+          <SourceTimeline
+            client={client}
+            markdownAdapters={markdownAdapters}
+            page={source}
+            session={session}
+          />
         </section>
         <div
           className="collab-divider"
@@ -1889,25 +1975,80 @@ const SHARED_MEMORY_REPRESENTATIONS = [
   "lcm_rollups"
 ] as const satisfies readonly SharedMemoryRepresentation[];
 
+const SHARED_MEMORY_PREPARATION_REFRESH_MS = 1_000;
+const SHARED_MEMORY_PREPARATION_MAX_REFRESHES = 20;
+
+const sharedMemoryPreparationCopy = (
+  syncState: PersonalMemoryEntry["syncState"]
+): { detail: string; label: string; title: string } => {
+  switch (syncState) {
+    case "not_started":
+      return {
+        title: "Starting secure sync",
+        detail:
+          "Koed is setting up this memory for sharing. You can keep this window open.",
+        label: "Starting"
+      };
+    case "partially_available":
+      return {
+        title: "Finishing preparation",
+        detail:
+          "The memory has arrived and is finishing processing. The preview will open here when it is ready.",
+        label: "Finishing"
+      };
+    case "ready":
+      return {
+        title: "Preparing your preview",
+        detail:
+          "The synchronized revision is ready. Koed is building the source review.",
+        label: "Ready"
+      };
+    case "stale":
+      return {
+        title: "Refreshing this memory",
+        detail:
+          "Koed is refreshing the synchronized revision before opening the source review.",
+        label: "Refreshing"
+      };
+    default:
+      return {
+        title: "Syncing this memory",
+        detail:
+          "Koed is preparing the first synchronized revision. The preview will open here when it is ready.",
+        label: "Processing"
+      };
+  }
+};
+
+const firstWritableWorkspace = (
+  team: CollaborationSnapshot["navigation"]["teams"][number] | null | undefined
+) =>
+  team?.workspaces.find(
+    (workspace) =>
+      workspace.lifecycle === "active" && workspace.access === "write"
+  ) ?? null;
+
 function SharedMemoryOwnerModal({
   client,
   entry,
+  markdownAdapters,
   snapshot,
   onClose
 }: {
   client: CollaborationRendererClient;
   entry: PersonalMemoryEntry;
+  markdownAdapters: MarkdownPlatformAdapters;
   snapshot: CollaborationSnapshot;
   onClose: () => void;
 }) {
   const availableTeams = snapshot.navigation.teams.filter(
     (team) => team.lifecycle === "active"
   );
-  const initialTeam = availableTeams[0] ?? null;
-  const initialWorkspace =
-    initialTeam?.workspaces.find(
-      (workspace) => workspace.lifecycle === "active"
-    ) ?? null;
+  const initialTeam =
+    availableTeams.find((team) => firstWritableWorkspace(team)) ??
+    availableTeams[0] ??
+    null;
+  const initialWorkspace = firstWritableWorkspace(initialTeam);
   const [teamId, setTeamId] = useState(initialTeam?.id ?? "");
   const [workspaceId, setWorkspaceId] = useState(initialWorkspace?.id ?? "");
   const [representation, setRepresentation] =
@@ -1922,6 +2063,8 @@ function SharedMemoryOwnerModal({
     { kind: "new" } | { kind: "change"; grant: SharedMemoryGrant } | null
   >(entry.logicalMemoryId ? null : { kind: "new" });
   const [preview, setPreview] = useState<SharedMemoryPreview | null>(null);
+  const [preparingPreview, setPreparingPreview] = useState(false);
+  const preparationRefreshAttempts = useRef(0);
   const [revokingGrantId, setRevokingGrantId] = useState<string | null>(null);
   const [stoppingSync, setStoppingSync] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1946,8 +2089,19 @@ function SharedMemoryOwnerModal({
     const liveEntry = snapshot.navigation.personal.memory.find(
       (candidate) => candidate.id === entry.id
     );
-    if (liveEntry) setCurrentEntry(liveEntry);
-  }, [entry.id, snapshot.navigation.personal.memory]);
+    if (liveEntry) {
+      setCurrentEntry((current) => {
+        if (
+          preparingPreview &&
+          current.syncState !== "not_started" &&
+          liveEntry.syncState === "not_started"
+        ) {
+          return current;
+        }
+        return liveEntry;
+      });
+    }
+  }, [entry.id, preparingPreview, snapshot.navigation.personal.memory]);
 
   useEffect(() => {
     let active = true;
@@ -2010,38 +2164,176 @@ function SharedMemoryOwnerModal({
 
   const prepareAndPreview = () =>
     run(async () => {
-      requireDestination();
-      let prepared = currentEntry;
-      if (!prepared.logicalMemoryId || !prepared.hasSynchronizedRevision) {
-        prepared = await client.prepareSharedMemorySource({
-          sessionId: prepared.id
-        });
-        setCurrentEntry(prepared);
+      preparationRefreshAttempts.current = 0;
+      setPreparingPreview(true);
+      try {
+        requireDestination();
+        if (
+          !currentEntry.logicalMemoryId ||
+          !currentEntry.hasSynchronizedRevision
+        ) {
+          setCurrentEntry((current) => ({
+            ...current,
+            syncState:
+              current.syncState === "not_started"
+                ? "processing"
+                : current.syncState
+          }));
+          const prepared = await client.prepareSharedMemorySource({
+            sessionId: currentEntry.id
+          });
+          setCurrentEntry(
+            prepared.syncState === "not_started"
+              ? { ...prepared, syncState: "processing" }
+              : prepared
+          );
+        }
+      } catch (cause) {
+        setPreparingPreview(false);
+        throw cause;
       }
-      if (!prepared.logicalMemoryId || !prepared.hasSynchronizedRevision) {
-        throw new CollaborationInputError(
-          "The source is being prepared. Reopen it when sync is ready."
-        );
-      }
-      setPreview(
-        await client.previewSharedMemory({
-          logicalMemoryId: prepared.logicalMemoryId,
-          teamId,
-          workspaceId,
-          representation,
-          allowedRepresentations: [representation]
-        })
-      );
     });
 
+  useEffect(() => {
+    if (
+      !preparingPreview ||
+      !currentEntry.logicalMemoryId ||
+      currentEntry.hasSynchronizedRevision
+    ) {
+      return;
+    }
+    if (
+      currentEntry.syncState === "paused" ||
+      currentEntry.syncState === "failed" ||
+      currentEntry.syncState === "revoked"
+    ) {
+      setPreparingPreview(false);
+      setError(
+        currentEntry.syncState === "failed"
+          ? "Memory preparation failed. Try Review source again to retry it."
+          : "Memory preparation stopped before the source review was ready."
+      );
+      return;
+    }
+
+    let active = true;
+    let refreshTimer: number | undefined;
+    const refresh = async () => {
+      try {
+        const nextEntry = await client.prepareSharedMemorySource({
+          sessionId: currentEntry.id
+        });
+        if (!active) return;
+        setCurrentEntry((current) =>
+          nextEntry.syncState === "not_started" &&
+          current.syncState !== "not_started"
+            ? { ...nextEntry, syncState: current.syncState }
+            : nextEntry
+        );
+        if (nextEntry.hasSynchronizedRevision) return;
+        if (
+          nextEntry.syncState === "paused" ||
+          nextEntry.syncState === "failed" ||
+          nextEntry.syncState === "revoked"
+        ) {
+          return;
+        }
+        preparationRefreshAttempts.current += 1;
+        if (
+          preparationRefreshAttempts.current >=
+          SHARED_MEMORY_PREPARATION_MAX_REFRESHES
+        ) {
+          setPreparingPreview(false);
+          setError(
+            "Memory preparation is taking longer than expected. Try Review source again to refresh its status."
+          );
+          return;
+        }
+        refreshTimer = window.setTimeout(
+          () => void refresh(),
+          SHARED_MEMORY_PREPARATION_REFRESH_MS
+        );
+      } catch (cause) {
+        if (!active) return;
+        setPreparingPreview(false);
+        setError(
+          failureMessage(
+            cause,
+            "Memory preparation status could not be refreshed."
+          )
+        );
+      }
+    };
+
+    refreshTimer = window.setTimeout(
+      () => void refresh(),
+      SHARED_MEMORY_PREPARATION_REFRESH_MS
+    );
+    return () => {
+      active = false;
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+    };
+  }, [
+    client,
+    currentEntry.hasSynchronizedRevision,
+    currentEntry.id,
+    currentEntry.logicalMemoryId,
+    currentEntry.syncState,
+    preparingPreview
+  ]);
+
+  useEffect(() => {
+    if (
+      !preparingPreview ||
+      !currentEntry.logicalMemoryId ||
+      !currentEntry.hasSynchronizedRevision
+    ) {
+      return;
+    }
+    let active = true;
+    setError("");
+    void client
+      .previewSharedMemory({
+        logicalMemoryId: currentEntry.logicalMemoryId,
+        teamId,
+        workspaceId,
+        representation,
+        allowedRepresentations: [representation]
+      })
+      .then((nextPreview) => {
+        if (!active) return;
+        setPreview(nextPreview);
+        setPreparingPreview(false);
+      })
+      .catch((cause) => {
+        if (!active) return;
+        setPreparingPreview(false);
+        setError(failureMessage(cause, "Shared Memory could not be prepared."));
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    client,
+    currentEntry.hasSynchronizedRevision,
+    currentEntry.logicalMemoryId,
+    preparingPreview,
+    representation,
+    teamId,
+    workspaceId
+  ]);
+
   const beginNewShare = () => {
-    const team = availableTeams[0] ?? null;
-    const workspace =
-      team?.workspaces.find((item) => item.lifecycle === "active") ?? null;
+    const team =
+      availableTeams.find((candidate) => firstWritableWorkspace(candidate)) ??
+      availableTeams[0] ??
+      null;
+    const workspace = firstWritableWorkspace(team);
     setTeamId(team?.id ?? "");
     setWorkspaceId(workspace?.id ?? "");
     setRepresentation("memory_events");
     setPreview(null);
+    setPreparingPreview(false);
     setRevokingGrantId(null);
     setWorkflow({ kind: "new" });
     setError("");
@@ -2052,6 +2344,7 @@ function SharedMemoryOwnerModal({
     setWorkspaceId(grant.workspaceId);
     setRepresentation(grant.activeRepresentation ?? "memory_events");
     setPreview(null);
+    setPreparingPreview(false);
     setRevokingGrantId(null);
     setWorkflow({ kind: "change", grant });
     setError("");
@@ -2184,13 +2477,34 @@ function SharedMemoryOwnerModal({
     };
   };
 
+  const preparationCopy = sharedMemoryPreparationCopy(currentEntry.syncState);
+
   if (destinationInvalid) return null;
 
   return (
-    <Modal label={`Share ${entry.title}`} onClose={onClose}>
+    <Modal
+      className="collab-share-memory-modal"
+      label={`Share ${entry.title}`}
+      onClose={onClose}
+    >
       <ModalHeader title={entry.title} onClose={onClose} />
       <div className="collab-form collab-share-memory-form">
-        {loadingGrants ? (
+        {preparingPreview ? (
+          <div
+            className="collab-modal-state collab-share-preparing"
+            role="status"
+            aria-busy="true"
+            aria-live="polite"
+          >
+            <LoaderCircle
+              className="collab-spin collab-share-preparing-icon"
+              aria-hidden="true"
+            />
+            <strong>{preparationCopy.title}</strong>
+            <p>{preparationCopy.detail}</p>
+            <small>Current status: {preparationCopy.label}</small>
+          </div>
+        ) : loadingGrants ? (
           <div className="collab-modal-state" role="status">
             <LoaderCircle className="collab-spin" aria-hidden="true" />
             Loading shared destinations
@@ -2336,11 +2650,25 @@ function SharedMemoryOwnerModal({
                 {preview.itemCount} {preview.itemCount === 1 ? "item" : "items"}
               </span>
             </div>
-            <ol className="collab-source-list collab-preview-list">
-              {preview.items.map((item) => (
-                <SourceItemRow key={item.id} item={item} />
-              ))}
-            </ol>
+            {preview.representation === "memory_events" ? (
+              <div className="collab-preview-list shared-conversation-preview">
+                <ConversationRows
+                  events={sharedMemoryConversationEvents(preview.items)}
+                  markdownAdapters={markdownAdapters}
+                  scope="workspace"
+                />
+              </div>
+            ) : (
+              <ol className="collab-source-list collab-preview-list">
+                {preview.items.map((item) => (
+                  <SourceItemRow
+                    key={item.id}
+                    item={item}
+                    markdownAdapters={markdownAdapters}
+                  />
+                ))}
+              </ol>
+            )}
             {preview.nextCursor ? (
               <button
                 type="button"
@@ -2396,9 +2724,7 @@ function SharedMemoryOwnerModal({
                           );
                           setTeamId(event.currentTarget.value);
                           setWorkspaceId(
-                            nextTeam?.workspaces.find(
-                              (workspace) => workspace.lifecycle === "active"
-                            )?.id ?? ""
+                            firstWritableWorkspace(nextTeam)?.id ?? ""
                           );
                           setPreview(null);
                         }}
@@ -2486,6 +2812,7 @@ function SharedMemoryOwnerModal({
                 onClick={() => {
                   if (ownerGrants.length > 0) {
                     setPreview(null);
+                    setPreparingPreview(false);
                     setWorkflow(null);
                     setError("");
                   } else {
@@ -2499,6 +2826,7 @@ function SharedMemoryOwnerModal({
                 type="button"
                 disabled={
                   busy ||
+                  preparingPreview ||
                   !teamId ||
                   !workspaceId ||
                   availableTeams.length === 0 ||
@@ -2513,13 +2841,15 @@ function SharedMemoryOwnerModal({
               >
                 {busy
                   ? "Working..."
-                  : preview
-                    ? workflow.kind === "change"
-                      ? "Consent and replace"
-                      : selectedDestinationGrant?.lifecycle === "revoked"
-                        ? "Consent and restore"
-                        : "Consent and share"
-                    : "Review source"}
+                  : preparingPreview
+                    ? "Preparing source..."
+                    : preview
+                      ? workflow.kind === "change"
+                        ? "Consent and replace"
+                        : selectedDestinationGrant?.lifecycle === "revoked"
+                          ? "Consent and restore"
+                          : "Consent and share"
+                      : "Review source"}
               </button>
             </>
           )}
@@ -2531,12 +2861,14 @@ function SharedMemoryOwnerModal({
 
 function ModalLayer({
   client,
+  markdownAdapters,
   modal,
   snapshot,
   onClose,
   onOpen
 }: {
   client: CollaborationRendererClient;
+  markdownAdapters: MarkdownPlatformAdapters;
   modal: CollaborationModalState;
   snapshot: CollaborationSnapshot;
   onClose: () => void;
@@ -2588,13 +2920,15 @@ function ModalLayer({
   ) : null;
 
   if (modal.kind === "share_personal_memory") {
-    const entry = snapshot.navigation.personal.memory.find(
-      (candidate) => candidate.id === modal.sessionId
-    );
+    const entry =
+      snapshot.navigation.personal.memory.find(
+        (candidate) => candidate.id === modal.sessionId
+      ) ?? modal.localEntry;
     return entry ? (
       <SharedMemoryOwnerModal
         client={client}
         entry={entry}
+        markdownAdapters={markdownAdapters}
         snapshot={snapshot}
         onClose={onClose}
       />
@@ -3347,21 +3681,19 @@ export function CollaborationRoutes({
 
 export function CollaborationModalLayer({
   client,
-  localPersonalSessionIds = new Set<string>(),
+  markdownAdapters,
   modal,
   onModalChange,
   snapshot
 }: {
   client: CollaborationRendererClient;
-  localPersonalSessionIds?: ReadonlySet<string>;
+  markdownAdapters: MarkdownPlatformAdapters;
   modal: CollaborationModalState | null;
   onModalChange: (modal: CollaborationModalState | null) => void;
   snapshot: CollaborationSnapshot;
 }) {
   const authorizedModal =
-    modal && modalIsAuthorized(modal, snapshot, localPersonalSessionIds)
-      ? modal
-      : null;
+    modal && modalIsAuthorized(modal, snapshot) ? modal : null;
   useEffect(() => {
     if (modal && !authorizedModal) onModalChange(null);
   }, [authorizedModal, modal, onModalChange]);
@@ -3371,9 +3703,11 @@ export function CollaborationModalLayer({
       key={
         authorizedModal.kind +
         ("teamId" in authorizedModal ? authorizedModal.teamId : "") +
-        ("threadId" in authorizedModal ? authorizedModal.threadId : "")
+        ("threadId" in authorizedModal ? authorizedModal.threadId : "") +
+        ("sessionId" in authorizedModal ? authorizedModal.sessionId : "")
       }
       client={client}
+      markdownAdapters={markdownAdapters}
       modal={authorizedModal}
       snapshot={snapshot}
       onClose={() => onModalChange(null)}

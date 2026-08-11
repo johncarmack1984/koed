@@ -6926,10 +6926,30 @@ describeDb("memory repository visibility", () => {
     expect(claimedOutbox?.claimToken).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
     );
+    await expect(
+      encryptedRepo.activateSourceSyncRelationship({
+        relationshipId: ids.relationshipId,
+        localUserId: owner.id
+      })
+    ).resolves.toMatchObject({ state: "created" });
+    await expect(
+      encryptedRepo.renewSyncQueueLease({
+        queue: "outbox",
+        id: outboxEntry.id,
+        claimToken: claimedOutbox!.claimToken!,
+        leaseMs: 30_000
+      })
+    ).resolves.toBe(true);
     await encryptedRepo.markSourceSyncProcessing({
       relationshipId: ids.relationshipId,
       packageId: randomUUID()
     });
+    await expect(
+      encryptedRepo.activateSourceSyncRelationship({
+        relationshipId: ids.relationshipId,
+        localUserId: owner.id
+      })
+    ).resolves.toMatchObject({ state: "processing" });
     await encryptedRepo.deferSyncQueueEntry({
       queue: "outbox",
       id: outboxEntry.id,
@@ -6953,7 +6973,7 @@ describeDb("memory repository visibility", () => {
       leaseMs: 30_000
     });
     await pool.query(
-      "update sync_outbox_entries set lease_expires_at=now()-interval '1 second' where id=$1",
+      "update sync_outbox_entries set lease_expires_at=null where id=$1",
       [outboxEntry.id]
     );
     const replacementClaim = await encryptedRepo.claimSyncQueueEntry({
@@ -12607,7 +12627,7 @@ describeDb("memory repository visibility", () => {
       targetId: team.id,
       metadata: {
         event: "first_recall_completed",
-        surface: "explorer",
+        surface: "api",
         deploymentProfile: "koed_managed_cloud",
         teamId: team.id,
         attributes: { route: "memory_answer" }
@@ -12643,7 +12663,7 @@ describeDb("memory repository visibility", () => {
         {
           event: "first_recall_completed",
           count: 1,
-          surfaces: { explorer: 1 },
+          surfaces: { api: 1 },
           deploymentProfiles: { koed_managed_cloud: 1 }
         }
       ]
@@ -15885,6 +15905,51 @@ describeDb("memory repository visibility", () => {
     });
   });
 
+  it("normalizes native Codex guardian lineage in Captured Session graph rows", async () => {
+    const alice = await repo.createUser({
+      email: `alice-native-guardian-${randomUUID()}@example.com`
+    });
+    const parentExternalSessionId = `parent-${randomUUID()}`;
+    const guardianExternalSessionId = `guardian-${randomUUID()}`;
+    await repo.createCapturedSession(
+      { userId: alice.id },
+      {
+        externalSessionId: parentExternalSessionId,
+        sourceRuntime: "codex-cli",
+        captureMethod: "transcript",
+        metadata: { threadName: "Canonical parent Conversation" }
+      }
+    );
+    await repo.createCapturedSession(
+      { userId: alice.id },
+      {
+        externalSessionId: guardianExternalSessionId,
+        sourceRuntime: "codex-cli",
+        captureMethod: "transcript",
+        metadata: {
+          threadName:
+            "The following is the Codex agent history added since your last approval assessment",
+          thread_source: "subagent",
+          parent_thread_id: parentExternalSessionId,
+          source: { subagent: { other: "guardian" } }
+        }
+      }
+    );
+
+    const projects = await repo.listLcmGraphThreads(
+      { userId: alice.id },
+      { limit: 10 }
+    );
+    const guardian = projects
+      .flatMap((project) => project.threads)
+      .find((thread) => thread.id === guardianExternalSessionId);
+
+    expect(guardian).toMatchObject({
+      threadKind: "subagent",
+      parentThreadId: parentExternalSessionId
+    });
+  });
+
   it("seeds explicit projection policy rows while allowing independent display and recall policy", async () => {
     const rows = await pool.query<{
       transcript_type: string;
@@ -16830,7 +16895,20 @@ describeDb("memory repository visibility", () => {
               projectName: "Live Prompt Dedupe Project",
               transcriptByteOffset: 6,
               transcriptItemDiscriminator: "primary:codex_transcript_user",
-              transcriptType: "user_message"
+              transcriptType: "user_message",
+              approvalReviewTranscriptDisplay: {
+                kind: "approval_review",
+                version: 1,
+                truncated: false,
+                segments: [
+                  {
+                    kind: "message",
+                    sequence: 1,
+                    actor: "user",
+                    content: "Where should duplicate prompts render?"
+                  }
+                ]
+              }
             }
           }
         ]
@@ -16895,6 +16973,12 @@ describeDb("memory repository visibility", () => {
       "Where should duplicate prompts render?"
     ]);
     expect(events[0]?.sourceSequence).toBe(12);
+    expect(events[0]?.metadata).toMatchObject({
+      approvalReviewTranscriptDisplay: {
+        kind: "approval_review",
+        segments: [{ kind: "message", sequence: 1, actor: "user" }]
+      }
+    });
     expect(rawRows.rows).toHaveLength(1);
     const transcriptRawRow = rawRows.rows.find(
       (row) => row.source_record_type === "event_msg"

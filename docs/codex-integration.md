@@ -22,7 +22,7 @@ node packages/koed-server/dist/cli.js setup codex --json
 ```
 
 The setup command prepares the environment, creates or reuses the local API
-Token once the API is ready, writes the app-provisioned Explorer credential,
+Token once the API is ready, writes the app-provisioned local credential,
 writes the Codex MCP and Capture Hook configuration, verifies capture, and
 finishes with a doctor check. Koed Desktop runs this guided client setup path
 automatically on startup when needed; `pnpm clients:bootstrap` remains the
@@ -35,9 +35,6 @@ Create a local API token and copy it immediately. Full token values are shown on
 ```bash
 pnpm api-token:create --owner-email local@koed.ai --name "Client Integration"
 ```
-
-Use `pnpm explorer:bootstrap` if you already have a token and just want to write
-it into Explorer local config.
 
 ## MCP Server
 
@@ -68,20 +65,18 @@ If Codex Desktop cannot resolve `node`, set the command to an absolute Node path
 or run setup with `MEMORY_NODE_COMMAND=/path/to/node`. Shell-managed versions
 from NVM, pyenv, or similar tools may not be on the PATH when Codex runs hooks.
 
-## Browser Questions
+## Memory Questions
 
-The Explorer Questions tab uses the local MCP server as its AI-client
-sidecar. The browser can ask a question and persist it in Koed, then the MCP
-server delegates answer synthesis to Codex app-server mode in the local Codex
-environment. The backend stores questions, retrieval evidence, citations, and
-answer status, but does not run LLM synthesis.
+API clients can persist a Memory Question in Koed, then the MCP Server delegates
+answer synthesis to Codex app-server mode in the local Codex environment. The
+backend stores questions, retrieval evidence, citations, and answer status, but
+does not run LLM synthesis.
 
-When the MCP server starts, it also starts a local browser bridge on
-`http://localhost:3210` by default. The Explorer uses that local endpoint
-for Questions; there is no separate bridge process to run. `MEMORY_API_TOKEN`
-also enables the MCP server's local pending-question catch-up service, which
-claims unanswered browser questions and finishes them through local Codex answer
-synthesis after a refresh or interrupted browser request.
+When the MCP Server starts, it also starts a local Memory Question bridge on
+`http://localhost:3210` by default; there is no separate bridge process to run.
+`MEMORY_API_TOKEN` also enables its pending-question catch-up service, which
+claims unanswered questions and finishes them through local Codex answer
+synthesis after an interrupted request.
 
 Koed starts Codex app-server mode internally when it needs local answer or LCM
 summary synthesis. Users do not need to run a separate app-server or answer
@@ -98,21 +93,37 @@ with a platform path-delimited list of explicit transcript roots. Filesystem
 notifications enqueue the exact changed transcript ahead of other work.
 Supported Capture Hook signals coalesce additional wakeups without carrying
 content. Known active transcripts are serviced before bounded discovery, and
-discovery traverses timestamped Codex paths newest-first. The watcher does not
-poll: a missed filesystem notification is recovered by the next Hook signal,
-source event, explicit verification, or process restart through the same
-idempotent source cursor.
+discovery traverses timestamped Codex paths newest-first. Each Hook signal
+requests one complete discovery sweep: bounded pages continue automatically
+until the sweep completes, and a signal received during a sweep coalesces into
+one refreshed sweep afterward. This prevents a newly created Conversation from
+being hidden by an older directory snapshot. During initial activation, the
+same bounded continuation records the complete baseline before live capture
+begins. The watcher does not poll after activation: a missed filesystem
+notification is recovered by the next Hook signal, source event, explicit
+verification, or process restart through the same idempotent source cursor.
 
 The TypeScript Supported Capture Hook is only a low-latency signal. It receives
 no API credentials and reads only bounded source-routing and lifecycle fields
 from stdin. Ordinary events write a private timestamp wake hint. `Stop` and
 `SubagentStop` additionally write an atomic boundary timestamp under hashed
 session/path identities together with the exact complete JSONL byte frontier
-observed by the Hook. The matching watcher journals through that frontier,
-persists one idempotent `codex-hook-signal-v1` lifecycle control for the active
-transcript turn, and only then processes newer bytes. The control is
-content-free and cannot render or embed by itself. No prompt, response, tool
-payload, raw path, or session identifier is retained in the signal files.
+observed by the Hook. The Hook makes those boundary files durable before it
+publishes the watcher wake, so the watcher cannot consume a Stop wake without
+seeing its matching frontier. The matching watcher journals through that
+frontier, persists one idempotent `codex-hook-signal-v1` lifecycle control for
+the active transcript turn, and schedules one trailing catch-up after Codex has
+had time to flush records written after the Stop Hook returned. It only then
+processes newer bytes. The control is content-free and cannot render or embed
+by itself. No prompt, response, tool payload, raw path, or session identifier is
+retained in the signal files.
+Independently of Hook and filesystem notification delivery, a one-second
+catch-up tick checks a bounded rotation of known sources and the newest
+discovery page. A canonical cursor with an open turn additionally rechecks only
+its own transcript until `task_complete` or `turn_aborted` is consumed.
+Unchanged open turns back off to a five-second interval; terminal turns stop
+rechecking immediately. Exact hints and active sources are always serviced
+before discovery work.
 Missing signals can delay a fallback turn seal until later transcript evidence
 arrives; duplicate, delayed, or reordered signals cannot seal a later frontier
 or create duplicate content. Transcript JSONL remains the only content,
@@ -154,6 +165,8 @@ Transcript Watcher settings:
 ```text
 MEMORY_CODEX_TRANSCRIPT_WATCHER_ENABLED=true
 MEMORY_CODEX_TRANSCRIPT_DEBOUNCE_MS=200
+MEMORY_CODEX_TRANSCRIPT_POLL_MS=1000
+MEMORY_CODEX_TRANSCRIPT_TURN_SETTLE_MS=500
 MEMORY_CODEX_TRANSCRIPT_MAX_ENTRIES_PER_SCAN=4000
 MEMORY_CODEX_TRANSCRIPT_MAX_FILES_PER_SCAN=200
 MEMORY_CODEX_TRANSCRIPT_MAX_BYTES_PER_BATCH=1048576
@@ -177,7 +190,7 @@ shutdown releases the lease without deleting the rollout. Managed terminal
 boundaries are held until their journaled records project successfully, so a
 later turn cannot be folded into an earlier seal.
 
-There is no Desktop or Explorer entry point for this experiment. It does not
+There is no Desktop entry point for this experiment. It does not
 attach to external Codex processes and does not replace the supported Transcript
 Watcher. Existing Codex CLI and native-app conversations are captured from
 transcript growth; Capture Hook signals only reduce watcher latency.
