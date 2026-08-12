@@ -1,5 +1,49 @@
 # Koed
 
+## 0.5.0
+
+### Minor Changes
+
+- c76eeca: Add clone-safe local deployment and device identity with redacted inspection, explicit rotation, and fail-closed remote-operation gating.
+- 00a2aaa: Add supervised continuous Codex transcript watching with durable live recovery, bounded rescans, Capture Policy enforcement, and Hook-independent Personal Memory capture.
+- 56c2e0f: Add policy-gated historical import with durable provenance, idempotent progress, and bounded backpressure that prioritizes interactive and live capture work across local and BullMQ queues.
+- 6e2e9f0: License Koed and its repository history under the Apache License 2.0.
+- 7a38929: Add push-based Team member presence with automatic activity levels and manual availability controls.
+- 3153645: Use GPT-5.6 Luna with low reasoning by default for local Memory Answer, LCM Summary, session-title, and Curated Memory synthesis.
+- 18cda8d: Add authoritative collaboration unread counts and scalable aggregate sent,
+  delivered, and read receipts with durable realtime updates.
+- e4ea6c7: Move browser-mediated Step-up actions and device enrollment onto dedicated
+  approval pages served by the existing Koed API.
+
+  Operators upgrading from an Explorer deployment must remove the retired
+  Explorer service and its health checks, then point `BROWSER_PUBLIC_URL` (or the
+  `API_BROWSER_PUBLIC_URL` Compose setting) at the public origin of the existing
+  Koed API. Approval pages, authentication, and approval JSON are now served from
+  that same API origin; no separate browser service is required.
+
+- 02d2b04: Adopt the MCP 2026-07-28 protocol with a stateless Codex adapter backed by a
+  supervised Local AI Runtime. Keep transcript capture, LCM summaries, Curated
+  Memory review, and Memory Answer execution in the local runtime, make Memory
+  Questions terminal-owned, and remove the legacy asynchronous question bridge.
+- 4b346ec: Add tiered approval flow across platform.
+- a69b856: Add encrypted Personal and Team collaboration, durable realtime messaging,
+  Shared Memory representations with companion discussions, and the Electron
+  collaboration experience with guided setup and resilient recovery flows.
+  Introduce verified source replication, managed Conversation continuation,
+  development workspace snapshots, cross-platform protected Personal Device
+  Sync, portable Memory Event, embedding, and LCM artifact reuse, and explicit
+  same-network device pairing with one-use encrypted QR links.
+
+### Patch Changes
+
+- de715fc: Update CI for fast fail, migrate cold build to version release.
+- b22d28d: Prevent the retention purge worker from repeatedly querying an empty queue while preserving immediate processing for queued purge work.
+- 093b98f: Cleanup desktop UI components.
+- 2f0659f: Harden Personal Device Sync governance retries, certificate repair, and final-device recovery Key Bundle access.
+- 3ae1802: Harden collaboration selection reconciliation and Team Presence realtime event
+  validation.
+- 6d3bd83: Keep open Personal Memory conversations visible while realtime updates refresh their latest events.
+
 ## 0.4.4
 
 ### Patch Changes
