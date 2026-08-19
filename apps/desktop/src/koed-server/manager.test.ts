@@ -14,12 +14,15 @@ import {
 } from "@koed/shared";
 import { describe, expect, it, vi } from "vitest";
 import {
+  configureDetectedSetupAiClients,
   createKoedEnvironment,
   createKoedServerManager,
+  detectedSetupAiClients,
   desktopCodexSetupCommand,
   personalMemoryChangeFromSseFrame,
   setupStartupReady,
-  setupServicesHealthy
+  setupServicesHealthy,
+  setupIntegrationHealthy
 } from "./manager.js";
 
 type FakeChildProcess = EventEmitter & {
@@ -82,6 +85,100 @@ describe("Koed server desktop manager", () => {
     await manager.handlers.status!();
 
     expect(timeout).toBe(120_000);
+  });
+
+  it("routes optional AI Client setup and repair through idempotent Koed Server commands", async () => {
+    const invocations: string[][] = [];
+    const manager = createKoedServerManager({
+      repoRoot: "/repo",
+      cliPath: "/repo/cli.js",
+      environment: {},
+      createCliInvocation: (args) => {
+        invocations.push(args);
+        return {
+          command: "/node",
+          args: ["/repo/cli.js", ...args],
+          env: { KOED_REPO_ROOT: "/repo" }
+        };
+      },
+      existsSync: () => true,
+      execFile: (_command, _args, _options, callback) => {
+        callback(null, JSON.stringify({ ok: true, state: "healthy" }), "");
+      },
+      spawn: () => childProcess() as never,
+      openExternal: async () => undefined
+    });
+
+    await manager.handlers.setup_pi!();
+    await manager.handlers.repair_pi!();
+    await manager.handlers.setup_claude!();
+    await manager.handlers.repair_claude!();
+
+    expect(invocations).toEqual([
+      ["setup", "pi", "--json"],
+      ["setup", "pi", "--json"],
+      ["setup", "claude", "--json"],
+      ["setup", "claude", "--json"]
+    ]);
+  });
+
+  it("includes detected optional AI Clients in first-run integration readiness", () => {
+    const status = {
+      apiToken: { state: "healthy" },
+      mcpServer: { state: "healthy" },
+      captureHook: { state: "healthy" },
+      lcmSummaryService: { state: "healthy" },
+      codex: { state: "healthy" },
+      claudeCode: { state: "not_configured", detected: true },
+      pi: { state: "healthy", detected: true }
+    };
+
+    expect(detectedSetupAiClients(status).map(({ label }) => label)).toEqual([
+      "Codex",
+      "Claude Code",
+      "Pi"
+    ]);
+    expect(setupIntegrationHealthy(status)).toBe(false);
+    expect(
+      setupIntegrationHealthy({
+        ...status,
+        claudeCode: { state: "healthy", detected: true }
+      })
+    ).toBe(true);
+  });
+
+  it("automatically configures every detected, incomplete AI Client", async () => {
+    const run = vi.fn(async (args: string[]) => {
+      void args;
+      return { ok: true, state: "healthy" };
+    });
+    const progress: string[] = [];
+
+    const result = await configureDetectedSetupAiClients(
+      {
+        apiToken: { state: "healthy" },
+        codex: { state: "not_configured" },
+        claudeCode: { state: "not_configured", detected: true },
+        pi: { state: "not_configured", detected: true }
+      },
+      run,
+      (message) => progress.push(message)
+    );
+
+    expect(run.mock.calls.map(([args]) => args)).toEqual([
+      ["repair", "codex"],
+      ["setup", "claude"],
+      ["setup", "pi"]
+    ]);
+    expect(progress).toEqual([
+      "Configuring Codex capture and recall…",
+      "Configuring Claude Code capture and recall…",
+      "Configuring Pi capture and recall…"
+    ]);
+    expect(result).toEqual({
+      ok: true,
+      message: "Codex, Claude Code, and Pi integrations are configured."
+    });
   });
 
   it("treats local services as ready before later setup stages finish", () => {

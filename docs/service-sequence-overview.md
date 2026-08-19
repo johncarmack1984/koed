@@ -8,8 +8,8 @@ AI Runtime.
 
 ## Services In Scope
 
-- **AI Client**: Codex is the supported AI Client in this build.
-- **Transcript Watcher**: the local background service that owns correctness for externally managed Codex transcript growth.
+- **AI Client**: Codex, Claude Code, and Pi are supported AI Clients in this build.
+- **Transcript Watcher**: local background service that owns correctness for externally managed Codex, Claude, or Pi Conversation source growth.
 - **Capture Hook**: the TypeScript hook that provides content-free, low-latency wake signals.
 - **MCP Server**: a thin local MCP `2026-07-28` adapter that exposes Koed tools
   and forwards typed requests to the Local AI Runtime.
@@ -122,8 +122,9 @@ AI Runtime.
 8. `koed-server status --json` and `koed-server doctor --json` poll the API
    readiness endpoint, dependency readiness as reported by the API, local
    Worker process state, local API Token configuration, MCP Server doctor
-   output, Supported Capture Hook config, Codex config, LCM Summary Service
-   availability, and last verification metadata. Status compares the active
+   output, Supported Capture Hook config, per-client Codex, Claude Code, and Pi
+   config, LCM Summary Service availability, and last verification metadata.
+   Status compares the active
    local API URL/token against the Koed-managed Codex MCP block and separately
    verifies the credential-free Capture Hook command path. MCP configuration
    contains `KOED_HOME` rather than API credentials. Stale ports,
@@ -132,7 +133,10 @@ AI Runtime.
    current migrations, pgvector, local or BullMQ queue backend availability,
    and Embedding Service model/dimension compatibility. Historical-import
    backlog and aggregate Transcript Watcher process/status data are diagnostic
-   only, never readiness gates.
+   only, never readiness gates. Claude Code and Pi integration checks are also
+   optional diagnostics: selecting one for capture, Recall, or local Synthesis
+   requires that client to be healthy, but their absence does not make the core
+   Koed runtime or another AI Client unhealthy.
 9. `koed-server setup codex --json` wraps the existing guided bootstrap path so
    Codex MCP Server, Supported Capture Hook, local API Token, app-provisioned
    local credential, verification, and doctor setup can be invoked through
@@ -147,9 +151,18 @@ AI Runtime.
    both mint the token through the active runtime repository with the same
    database and token pepper used by the API; Electron main only retains and
    rereads that supervisor-owned credential.
+   `koed-server setup claude --json` independently verifies Claude Code version
+   and sign-in, then preserves unrelated user settings while installing Koed's
+   MCP and Supported Capture Hook entries. `koed-server setup pi --json`
+   independently registers Koed's stable local package in the active Pi
+   profile after canonical executable and authenticated-model checks. Both
+   commands are idempotent and use strict subprocess environment allowlists.
+   Claude setup replaces only an MCP entry proven to be Koed-owned; Pi's
+   installed package derives custom `KOED_HOME` from its stable package path.
 10. Koed Desktop can start/connect to the same headless command surface, run
     the first-launch Codex bootstrap and health-check sequence, poll status,
-    offer one-click Codex integration repair for stale local config, and
+    offer one-click Codex repair plus explicitly confirmed, optional Claude Code
+    and Pi setup/repair for stale local config, and
     provision the embedding model through `koed-server models status/install
 --json` in bundled-local mode without requiring the Operator to invoke
     repo-local scripts directly. Its Project and Captured Session navigation is
@@ -938,8 +951,9 @@ sequenceDiagram
    reported to the LLM for one repair attempt. A partial repair retains the
    valid summary and valid grounded anchors and drops anything still invalid.
    Other unsupported worker output fails at the worker boundary.
-6. The LCM worker runs the selected local AI Client. Codex uses app-server mode;
-   Claude uses the pinned Agent SDK and confirmed local Claude Code executable.
+6. LCM worker runs selected local AI Client. Codex uses app-server mode; Claude
+   uses pinned Agent SDK and confirmed local Claude Code executable; Pi uses
+   isolated strict-LF RPC with no persistent session or user/project resources.
    The worker parses the returned structured LCM Summary.
 7. App-server workflow telemetry is persisted as raw-only conversation items,
    and provider token usage is recorded for attribution.
@@ -1275,8 +1289,9 @@ grant-based visibility model.
    authority-row versions. The MCP Server forwards it on every later search and
    expansion; the model cannot alter it.
 3. The Local AI Runtime starts a memory-answer worker through the selected AI
-   Client. Codex uses app-server mode; Claude uses the pinned Agent SDK and
-   confirmed local Claude Code executable. The worker receives the original
+   Client. Codex uses app-server mode; Claude uses pinned Agent SDK and
+   confirmed local Claude Code executable; Pi uses isolated strict-LF RPC and
+   schema-constrained terminating tool. Worker receives original
    question, fixed effective boundary, caller hints, first-pass
    diagnostics, and initial evidence. The worker is given only Koed dynamic RAG
    tools: `scan`, `search`, and `expand`. Personal Project search uses Captured
