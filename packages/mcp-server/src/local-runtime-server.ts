@@ -14,6 +14,10 @@ import { z } from "zod";
 import { startCodexTranscriptWatcher } from "./codex-transcript-watcher.js";
 import { startClaudeTranscriptWatcher } from "./claude-transcript-watcher.js";
 import { startPiTranscriptWatcher } from "./pi-transcript-watcher.js";
+import {
+  startAiClientCapabilityPublisher,
+  type AiClientCapabilityPublisherHandle
+} from "./ai-client-capability-publisher.js";
 import { startCuratedMemoryReviewService } from "./curated-memory-review-service.js";
 import { resolveCuratedMemoryReviewConfig } from "./curated-memory-review-worker.js";
 import {
@@ -247,6 +251,7 @@ export interface LocalAiRuntimeToolExecutor {
 
 export interface LocalAiRuntimeServices {
   executor: LocalAiRuntimeToolExecutor;
+  capabilityPublisher?: AiClientCapabilityPublisherHandle;
   close(): Promise<void>;
 }
 
@@ -263,6 +268,7 @@ export interface LocalAiRuntimeServiceDependencies {
   startCodexTranscriptWatcher: typeof startCodexTranscriptWatcher;
   startClaudeTranscriptWatcher: typeof startClaudeTranscriptWatcher;
   startPiTranscriptWatcher?: typeof startPiTranscriptWatcher;
+  startAiClientCapabilityPublisher?: typeof startAiClientCapabilityPublisher;
   createExecutor(
     apiClient: MemoryApiClient,
     environment: NodeJS.ProcessEnv,
@@ -282,6 +288,7 @@ const defaultServiceDependencies: LocalAiRuntimeServiceDependencies = {
   startCodexTranscriptWatcher,
   startClaudeTranscriptWatcher,
   startPiTranscriptWatcher,
+  startAiClientCapabilityPublisher,
   createExecutor: (apiClient, environment, services) =>
     new MemoryToolExecutor(apiClient, environment, services)
 };
@@ -311,6 +318,7 @@ export const startDefaultLocalAiRuntimeServices = async (
   > | null = null;
   let piTranscriptWatcher: ReturnType<typeof startPiTranscriptWatcher> | null =
     null;
+  let capabilityPublisher: AiClientCapabilityPublisherHandle | null = null;
   try {
     lcmWorkWatcher = lcmSummaryService
       ? await dependencies.watchKoedLocalWork(
@@ -341,13 +349,27 @@ export const startDefaultLocalAiRuntimeServices = async (
         "false" || !dependencies.startPiTranscriptWatcher
         ? null
         : dependencies.startPiTranscriptWatcher(apiClient, environment);
+    if (dependencies.startAiClientCapabilityPublisher) {
+      capabilityPublisher = dependencies.startAiClientCapabilityPublisher(
+        apiClient,
+        environment
+      );
+      void capabilityPublisher.refresh().catch((error) => {
+        logger.warn(
+          { err: error },
+          "local AI Client capability publication failed"
+        );
+      });
+    }
     const executor = dependencies.createExecutor(apiClient, environment, {
       lcmSummaryService,
       curatedMemoryReviewService
     });
     return {
       executor,
+      capabilityPublisher: capabilityPublisher ?? undefined,
       async close() {
+        capabilityPublisher?.stop();
         lcmWorkWatcher?.stop();
         lcmSummaryService?.stop();
         curatedMemoryReviewService?.stop();
@@ -362,6 +384,7 @@ export const startDefaultLocalAiRuntimeServices = async (
     lcmWorkWatcher?.stop();
     lcmSummaryService?.stop();
     curatedMemoryReviewService?.stop();
+    capabilityPublisher?.stop();
     await Promise.all([
       codexTranscriptWatcher?.stop(),
       claudeTranscriptWatcher?.stop(),
@@ -427,6 +450,31 @@ export const startLocalAiRuntime = async ({
             protocolVersion: LOCAL_AI_RUNTIME_PROTOCOL_VERSION,
             curatedMemoryIntakeAvailable:
               capabilities.curatedMemoryIntakeAvailable
+          });
+          return;
+        }
+        if (
+          request.method === "POST" &&
+          requestUrl.pathname === "/v1/capabilities/refresh"
+        ) {
+          if (!services.capabilityPublisher) {
+            json(response, 503, {
+              error: "Local AI Client capability publisher is unavailable"
+            });
+            return;
+          }
+          const publications = await services.capabilityPublisher.refresh();
+          const failed = publications.filter(
+            (publication) => !publication.published
+          );
+          json(response, failed.length > 0 ? 503 : 200, {
+            protocolVersion: LOCAL_AI_RUNTIME_PROTOCOL_VERSION,
+            publications,
+            ...(failed.length > 0
+              ? {
+                  error: `Capability refresh failed for ${failed.length} AI Client instance${failed.length === 1 ? "" : "s"}`
+                }
+              : {})
           });
           return;
         }

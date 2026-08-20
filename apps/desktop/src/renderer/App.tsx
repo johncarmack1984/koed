@@ -571,6 +571,7 @@ export function App({
     section:
       | "general"
       | "capture"
+      | "ai-clients"
       | "team-connection"
       | "about"
       | "advanced" = "general"
@@ -1091,6 +1092,7 @@ export function App({
             }
             managedConversationRevision={managedConversationRevision}
             managedConversations={managedConversations}
+            localAiClients={window.koedDesktop?.localAiClients}
             markdownAdapters={collaboration.markdownAdapters}
             onInspectEvent={(event) => {
               setInspector(event);
@@ -1181,6 +1183,7 @@ export function App({
             }
           })
         }
+        localAiClients={window.koedDesktop?.localAiClients}
         onThemeChange={(preference) => void themeStore.set(preference)}
         statusStore={activeStatusStore}
         theme={theme.preference}

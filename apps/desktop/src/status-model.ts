@@ -14,6 +14,7 @@ export const statusComponentKeys = [
   "redis",
   "workerQueues",
   "embeddingService",
+  "localAiRuntime",
   "apiToken",
   "mcpServer",
   "captureHook",
@@ -57,6 +58,10 @@ export const componentDefinitions = {
   embeddingService: {
     label: "Embedding Service",
     description: "Local service that turns memory text into retrieval vectors."
+  },
+  localAiRuntime: {
+    label: "Local AI Runtime",
+    description: "Supervised local process for memory work and LCM summaries."
   },
   apiToken: {
     label: "Local runtime credential",
@@ -113,12 +118,19 @@ export type StatusCardActionCommand =
   | "status"
   | "start"
   | "package_install"
+  | "setup_core"
   | "setup_codex"
+  | "check_codex"
   | "repair_codex"
+  | "remove_codex"
   | "setup_pi"
+  | "check_pi"
   | "repair_pi"
+  | "remove_pi"
   | "setup_claude"
+  | "check_claude"
   | "repair_claude"
+  | "remove_claude"
   | "runtime_install"
   | "models_install"
   | "doctor"
@@ -271,19 +283,43 @@ export const statusCards = [
     ]
   },
   {
-    id: "aiClientIntegration",
-    title: "AI Client Integration",
-    role: "Local runtime credential, Codex config, and MCP adapter used for Memory Answer recall.",
-    impact:
-      "The AI Client cannot call Koed memory tools when this is incomplete.",
-    componentKeys: ["apiToken", "mcpServer", "codex"],
+    id: "coreIntegration",
+    title: "Koed Core Runtime",
+    role: "Local credential, MCP artifacts, and supervised runtime used by Koed.",
+    impact: "Core memory services cannot operate when this is incomplete.",
+    componentKeys: ["apiToken", "mcpServer", "localAiRuntime"],
     primaryAction: {
-      label: "Fix Codex integration",
+      label: "Set up Koed core",
+      command: "setup_core",
+      timeoutMs: 330_000,
+      primary: true
+    },
+    secondaryActions: [
+      { label: "Run doctor", command: "doctor", timeoutMs: 90_000 },
+      { label: "Copy diagnostics", command: "copy_diagnostics" }
+    ]
+  },
+  {
+    id: "codexIntegration",
+    title: "Codex Integration",
+    role: "Configures Koed MCP recall and Supported Capture Hook in Codex.",
+    impact:
+      "Codex cannot capture Conversations or call Koed memory tools until configured.",
+    componentKeys: ["codex"],
+    primaryAction: {
+      label: "Repair Codex integration",
       command: "repair_codex",
       timeoutMs: 120_000,
       primary: true
     },
     secondaryActions: [
+      {
+        label: "Set up Codex integration",
+        command: "setup_codex",
+        timeoutMs: 120_000
+      },
+      { label: "Check Codex integration", command: "check_codex" },
+      { label: "Remove Codex integration", command: "remove_codex" },
       { label: "Run doctor", command: "doctor", timeoutMs: 90_000 },
       { label: "Copy diagnostics", command: "copy_diagnostics" }
     ]
@@ -296,13 +332,12 @@ export const statusCards = [
       "New conversations will not be captured automatically when this is blocked.",
     componentKeys: ["captureHook", "apiToken", "api"],
     primaryAction: {
-      label: "Fix Codex integration",
-      command: "repair_codex",
-      timeoutMs: 120_000,
+      label: "Run diagnostics",
+      command: "doctor",
+      timeoutMs: 90_000,
       primary: true
     },
     secondaryActions: [
-      { label: "Run doctor", command: "doctor", timeoutMs: 90_000 },
       { label: "Refresh", command: "status", timeoutMs: 10_000 }
     ]
   },
@@ -325,6 +360,8 @@ export const statusCards = [
         command: "setup_pi",
         timeoutMs: 120_000
       },
+      { label: "Check Pi integration", command: "check_pi" },
+      { label: "Remove Pi integration", command: "remove_pi" },
       { label: "Run doctor", command: "doctor", timeoutMs: 90_000 },
       { label: "Copy diagnostics", command: "copy_diagnostics" }
     ]
@@ -348,6 +385,8 @@ export const statusCards = [
         command: "setup_claude",
         timeoutMs: 120_000
       },
+      { label: "Check Claude Code integration", command: "check_claude" },
+      { label: "Remove Claude Code integration", command: "remove_claude" },
       { label: "Run doctor", command: "doctor", timeoutMs: 90_000 },
       { label: "Copy diagnostics", command: "copy_diagnostics" }
     ]
@@ -389,11 +428,7 @@ export const statusCards = [
       primary: true
     },
     secondaryActions: [
-      {
-        label: "Fix Codex integration",
-        command: "repair_codex",
-        timeoutMs: 120_000
-      },
+      { label: "Refresh", command: "status", timeoutMs: 10_000 },
       { label: "Copy diagnostics", command: "copy_diagnostics" }
     ]
   }
@@ -408,10 +443,11 @@ const recoveryCardIdByComponent = {
   redis: "queueWorker",
   workerQueues: "queueWorker",
   embeddingService: "embeddingEngine",
-  apiToken: "aiClientIntegration",
-  mcpServer: "aiClientIntegration",
+  localAiRuntime: "coreIntegration",
+  apiToken: "coreIntegration",
+  mcpServer: "coreIntegration",
   captureHook: "capturePath",
-  codex: "aiClientIntegration",
+  codex: "codexIntegration",
   claudeCode: "claudeIntegration",
   pi: "piIntegration",
   lcmSummaryService: "memoryProcessing",
@@ -429,6 +465,12 @@ export const recoveryActionForStatusComponent = (
     throw new Error(`Missing Desktop recovery card: ${cardId}`);
   }
   if (state === "not_configured") {
+    if (componentKey === "codex") {
+      const setupAction = card.secondaryActions.find(
+        (action) => action.command === "setup_codex"
+      );
+      if (setupAction) return setupAction;
+    }
     if (componentKey === "claudeCode") {
       const setupAction = card.secondaryActions.find(
         (action) => action.command === "setup_claude"

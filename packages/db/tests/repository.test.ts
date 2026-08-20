@@ -1665,12 +1665,14 @@ describeDb("memory repository visibility", () => {
       { userId: owner.id },
       {
         provider: "codex",
+        aiClientInstanceId: "codex.default",
         projectId: "managed-blocked-project",
         runnerDeploymentId: deploymentId,
         runnerDeviceId: deviceId,
         idempotencyKey: randomUUID()
       }
     );
+    expect(managed.execution.aiClientInstanceId).toBe("codex.default");
     const [claimed] = await repo.claimManagedConversationCommands({
       ownerUserId: owner.id,
       runnerId: "managed-blocked-runner",
@@ -1743,6 +1745,7 @@ describeDb("memory repository visibility", () => {
       { userId: owner.id },
       {
         provider: "codex",
+        aiClientInstanceId: "codex.default",
         projectId: "managed-runtime-ready-project",
         runnerDeploymentId: deploymentId,
         runnerDeviceId: deviceId,
@@ -1818,6 +1821,7 @@ describeDb("memory repository visibility", () => {
       { userId: owner.id },
       {
         provider: "codex",
+        aiClientInstanceId: "codex.default",
         projectId: "managed-abandoned-project",
         runnerDeploymentId: deploymentId,
         runnerDeviceId: deviceId,
@@ -1920,6 +1924,7 @@ describeDb("memory repository visibility", () => {
       { userId: owner.id },
       {
         provider: "codex",
+        aiClientInstanceId: "codex.default",
         projectId: "managed-reacquire-project",
         runnerDeploymentId: deploymentId,
         runnerDeviceId: deviceId,
@@ -2008,6 +2013,7 @@ describeDb("memory repository visibility", () => {
       { userId: owner.id },
       {
         provider: "codex",
+        aiClientInstanceId: "codex.default",
         projectId: "managed-fork-failure-project",
         runnerDeploymentId: deploymentId,
         runnerDeviceId: deviceId,
@@ -2112,6 +2118,7 @@ describeDb("memory repository visibility", () => {
       { userId: owner.id },
       {
         provider: "codex",
+        aiClientInstanceId: "codex.default",
         projectId: "managed-idle-handoff-project",
         runnerDeploymentId: deploymentId,
         runnerDeviceId: deviceId,
@@ -2212,6 +2219,7 @@ describeDb("memory repository visibility", () => {
       { userId: owner.id },
       {
         provider: "codex",
+        aiClientInstanceId: "codex.default",
         projectId: "managed-source-generation-project",
         runnerDeploymentId: deploymentId,
         runnerDeviceId: deviceId,
@@ -2308,6 +2316,7 @@ describeDb("memory repository visibility", () => {
       { userId: owner.id },
       {
         provider: "codex",
+        aiClientInstanceId: "codex.default",
         projectId: "workspace-chunks-project",
         runnerDeploymentId: deploymentId,
         runnerDeviceId: deviceId,
@@ -22671,13 +22680,63 @@ describeDb("memory repository visibility", () => {
       driverId: "claude",
       displayName: "Expired Claude"
     });
+    const disabled = await repo.upsertAiClientInstance(actor, {
+      instanceId: "codex.work",
+      driverId: "codex",
+      displayName: "Work Codex",
+      configIdentityHash: "f".repeat(64),
+      enabled: false
+    });
+    const preserved = await repo.upsertAiClientInstance(actor, {
+      instanceId: "codex.work",
+      driverId: "codex",
+      displayName: "Work Codex refreshed"
+    });
+    expect(disabled.enabled).toBe(false);
+    expect(preserved).toMatchObject({
+      enabled: false,
+      configIdentityHash: "f".repeat(64),
+      displayName: "Work Codex refreshed"
+    });
     await repo.upsertAiClientInstance(actor, {
       instanceId: "claude.transient",
       driverId: "claude",
       displayName: "Transient Claude"
     });
+    await repo.upsertAiClientInstance(actor, {
+      instanceId: "codex.tie",
+      driverId: "codex",
+      displayName: "Tie Codex"
+    });
     const now = Date.now();
-    const olderUnexpired = await repo.recordAiClientCapabilitySnapshot(actor, {
+    const tieObservedAt = new Date(now - 30_000).toISOString();
+    await repo.recordAiClientCapabilitySnapshot(actor, {
+      instanceId: "codex.tie",
+      installationIdentityHash: "1".repeat(64),
+      authenticationState: "authenticated",
+      healthState: "healthy",
+      models: [{ id: "older", provenance: "reported" }],
+      capabilities: { localSynthesis: true },
+      observedAt: tieObservedAt,
+      expiresAt: new Date(now + 60 * 60_000).toISOString()
+    });
+    await repo.recordAiClientCapabilitySnapshot(actor, {
+      instanceId: "codex.tie",
+      installationIdentityHash: "2".repeat(64),
+      authenticationState: "authenticated",
+      healthState: "healthy",
+      models: [{ id: "newer", provenance: "reported" }],
+      capabilities: { localSynthesis: true },
+      observedAt: tieObservedAt,
+      expiresAt: new Date(now + 60 * 60_000).toISOString()
+    });
+    const tieLatest = await repo.listCurrentAiClientCapabilitySnapshots(actor);
+    expect(
+      tieLatest.find((item) => item.instanceId === "codex.tie")
+    ).toMatchObject({
+      installationIdentityHash: "2".repeat(64)
+    });
+    await repo.recordAiClientCapabilitySnapshot(actor, {
       instanceId: "codex.work",
       installationIdentityHash: "a".repeat(64),
       authenticationState: "authenticated",
@@ -22731,19 +22790,36 @@ describeDb("memory repository visibility", () => {
       }
     );
 
-    expect(await repo.listCurrentAiClientCapabilitySnapshots(actor)).toEqual([
-      {
-        ...transientFailure,
-        models: [
-          { model: "claude-custom", provenance: "configured" },
-          { model: "claude-reported", provenance: "last-known-good" }
-        ],
-        capabilities: {
-          localSynthesis: false,
-          lastKnownGoodObservedAt: new Date(now - 20 * 60_000).toISOString()
-        }
-      },
-      olderUnexpired
+    expect(await repo.listCurrentAiClientCapabilitySnapshots(actor)).toEqual(
+      expect.arrayContaining([
+        transientFailure,
+        expect.objectContaining({
+          instanceId: "codex.tie",
+          installationIdentityHash: "2".repeat(64)
+        })
+      ])
+    );
+    const diagnostics = await repo.listAiClientCapabilitySnapshots(actor);
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        instanceId: "claude.expired",
+        stale: true
+      }),
+      expect.objectContaining({
+        instanceId: "claude.transient",
+        stale: false,
+        healthState: "unavailable"
+      }),
+      expect.objectContaining({
+        instanceId: "codex.tie",
+        stale: false,
+        installationIdentityHash: "2".repeat(64)
+      }),
+      expect.objectContaining({
+        instanceId: "codex.work",
+        stale: true,
+        installationIdentityHash: "b".repeat(64)
+      })
     ]);
   });
 

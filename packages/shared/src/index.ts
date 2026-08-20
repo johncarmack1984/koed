@@ -19,20 +19,50 @@ export type {
   AiClientSourceRuntime
 } from "./ai-client-source-adapters.js";
 export {
+  aiClientCapabilityIds,
+  aiClientDiagnosticCodeMaxLength,
+  aiClientDiagnosticMessageMaxLength,
+  aiClientDriverIdMaxLength,
   aiClientIdentifierPattern,
+  aiClientInstanceIdMaxLength,
   assertAiClientDriverId,
   assertAiClientInstanceId,
   defaultAiClientInstanceId,
   isSupportedAiClientDriverId,
-  supportedAiClientDriverIds
+  supportedAiClientDriverIds,
+  aiClientModelLabel,
+  sanitizeAiClientDiagnostics
 } from "./ai-client-contract.js";
 export type {
+  AiClientCapabilityDescriptor,
+  AiClientCapabilityId,
+  AiClientCapabilityReadiness,
+  AiClientCapabilitySnapshot,
+  AiClientCapabilitySupport,
+  AiClientDiagnostic,
+  AiClientDiagnosticSeverity,
   AiClientDriverId,
+  AiClientExecutionTarget,
   AiClientInstanceId,
   AiClientModelCapability,
+  AiClientModelIdentity,
   AiClientModelProvenance,
+  AiClientRecoveryAction,
+  AiClientRecoveryActionId,
   SupportedAiClientDriverId
 } from "./ai-client-contract.js";
+export {
+  codeDefaultAssignmentFor,
+  documentDefault,
+  environmentDefaultFor,
+  localAiClientDefaultSpec,
+  localAiClientFlowKeys
+} from "./ai-client-flow-defaults.js";
+export type {
+  LocalAiClientDefault,
+  LocalAiClientFlowKey,
+  LocalAiClientRuntimeAssignment
+} from "./ai-client-flow-defaults.js";
 
 export {
   resolveTeamCollaborationEnabled,
@@ -131,9 +161,11 @@ export type {
 export {
   MANAGED_CONVERSATION_TARGET_READINESS_PROTOCOL,
   MANAGED_CONVERSATION_TRANSFER_PROTOCOL,
+  MANAGED_CONVERSATION_TRANSFER_PROTOCOL_V2,
   assertManagedConversationHandoffTransition,
   canonicalManagedConversationTargetReadinessEvidence,
   canonicalManagedConversationHandoffManifest,
+  managedConversationAiClientInstanceIdAfterVerification,
   countersignManagedConversationHandoffCertificate,
   createManagedConversationAuthorityPrivateKey,
   managedConversationAuthorityLogHead,
@@ -151,7 +183,9 @@ export {
 } from "./managed-conversation-transfer.js";
 export {
   MANAGED_CONVERSATION_FORK_PROTOCOL,
+  MANAGED_CONVERSATION_FORK_PROTOCOL_V2,
   canonicalManagedConversationForkManifest,
+  managedConversationForkAiClientInstanceIdAfterVerification,
   managedConversationForkManifestDigest,
   parseManagedConversationForkManifest,
   parseSignedManagedConversationForkManifest,

@@ -6,15 +6,28 @@ import {
   type MemoryAnswerWorkerConfig,
   type MemoryAnswerWorkerResponse
 } from "./answer-worker.js";
+import type { AiClientModelCapability } from "@koed/shared";
 import type { LcmSummaryServiceHandle } from "./lcm-summary-service.js";
 export {
   aiClientInstanceRegistryPath,
   environmentForLocalAiClientInstance,
   loadLocalAiClientInstanceRegistry,
+  localAiClientInstanceConfigIdentity,
+  resolveConfiguredLocalAiClientInstance,
   resolveLocalAiClientInstance
 } from "./ai-client-instance-registry.js";
 export type { LocalAiClientInstanceConfiguration } from "./ai-client-instance-registry.js";
 export {
+  publishAiClientCapabilities,
+  startAiClientCapabilityPublisher
+} from "./ai-client-capability-publisher.js";
+export type {
+  AiClientCapabilityPublication,
+  AiClientCapabilityPublisherHandle
+} from "./ai-client-capability-publisher.js";
+export {
+  aiClientDriverFor,
+  aiClientDriverRegistry,
   aiClientTaskDriverFor,
   checkClaudeCodeAvailability,
   checkPiAvailability,
@@ -22,7 +35,10 @@ export {
   listPiModels,
   resolveClaudeSdkExecutablePath,
   resolvePiExecutable,
-  runClaudeAgentSdkTask
+  runClaudeAgentSdkTask,
+  type AiClientDriver,
+  type AiClientDriverDiscovery,
+  type AiClientDriverDiscoveryInput
 } from "./ai-client-runner.js";
 export {
   checkCodexAppServerAvailability,
@@ -798,9 +814,35 @@ export class MemoryApiClient {
     return this.request("GET", "/v1/memory/local-agent-settings");
   }
 
+  async listAiClientInstances(): Promise<{
+    instances: Array<{
+      instanceId: string;
+      driverId: string;
+      enabled: boolean;
+      configIdentityHash?: string | null;
+    }>;
+    capabilitySnapshots: Array<{
+      instanceId: string;
+      installationIdentityHash?: string;
+      healthState: string;
+      authenticationState: string;
+      models: Array<Record<string, unknown>>;
+      capabilities: Record<string, unknown>;
+      expiresAt: string;
+      stale: boolean;
+    }>;
+  }> {
+    return this.request("GET", "/v1/memory/ai-client-instances");
+  }
+
   async upsertAiClientInstance(
     instanceId: string,
-    input: Record<string, unknown>
+    input: {
+      driver_id: string;
+      display_name: string;
+      config_identity_hash?: string | null;
+      enabled?: boolean;
+    }
   ): Promise<Record<string, unknown>> {
     return this.request(
       "PUT",
@@ -811,12 +853,30 @@ export class MemoryApiClient {
 
   async recordAiClientCapabilitySnapshot(
     instanceId: string,
-    input: Record<string, unknown>
+    input: {
+      installation_identity_hash: string;
+      client_version?: string | null;
+      authentication_state: "authenticated" | "unauthenticated" | "unknown";
+      health_state: "healthy" | "unavailable" | "incompatible" | "error";
+      models: AiClientModelCapability[];
+      capabilities: Record<string, unknown>;
+      observed_at: string;
+      expires_at: string;
+    }
   ): Promise<Record<string, unknown>> {
     return this.request(
       "POST",
       `/v1/memory/ai-client-instances/${encodeURIComponent(instanceId)}/capability-snapshots`,
       input
+    );
+  }
+
+  async deleteLocalMemoryAgentSetting(
+    flowKey: LocalMemoryAgentFlowKey
+  ): Promise<{ flow_key: LocalMemoryAgentFlowKey; reset: boolean }> {
+    return this.request(
+      "DELETE",
+      `/v1/memory/local-agent-settings/${encodeURIComponent(flowKey)}`
     );
   }
 
@@ -1024,7 +1084,7 @@ export class MemoryApiClient {
   }
 
   protected async request<T>(
-    method: "GET" | "POST" | "PATCH" | "PUT",
+    method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE",
     path: string,
     body?: unknown,
     options: { authorization?: string } = {}

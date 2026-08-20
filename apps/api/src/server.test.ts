@@ -21,6 +21,7 @@ import pdsFixture from "../../../packages/shared/test-fixtures/personal-device-s
 import type {
   ActorContext,
   ActivationAnalyticsFunnelRecord,
+  AiClientCapabilitySnapshotDiagnosticRecord,
   AiClientCapabilitySnapshotRecord,
   AiClientInstanceRecord,
   AuditEventRecord,
@@ -4023,8 +4024,14 @@ const createFakeRepository = () => {
         instanceId: input.instanceId,
         driverId: input.driverId,
         displayName: input.displayName,
-        configIdentityHash: input.configIdentityHash ?? null,
-        enabled: input.enabled ?? true,
+        configIdentityHash:
+          input.configIdentityHash !== undefined
+            ? input.configIdentityHash
+            : (existing?.configIdentityHash ?? null),
+        enabled:
+          input.enabled !== undefined
+            ? input.enabled
+            : (existing?.enabled ?? true),
         createdAt: existing?.createdAt ?? now,
         updatedAt: now
       };
@@ -4051,6 +4058,18 @@ const createFakeRepository = () => {
         snapshot
       );
       return snapshot;
+    },
+    async listAiClientCapabilitySnapshots(
+      actor
+    ): Promise<AiClientCapabilitySnapshotDiagnosticRecord[]> {
+      const now = Date.now();
+      return [...aiClientCapabilitySnapshots.values()]
+        .filter((snapshot) => snapshot.ownerUserId === actor.userId)
+        .map((snapshot) => ({
+          ...snapshot,
+          stale: Date.parse(snapshot.expiresAt) <= now
+        }))
+        .sort((left, right) => left.instanceId.localeCompare(right.instanceId));
     },
     async listCurrentAiClientCapabilitySnapshots(actor) {
       const now = Date.now();
@@ -4085,6 +4104,9 @@ const createFakeRepository = () => {
       };
       localMemoryAgentSettings.set(key, record);
       return record;
+    },
+    async deleteLocalMemoryAgentSetting(actor, flowKey) {
+      return localMemoryAgentSettings.delete(`${actor.userId}:${flowKey}`);
     },
     async createMemoryNode(actor: ActorContext, input: CreateMemoryNodeInput) {
       const record: MemoryNodeRecord = {
@@ -15474,15 +15496,39 @@ describe("account and access flows", () => {
         authentication_state: "authenticated",
         health_state: "healthy",
         models: [
-          { model: "gpt-5.4", provenance: "reported" },
-          { model: "gpt-5.4-mini", provenance: "reported" }
+          {
+            id: "gpt-5.4",
+            model: "gpt-5.4",
+            provenance: "reported",
+            supportedReasoningEfforts: ["high"]
+          },
+          {
+            id: "gpt-5.4-mini",
+            model: "gpt-5.4-mini",
+            provenance: "reported",
+            supportedReasoningEfforts: ["medium", "high"]
+          }
         ],
-        capabilities: { localSynthesis: true },
+        capabilities: {
+          descriptors: {
+            local_synthesis: {
+              id: "local_synthesis",
+              support: "supported",
+              readiness: "ready",
+              diagnostics: []
+            }
+          }
+        },
         observed_at: new Date(now).toISOString(),
         expires_at: new Date(now + 300_000).toISOString()
       }
     });
 
+    const listedClients = await app.inject({
+      method: "GET",
+      url: "/v1/memory/ai-client-instances",
+      headers
+    });
     const savedMcp = await app.inject({
       method: "PUT",
       url: "/v1/memory/local-agent-settings/mcp_memory_answer",
@@ -15524,14 +15570,90 @@ describe("account and access flows", () => {
       url: "/v1/memory/local-agent-settings",
       headers
     });
+    const resetMcp = await app.inject({
+      method: "DELETE",
+      url: "/v1/memory/local-agent-settings/mcp_memory_answer",
+      headers
+    });
+    const resetAgain = await app.inject({
+      method: "DELETE",
+      url: "/v1/memory/local-agent-settings/mcp_memory_answer",
+      headers
+    });
+    const listedAfterReset = await app.inject({
+      method: "GET",
+      url: "/v1/memory/local-agent-settings",
+      headers
+    });
+    const unauthenticatedReset = await app.inject({
+      method: "DELETE",
+      url: "/v1/memory/local-agent-settings/lcm_summary"
+    });
+    const invalidFlowReset = await app.inject({
+      method: "DELETE",
+      url: "/v1/memory/local-agent-settings/unsupported_flow",
+      headers
+    });
+    const secondRegistered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "local-agent-settings-other@example.com",
+        password: "password123"
+      }
+    });
+    const secondToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: browserSessionHeaders(cookieHeader(secondRegistered)),
+      payload: { name: "Other Client" }
+    });
+    const crossUserReset = await app.inject({
+      method: "DELETE",
+      url: "/v1/memory/local-agent-settings/lcm_summary",
+      headers: {
+        authorization: `Bearer ${jsonBody<TokenResponse>(secondToken).token}`
+      }
+    });
     await app.close();
 
     expect(instance.statusCode, instance.body).toBe(200);
     expect(snapshot.statusCode, snapshot.body).toBe(200);
+    expect(listedClients.statusCode, listedClients.body).toBe(200);
+    expect(
+      jsonBody<{ capabilitySnapshots: Array<{ stale: boolean }> }>(
+        listedClients
+      ).capabilitySnapshots
+    ).toEqual([expect.objectContaining({ stale: false })]);
     expect(savedMcp.statusCode).toBe(200);
     expect(savedLcm.statusCode).toBe(200);
     expect(savedCuratedReview.statusCode).toBe(200);
     expect(listed.statusCode).toBe(200);
+    const listedPayload = jsonBody<{
+      instances: Array<{ instanceId: string; driverId: string }>;
+      capabilitySnapshots: Array<{ instanceId: string; stale: boolean }>;
+      defaults: {
+        mcp_memory_answer: {
+          source: string;
+          available: boolean;
+          provider: string;
+          model: string;
+        };
+      };
+    }>(listed);
+    expect(listedPayload.instances).toEqual([
+      expect.objectContaining({
+        instanceId: "codex.default",
+        driverId: "codex"
+      })
+    ]);
+    expect(listedPayload.capabilitySnapshots).toEqual([
+      expect.objectContaining({ instanceId: "codex.default", stale: false })
+    ]);
+    expect(listedPayload.defaults.mcp_memory_answer.source).toBe("code");
+    expect(listedPayload.defaults.mcp_memory_answer.available).toBe(true);
+    expect(listedPayload.defaults.mcp_memory_answer.provider).toBe("codex");
+    expect(listedPayload.defaults.mcp_memory_answer.model).toBe("gpt-5.6-luna");
     expect(
       jsonBody<{ settings: LocalMemoryAgentSettingRecord[] }>(listed).settings
     ).toEqual([
@@ -15550,6 +15672,25 @@ describe("account and access flows", () => {
         model: "gpt-5.4",
         reasoningEffort: "high"
       })
+    ]);
+    expect(resetMcp.statusCode).toBe(200);
+    expect(jsonBody<{ reset: boolean }>(resetMcp).reset).toBe(true);
+    expect(resetAgain.statusCode).toBe(200);
+    expect(jsonBody<{ reset: boolean }>(resetAgain).reset).toBe(false);
+    expect(unauthenticatedReset.statusCode).toBe(401);
+    expect(invalidFlowReset.statusCode).toBe(400);
+    expect(crossUserReset.statusCode).toBe(200);
+    expect(jsonBody<{ reset: boolean }>(crossUserReset).reset).toBe(false);
+    expect(listedAfterReset.statusCode).toBe(200);
+    expect(
+      jsonBody<{ defaults: Record<string, unknown> }>(listed).defaults
+    ).toHaveProperty("mcp_memory_answer");
+    expect(
+      jsonBody<{ settings: LocalMemoryAgentSettingRecord[] }>(listedAfterReset)
+        .settings
+    ).toEqual([
+      expect.objectContaining({ flowKey: "curated_memory_review" }),
+      expect.objectContaining({ flowKey: "lcm_summary" })
     ]);
   });
 
@@ -15752,8 +15893,24 @@ describe("account and access flows", () => {
         client_version: "test",
         authentication_state: "authenticated",
         health_state: "healthy",
-        models: [{ model: "gpt-5.4", provenance: "reported" }],
-        capabilities: { localSynthesis: true },
+        models: [
+          {
+            id: "gpt-5.4",
+            model: "gpt-5.4",
+            provenance: "reported",
+            supportedReasoningEfforts: ["low"]
+          }
+        ],
+        capabilities: {
+          descriptors: {
+            local_synthesis: {
+              id: "local_synthesis",
+              support: "supported",
+              readiness: "ready",
+              diagnostics: []
+            }
+          }
+        },
         observed_at: new Date(now).toISOString(),
         expires_at: new Date(now + 300_000).toISOString()
       }
@@ -15810,17 +15967,28 @@ describe("account and access flows", () => {
         health_state: "healthy",
         models: [
           {
+            id: "claude-haiku",
             model: "claude-haiku",
             provenance: "reported",
-            supportedReasoningEfforts: [{ reasoningEffort: "low" }]
+            supportedReasoningEfforts: ["low"]
           },
           {
+            id: "claude-no-effort",
             model: "claude-no-effort",
             provenance: "reported",
-            supportedReasoningEfforts: [{ reasoningEffort: "none" }]
+            supportedReasoningEfforts: ["none"]
           }
         ],
-        capabilities: { localSynthesis: true },
+        capabilities: {
+          descriptors: {
+            local_synthesis: {
+              id: "local_synthesis",
+              support: "supported",
+              readiness: "ready",
+              diagnostics: []
+            }
+          }
+        },
         observed_at: new Date(now).toISOString(),
         expires_at: new Date(now + 300_000).toISOString()
       }
@@ -15842,12 +16010,40 @@ describe("account and access flows", () => {
     const unsupported = await assign("claude-haiku", "high");
     const supported = await assign("claude-haiku", "low");
     const noEffort = await assign("claude-no-effort", "none");
+    await app.inject({
+      method: "POST",
+      url: "/v1/memory/ai-client-instances/claude.default/capability-snapshots",
+      headers,
+      payload: {
+        installation_identity_hash: "c".repeat(64),
+        client_version: "2.1.227",
+        authentication_state: "authenticated",
+        health_state: "healthy",
+        models: [
+          { id: "claude-haiku", model: "claude-haiku", provenance: "reported" }
+        ],
+        capabilities: {
+          descriptors: {
+            local_synthesis: {
+              id: "local_synthesis",
+              support: "unsupported",
+              readiness: "not_ready",
+              diagnostics: []
+            }
+          }
+        },
+        observed_at: new Date(now + 1_000).toISOString(),
+        expires_at: new Date(now + 300_000).toISOString()
+      }
+    });
+    const unsupportedSynthesis = await assign("claude-haiku", "low");
     await app.close();
 
     expect(unsupported.statusCode).toBe(409);
     expect(unsupported.body).toContain("is not reported");
     expect(supported.statusCode).toBe(200);
     expect(noEffort.statusCode).toBe(200);
+    expect(unsupportedSynthesis.statusCode).toBe(409);
   });
 
   it("creates MCP sessions, captures session events, exposes nodes, and serves OpenAPI JSON", async () => {

@@ -16,11 +16,9 @@ need them.
 
 > [!IMPORTANT]
 > Codex, Claude Code, and Pi are independently installed supported AI Client
-> integrations. The current guided fresh-install bootstrap is temporarily
-> Codex-first and requires supported Codex even when Claude Code or Pi is also
-> used. Codex-free core readiness and client-neutral onboarding are tracked in
-> KOE-375, KOE-377, and KOE-378. Koed does not bundle AI Client runtimes or
-> provider credentials.
+> integrations. Koed core setup does not require any AI Client. Koed does not
+> bundle AI Client runtimes or provider credentials; configure each client only
+> after core services are ready.
 
 ### Requirements
 
@@ -29,11 +27,10 @@ need them.
 - Homebrew for the source-checkout bundled-local runtime install. Packaged
   Desktop can use packaged native runtime assets; external dependency mode does
   not require Homebrew.
-- Codex CLI `0.144.0` or newer installed and signed in for the current guided
-  fresh-install bootstrap. The Codex default `gpt-5.6-luna` model is unavailable
-  in older releases.
-- Optionally, Claude Code or Pi `0.84.2` or newer installed and signed in as an
-  additional supported AI Client. Claude synthesis reuses the local Claude Code
+- No AI Client is required for core Koed readiness.
+- Optionally, install and authenticate Codex, Claude Code, or Pi before
+  explicitly configuring that client. Claude Code requires `2.1.227` or newer;
+  Pi requires `0.84.2` or newer. Claude synthesis reuses the local Claude Code
   subscription through the pinned Agent SDK. Pi synthesis reuses Pi-managed
   local authentication through isolated RPC.
 
@@ -53,8 +50,9 @@ KOED_DEPENDENCY_MODE=bundled-local KOED_AUTO_PORTS=1 pnpm desktop:start
 
 `pnpm local:setup` prepares `.env`, builds the workspace, links the Homebrew-backed bundled-local runtime, and installs the default embedding model.
 
-Koed Desktop opens when setup is complete and configures Codex automatically.
-Claude Code and Pi are configured independently; see integration guides below.
+Koed Desktop opens when core setup is complete. Mandatory setup does not
+configure or select an AI Client. Configure Codex, Claude Code, or Pi
+independently with their integration guides below.
 Packaged Desktop follows the same local-personal bundled-local flow, but it
 starts its managed `koed-server` from the app bundle, prefers packaged native
 runtime assets, and keeps `KOED_HOME` state outside the source checkout. See
@@ -73,6 +71,38 @@ To stop Koed later:
 ```bash
 node packages/koed-server/dist/cli.js stop --json
 ```
+
+Headless Operators can prepare client-neutral core state and create or reuse the
+Local AI Runtime credential with:
+
+```bash
+node packages/koed-server/dist/cli.js setup core --json
+```
+
+`setup codex --json` remains an explicit Codex profile compatibility command; it
+never selects Codex merely because Codex is installed.
+
+### Health and routing model
+
+Core health covers Koed services and remains healthy with zero configured AI
+Clients. Client installation, authentication, capture, capability snapshots,
+and synthesis readiness are separate per-client diagnostics; one broken client
+does not make core unhealthy. A stale or unavailable capability snapshot blocks
+only affected operations.
+
+Memory Answer, LCM Summary, Session Title, and Curated Memory Review each have
+an independent provider, AI Client instance, model, and reasoning-effort
+assignment. Persisted assignments take precedence over environment defaults;
+environment and documented Codex defaults apply only when no assignment exists.
+An explicit unavailable assignment fails closed and never falls back to another
+client or provider.
+
+Managed Conversations are separate from ordinary externally managed
+Conversations: Koed owns lifecycle and exact AI Client instance for Managed
+Conversations, while Codex, Claude Code, or Pi owns its ordinary Conversation
+and Koed captures its source through that client's watcher. Managed Conversation
+ownership does not select synthesis providers. See [Managed Conversation
+routing](docs/managed-conversation-ai-client-routing.md).
 
 ## Advanced setup and configuration
 

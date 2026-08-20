@@ -21,21 +21,30 @@ node packages/koed-server/dist/cli.js setup pi --json
 
 In Koed Desktop, open **Preferences → Advanced Diagnostics** and choose **Set up Pi
 integration**. The same screen reports active-profile health and offers an
-idempotent repair action. Pi remains optional when it is not installed or
-detected. On first run, Desktop treats an available Pi executable or Pi global
-profile as evidence that Pi is in use, lists Pi among the detected AI Clients,
-and configures it automatically. A detected but unauthenticated Pi installation
-stops guided setup with an actionable authentication error; it does not affect
-Koed's local runtime health.
+idempotent repair action. Pi remains optional when it is not installed or detected. On first run, Desktop
+reports Pi executable/profile availability but never selects or configures Pi
+automatically. Select Pi explicitly in post-core onboarding; its setup has an
+independent consent prompt and can be cancelled without affecting core or other
+clients. A detected but unauthenticated Pi installation produces a Pi-only
+setup result and does not affect Koed's local runtime health. Pi Managed
+Conversation is explicitly unsupported. Preferences can set up, check, repair,
+or remove Pi later.
 
 Contributor checkout alternative:
 
 ```bash
 pnpm pi:configure
 pnpm pi:check
+
+# Koed CLI equivalents
+node packages/koed-server/dist/cli.js check pi --json
+node packages/koed-server/dist/cli.js remove pi --json
 ```
 
-Setup stages and validates the Koed-owned package beside `$KOED_HOME/integrations/pi/`, atomically replaces that stable path, and then runs `pi install`. Both koed-server setup and the Local Operator Script use the same exception-safe transaction: a failed filesystem swap or install restores the previous package, and a failed install also restores its registration. If filesystem restoration itself fails, Koed preserves and reports the backup path instead of deleting the last working copy. Pi records the stable package path in the active global profile. The next ordinary `pi` startup loads the integration; no wrapper or separate extension command is needed.
+Setup stages and validates the Koed-owned package beside `$KOED_HOME/integrations/pi/`, atomically replaces that stable path, and then runs `pi install`. Both koed-server setup and the Local Operator Script use the same exception-safe transaction: a failed filesystem swap or install restores the previous package, and a failed install also restores its registration. If filesystem restoration itself fails, Koed preserves and reports the backup path instead of deleting the last working copy. Pi records the stable package path in the active global profile. Desktop and the
+CLI expose protected setup, check, repair, and remove actions. Removal deletes
+only Koed's stable package and registry entry. The next ordinary `pi` startup
+loads the integration; no wrapper or separate extension command is needed.
 
 Koed canonicalizes the Pi executable before invoking it. On Windows, npm command shims are resolved to the verifiable Pi Node entry point and are never passed directly to process-spawn APIs. Koed passes a bounded
 setup environment containing profile/system essentials plus `KOED_HOME`, not
@@ -106,7 +115,7 @@ Activation baseline is separate from explicit historical import. Live watcher ne
 
 ## Local Synthesis
 
-Pi can be assigned independently to Memory Answer, LCM Summary, session-title generation, and Curated Memory Review. Assignment requires healthy authenticated `pi.default` or configured Pi instance capability snapshot and full provider/model ID.
+Pi can be assigned independently to Memory Answer, LCM Summary, session-title generation, and Curated Memory Review. Assignment requires healthy authenticated `pi.default` or configured Pi instance capability snapshot and full provider/model ID. Desktop Advanced settings searches Pi display name, instance ID, provider, and full model ID, and offers only reasoning levels explicitly reported for selected model. Stale or unavailable persisted assignments remain visible and block only that flow; reset removes only selected flow assignment.
 
 Koed launches Pi with strict-LF JSONL RPC using:
 
@@ -141,7 +150,7 @@ Relevant environment:
 Common failures:
 
 - **Pi missing/incompatible**: install Pi `0.84.2+` and rerun setup.
-- **No models**: authenticate model through Pi, then refresh capability snapshot.
+- **No models**: authenticate model through Pi, then use Desktop Refresh capabilities or refresh capability snapshot.
 - **Recall tool absent**: ensure package configured and extensions not disabled.
 - **Ephemeral session**: remove `--no-session` for automatic capture.
 - **Capture stopped**: inspect Local AI Runtime logs for malformed record, truncation, prefix mutation, policy, or pause diagnostic. Cursor does not advance on these errors.

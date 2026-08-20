@@ -152,6 +152,7 @@ export const runSessionTitle: SessionTitleRunner = async (
     prompt,
     {
       provider: config.provider,
+      aiClientInstanceId: config.aiClientInstanceId,
       executablePath: config.executablePath,
       model: config.model,
       reasoningEffort: config.reasoningEffort,

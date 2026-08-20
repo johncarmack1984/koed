@@ -1,14 +1,26 @@
-import { spawnSync as nodeSpawnSync } from "node:child_process";
+import {
+  spawnSync as nodeSpawnSync,
+  type SpawnSyncReturns
+} from "node:child_process";
 import {
   accessSync,
   constants,
+  cpSync,
   existsSync,
   realpathSync,
+  rmSync,
   statSync
 } from "node:fs";
 import { dirname, delimiter, isAbsolute, join, resolve } from "node:path";
 import { installPiPackageTransaction } from "./pi-package-transaction.mjs";
 import { resolveKoedServerPaths } from "./paths.js";
+import {
+  assertAiClientRegistryWritable,
+  captureAiClientRegistry,
+  registerExplicitAiClient,
+  removeExplicitAiClient,
+  restoreAiClientRegistry
+} from "./ai-client-registry.js";
 
 export const MINIMUM_PI_VERSION = "0.84.2";
 
@@ -169,11 +181,169 @@ export interface KoedServerSetupPiResult {
   action?: string;
 }
 
+export const removePi = (
+  environment: NodeJS.ProcessEnv = process.env,
+  spawnSync: typeof nodeSpawnSync = nodeSpawnSync
+): KoedServerSetupPiResult => {
+  const paths = resolveKoedServerPaths(environment);
+  const target = resolve(paths.koedHome, "integrations/pi");
+  const checkedAt = new Date().toISOString();
+  const command = `${environment.KOED_PI_EXECUTABLE?.trim() || "pi"} remove ${target}`;
+  const registryEnvironment = { ...environment, KOED_HOME: paths.koedHome };
+  let backup: string | null = null;
+  let profileRemovalAttempted = false;
+  let profileRemoved = false;
+  let runPiForRollback:
+    | ((args: string[], timeout: number) => SpawnSyncReturns<string>)
+    | null = null;
+  let registrySnapshot;
+  try {
+    assertAiClientRegistryWritable(registryEnvironment);
+    registrySnapshot = captureAiClientRegistry(registryEnvironment);
+    const executable = resolvePiSetupExecutable(environment);
+    const childEnvironment = piSetupEnvironment(environment, paths.koedHome);
+    const runPi = (args: string[], timeout: number) => {
+      const invocation = piSetupInvocation(executable, args);
+      return spawnSync(invocation.command, invocation.args, {
+        env: childEnvironment,
+        encoding: "utf8",
+        timeout,
+        ...(args[0] === "list" ? { maxBuffer: 4 * 1024 * 1024 } : {})
+      });
+    };
+    runPiForRollback = runPi;
+    if (existsSync(target)) {
+      backup = `${target}.remove-backup-${process.pid}-${Date.now()}`;
+      cpSync(target, backup, { recursive: true });
+      profileRemovalAttempted = true;
+      const removed = runPi(["remove", target], 30_000);
+      if (removed.error || removed.status !== 0) {
+        throw new Error(
+          removed.error?.message ??
+            removed.stderr?.trim() ??
+            "Pi package removal failed."
+        );
+      }
+      profileRemoved = true;
+    }
+    const listed = runPi(["list"], 10_000);
+    if (listed.error || listed.status !== 0) {
+      throw new Error(
+        listed.error?.message ??
+          listed.stderr?.trim() ??
+          "Pi profile verification failed after removal."
+      );
+    }
+    if ((listed.stdout ?? "").includes(target)) {
+      throw new Error(
+        "Pi active profile still references Koed package after removal."
+      );
+    }
+    if (existsSync(target)) rmSync(target, { recursive: true, force: false });
+    if (existsSync(target)) {
+      throw new Error("Koed Pi package directory could not be removed.");
+    }
+    removeExplicitAiClient({
+      environment: registryEnvironment,
+      driverId: "pi"
+    });
+    if (backup) {
+      rmSync(backup, { recursive: true, force: false });
+      backup = null;
+    }
+    return {
+      ok: true,
+      state: "healthy",
+      command: `${executable} remove ${target}`,
+      koedHome: paths.koedHome,
+      checkedAt,
+      executablePath: executable,
+      stdout:
+        "Pi integration removed; unrelated packages and profile settings were preserved."
+    };
+  } catch (error) {
+    const failures: string[] = [
+      error instanceof Error ? error.message : String(error)
+    ];
+    if (backup) {
+      try {
+        if (existsSync(target))
+          rmSync(target, { recursive: true, force: true });
+        cpSync(backup, target, { recursive: true });
+        rmSync(backup, { recursive: true, force: true });
+      } catch (restoreError) {
+        failures.push(
+          `Pi package rollback failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`
+        );
+      }
+    }
+    if (registrySnapshot) {
+      try {
+        restoreAiClientRegistry(registryEnvironment, registrySnapshot);
+      } catch (restoreError) {
+        failures.push(
+          `AI Client registry rollback failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`
+        );
+      }
+    }
+    if ((profileRemoved || profileRemovalAttempted) && runPiForRollback) {
+      try {
+        const installed = runPiForRollback(["install", target], 30_000);
+        if (installed.error || installed.status !== 0) {
+          failures.push(
+            `Pi profile rollback failed: ${installed.error?.message ?? installed.stderr?.trim() ?? "Pi profile rollback failed."}`
+          );
+        } else {
+          const listed = runPiForRollback(["list"], 10_000);
+          if (
+            listed.error ||
+            listed.status !== 0 ||
+            !(listed.stdout ?? "").includes(target)
+          ) {
+            failures.push(
+              `Pi profile rollback failed: ${listed.error?.message ?? listed.stderr?.trim() ?? "Pi profile rollback verification failed."}`
+            );
+          }
+        }
+      } catch (restoreError) {
+        failures.push(
+          `Pi profile rollback failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`
+        );
+      }
+    }
+    return {
+      ok: false,
+      state: "needs_attention",
+      command,
+      koedHome: paths.koedHome,
+      checkedAt,
+      error: failures.join(" "),
+      action: "Fix Pi profile or filesystem state, then retry removal."
+    };
+  }
+};
+
 export const setupPi = (
   environment: NodeJS.ProcessEnv = process.env,
   spawnSync: typeof nodeSpawnSync = nodeSpawnSync
 ): KoedServerSetupPiResult => {
   const paths = resolveKoedServerPaths(environment);
+  try {
+    assertAiClientRegistryWritable({
+      ...environment,
+      KOED_HOME: paths.koedHome
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      state: "needs_attention",
+      command: `${environment.KOED_PI_EXECUTABLE?.trim() || "pi"} install ${resolve(paths.koedHome, "integrations/pi")}`,
+      koedHome: paths.koedHome,
+      checkedAt: new Date().toISOString(),
+      error: error instanceof Error ? error.message : String(error),
+      action: "Fix malformed AI Client registry, then rerun Pi setup."
+    };
+  }
   const sourceCandidates = [
     resolve(paths.repoRoot, "packages/mcp-server/integrations/pi"),
     resolve(paths.repoRoot, "koed-runtime/mcp-server/integrations/pi"),
@@ -227,6 +397,8 @@ export const setupPi = (
         "Pi has no authenticated models. Authenticate at least one Pi model before setup."
       );
     }
+    const registryEnvironment = { ...environment, KOED_HOME: paths.koedHome };
+    const registrySnapshot = captureAiClientRegistry(registryEnvironment);
     const transaction = installPiPackageTransaction({
       source,
       target,
@@ -249,9 +421,33 @@ export const setupPi = (
         rollback.stderr?.trim() ||
         `rollback exited with code ${rollback.status ?? 1}`
       : transaction.registrationError;
+    let registrationError: string | undefined;
+    if (ok) {
+      try {
+        const registered = registerExplicitAiClient({
+          environment: registryEnvironment,
+          driverId: "pi",
+          executablePath: executable,
+          displayName: "Pi",
+          configHome: environment.PI_CODING_AGENT_DIR
+        });
+        if (!registered) registrationError = "Pi registration failed.";
+      } catch (error) {
+        registrationError =
+          error instanceof Error ? error.message : String(error);
+      }
+    }
+    const setupOk = ok && !registrationError;
+    if (!setupOk && registrySnapshot) {
+      try {
+        restoreAiClientRegistry(registryEnvironment, registrySnapshot);
+      } catch (restoreError) {
+        registrationError = `${registrationError ?? "Pi setup failed."} Registry rollback failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`;
+      }
+    }
     return {
-      ok,
-      state: ok ? "healthy" : "needs_attention",
+      ok: setupOk,
+      state: setupOk ? "healthy" : "needs_attention",
       command: `${executable} install ${target}`,
       koedHome: paths.koedHome,
       checkedAt,
@@ -259,19 +455,23 @@ export const setupPi = (
       modelCount: models.length,
       ...(result?.stdout ? { stdout: result.stdout.trim() } : {}),
       ...(result?.stderr ? { stderr: result.stderr.trim() } : {}),
-      ...(!ok
+      ...(!setupOk
         ? {
             error:
+              registrationError ??
               result?.error?.message ??
               result?.stderr?.trim() ??
-              transaction.error,
-            action: transaction.restorationError
-              ? `The previous package could not be restored (${transaction.restorationError}). It remains at ${transaction.backupPath ?? "the backup path"}; repair the filesystem before retrying.`
-              : rollbackError
-                ? `The previous package was restored but its Pi registration could not be verified: ${rollbackError}. Fix Pi, then rerun koed-server setup pi --json.`
-                : hadPrevious
-                  ? "The previous Koed Pi package was restored. Fix the Pi package installation error, then rerun koed-server setup pi --json."
-                  : "The failed package candidate was removed. Fix the Pi package installation error, then rerun koed-server setup pi --json."
+              transaction.error ??
+              "Pi integration registration failed.",
+            action: registrationError
+              ? "Pi package was installed, but registry registration failed. Repair the AI Client registry, then rerun Pi setup."
+              : transaction.restorationError
+                ? `The previous package could not be restored (${transaction.restorationError}). It remains at ${transaction.backupPath ?? "the backup path"}; repair the filesystem before retrying.`
+                : rollbackError
+                  ? `The previous package was restored but its Pi registration could not be verified: ${rollbackError}. Fix Pi, then rerun koed-server setup pi --json.`
+                  : hadPrevious
+                    ? "The previous Koed Pi package was restored. Fix the Pi package installation error, then rerun koed-server setup pi --json."
+                    : "The failed package candidate was removed. Fix the Pi package installation error, then rerun koed-server setup pi --json."
           }
         : {})
     };
