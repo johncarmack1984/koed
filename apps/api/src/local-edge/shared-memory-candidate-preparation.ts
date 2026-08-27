@@ -4,6 +4,7 @@ import {
   classifyApprovalActivity,
   crossIdentitySyncDeterministicUuid,
   crossIdentitySyncDigest,
+  personalNoteSourceRevisionHash,
   type SharedMemoryCandidatePreview,
   type SharedMemoryRepresentation,
   type SharedMemorySourceItem
@@ -44,22 +45,63 @@ type CandidateRepository = Pick<
   MemorySourceRepository,
   | "createLcmNodes"
   | "getSharedMemoryLcmSyncState"
+  | "getLocalSyncDeployment"
+  | "getPersonalNoteRevisionMemoryEvent"
   | "listCuratedMemoryAssertions"
   | "listLcmGraphEvents"
   | "listLcmGraphNodes"
   | "listLcmGraphThreads"
+  | "listCapturedSessionSyncEligibleLcmNodeIds"
   | "prepareCapturedSessionSyncCandidateRevision"
 >;
+
+export type PersonalNoteCandidatePreparationStage =
+  | "memory_event"
+  | "deployment_identity"
+  | "source_validation"
+  | "source_identity"
+  | "revision_hash"
+  | "item_serialization"
+  | "candidate_hash";
+
+export class PersonalNoteCandidatePreparationError extends Error {
+  readonly candidateStage: PersonalNoteCandidatePreparationStage;
+
+  constructor(
+    candidateStage: PersonalNoteCandidatePreparationStage,
+    cause: unknown
+  ) {
+    super("Personal Note candidate preparation failed", { cause });
+    this.name = "PersonalNoteCandidatePreparationError";
+    this.candidateStage = candidateStage;
+  }
+}
 
 export const createLocalSharedMemoryCandidatePreparation = (options: {
   repository: CandidateRepository;
   resolveDeploymentId: () => string | null;
   requestLcmSummaryWork: () => Promise<void>;
 }) => {
+  const resolveCandidateSourceIdentity = (
+    localOwnerUserId: string
+  ): {
+    sourceDeploymentProtocolId: string;
+    sourceOwnerPrincipalId: string;
+  } | null => {
+    const sourceDeploymentProtocolId = options.resolveDeploymentId();
+    return sourceDeploymentProtocolId
+      ? {
+          sourceDeploymentProtocolId,
+          sourceOwnerPrincipalId: localOwnerUserId
+        }
+      : null;
+  };
+
   const loadCandidatePreview = async (input: {
     localOwnerUserId: string;
     sessionId: string;
     representation: SharedMemoryRepresentation;
+    mode: "snapshot" | "continuous";
   }): Promise<SharedMemoryCandidatePreview | null> => {
     const projects = await options.repository.listLcmGraphThreads(
       { userId: input.localOwnerUserId },
@@ -111,6 +153,7 @@ export const createLocalSharedMemoryCandidatePreparation = (options: {
           threadId: thread.id,
           includeContent: true,
           includeInvalidated: false,
+          canonicalCapturedSessionEventsOnly: true,
           limit: 500
         }
       );
@@ -207,12 +250,21 @@ export const createLocalSharedMemoryCandidatePreparation = (options: {
         representation: input.representation
       });
       const kind = input.representation === "lcm_leaves" ? "leaf" : "rollup";
+      const syncEligibleNodeIds = new Set(
+        await options.repository.listCapturedSessionSyncEligibleLcmNodeIds(
+          { userId: input.localOwnerUserId },
+          input.sessionId
+        )
+      );
       const nodes = await options.repository.listLcmGraphNodes(
         { userId: input.localOwnerUserId },
         { threadId: thread.id, includeInvalidated: false, limit: 500 }
       );
       for (const [index, node] of nodes
-        .filter((candidate) => candidate.kind === kind)
+        .filter(
+          (candidate) =>
+            candidate.kind === kind && syncEligibleNodeIds.has(candidate.id)
+        )
         .reverse()
         .entries()) {
         append({
@@ -241,11 +293,24 @@ export const createLocalSharedMemoryCandidatePreparation = (options: {
         sourceRevision
       })
     }));
-    const candidateHash = crossIdentitySyncDigest({
-      version: 1,
+    const source = {
+      kind: "captured_session" as const,
       sessionId: input.sessionId,
-      logicalMemoryId,
-      representation: input.representation,
+      logicalMemoryId
+    };
+    const sourceCapabilities = [
+      "lcm_rollups" as const,
+      "lcm_leaves" as const,
+      "memory_events" as const,
+      "curated_assertions" as const
+    ];
+    const candidateHash = crossIdentitySyncDigest({
+      version: 2,
+      source,
+      sourceOwnerPrincipalId: input.localOwnerUserId,
+      sourceCapabilities,
+      activationRepresentation: input.representation,
+      mode: input.mode,
       sourceRevision,
       itemCount: items.length,
       byteCount,
@@ -254,9 +319,12 @@ export const createLocalSharedMemoryCandidatePreparation = (options: {
       items
     });
     return {
-      sessionId: input.sessionId,
+      source,
       logicalMemoryId,
-      representation: input.representation,
+      sourceCapabilities,
+      activationRepresentation: input.representation,
+      mode: input.mode,
+      expiresAt: null,
       sourceRevision,
       candidateHash,
       itemCount: items.length,
@@ -265,6 +333,117 @@ export const createLocalSharedMemoryCandidatePreparation = (options: {
       byteCount,
       items
     };
+  };
+
+  const loadPersonalNoteCandidatePreview = async (input: {
+    localOwnerUserId: string;
+    noteId: string;
+    noteRevision: number;
+    mode: "snapshot" | "continuous";
+  }): Promise<SharedMemoryCandidatePreview | null> => {
+    let candidateStage: PersonalNoteCandidatePreparationStage = "memory_event";
+    try {
+      const actor = { userId: input.localOwnerUserId };
+      const event = await options.repository.getPersonalNoteRevisionMemoryEvent(
+        actor,
+        {
+          noteId: input.noteId,
+          revision: input.noteRevision
+        }
+      );
+      candidateStage = "deployment_identity";
+      const deployment = await options.repository.getLocalSyncDeployment();
+      candidateStage = "source_validation";
+      if (
+        !event ||
+        !deployment ||
+        typeof event.content !== "string" ||
+        event.content.length === 0 ||
+        event.sourceSequence === null
+      ) {
+        return null;
+      }
+      candidateStage = "source_identity";
+      const logicalMemoryId = crossIdentitySyncDeterministicUuid({
+        protocol: "koed.personal-note-share/v1",
+        sourceDeploymentId: deployment.protocolDeploymentId,
+        sourceOwnerPrincipalId: input.localOwnerUserId,
+        noteId: input.noteId,
+        identity: "logical-memory"
+      });
+      const source = {
+        kind: "personal_note" as const,
+        noteId: input.noteId,
+        noteRevision: input.noteRevision,
+        memoryEventId: event.id,
+        logicalMemoryId
+      };
+      candidateStage = "revision_hash";
+      const revisionHash = personalNoteSourceRevisionHash({
+        source,
+        sourceOwnerPrincipalId: input.localOwnerUserId,
+        content: event.content,
+        occurredAt: event.timestamp,
+        sourceSequence: event.sourceSequence
+      });
+      const items: SharedMemorySourceItem[] = [
+        {
+          id: event.id,
+          representation: "memory_events",
+          sequence: 1,
+          occurredAt: event.timestamp,
+          sourceItems: [
+            {
+              id: event.id,
+              sourceKind: "user_message",
+              occurredAt: event.timestamp,
+              body: event.content,
+              actorName: null,
+              toolName: null,
+              toolCallId: null
+            }
+          ]
+        }
+      ];
+      candidateStage = "item_serialization";
+      const byteCount = Buffer.byteLength(JSON.stringify(items[0]), "utf8");
+      if (byteCount > 256 * 1_024) return null;
+      const manifest = [{ sourceId: event.id, revisionHash }];
+      const sourceCapabilities = ["memory_events" as const];
+      candidateStage = "candidate_hash";
+      const candidateHash = crossIdentitySyncDigest({
+        version: 2,
+        source,
+        sourceOwnerPrincipalId: input.localOwnerUserId,
+        sourceCapabilities,
+        activationRepresentation: "memory_events",
+        mode: input.mode,
+        sourceRevision: input.noteRevision,
+        itemCount: 1,
+        byteCount,
+        excludedItemCount: 0,
+        manifest,
+        items
+      });
+      return {
+        source,
+        logicalMemoryId,
+        sourceCapabilities,
+        activationRepresentation: "memory_events",
+        mode: input.mode,
+        expiresAt: null,
+        sourceRevision: input.noteRevision,
+        candidateHash,
+        itemCount: 1,
+        excludedItemCount: 0,
+        manifest,
+        byteCount,
+        items
+      };
+    } catch (error) {
+      if (error instanceof PersonalNoteCandidatePreparationError) throw error;
+      throw new PersonalNoteCandidatePreparationError(candidateStage, error);
+    }
   };
 
   const prepareLcmRepresentation = async (input: {
@@ -289,5 +468,10 @@ export const createLocalSharedMemoryCandidatePreparation = (options: {
     return state;
   };
 
-  return { loadCandidatePreview, prepareLcmRepresentation };
+  return {
+    loadCandidatePreview,
+    loadPersonalNoteCandidatePreview,
+    resolveCandidateSourceIdentity,
+    prepareLcmRepresentation
+  };
 };

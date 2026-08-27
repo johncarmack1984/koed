@@ -181,6 +181,18 @@
   padding-block-end: 24px;
 }
 
+.desktop-personal-context-content {
+  display: flex;
+  min-block-size: 100%;
+  flex-direction: column;
+}
+
+.desktop-sidebar-recents-section {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  border-block-start: 1px solid var(--sidebar-border);
+}
+
 .desktop-sidebar-header {
   display: flex;
   min-block-size: 64px;
@@ -314,11 +326,47 @@
   block-size: 15px;
 }
 
+.desktop-sidebar-nav-icon[data-status="error"] {
+  color: var(--destructive);
+}
+
+.desktop-sidebar-nav-icon[data-status="pending"] > svg {
+  animation: desktop-spin 800ms linear infinite;
+}
+
 .desktop-sidebar-nav-label {
   min-inline-size: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-sidebar-nav-icon[data-status="pending"] > svg {
+    animation: none;
+  }
+}
+
+.desktop-sidebar-load-more {
+  min-block-size: 30px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  text-align: start;
+  cursor: pointer;
+}
+
+.desktop-sidebar-load-more:hover {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-accent-foreground);
+}
+
+.desktop-sidebar-section-state {
+  margin: 6px 8px;
+  color: var(--muted-foreground);
+  font-size: 11px;
 }
 
 .desktop-sidebar-unread {
@@ -414,6 +462,11 @@
   min-inline-size: 0;
   min-block-size: 0;
   grid-template-rows: 44px minmax(0, 1fr);
+  outline: none;
+}
+
+.desktop-main:focus,
+.desktop-main:focus-visible {
   outline: none;
 }
 

@@ -53,8 +53,6 @@ const ids = {
   clientMessage: randomUUID(),
   personalThread: randomUUID(),
   personalLogicalThread: randomUUID(),
-  notesThread: randomUUID(),
-  notesLogicalThread: randomUUID(),
   personalMessageTwo: randomUUID(),
   sharedGrant: randomUUID(),
   sharedLogicalMemory: randomUUID(),
@@ -199,9 +197,16 @@ const remoteWorkspace = {
 };
 
 const remoteSharedGrant = {
+  source: {
+    kind: "captured_session" as const,
+    sessionId: ids.session,
+    logicalMemoryId: ids.sharedLogicalMemory
+  },
+  sourceCapabilities: ["memory_events" as const],
+  activationRepresentation: "memory_events" as const,
   id: ids.sharedGrant,
   logicalMemoryId: ids.sharedLogicalMemory,
-  ownerUserId: ids.participant,
+  ownerDisplayName: "Bob",
   maximumFidelity: "memory_events",
   includeCuratedMemory: false,
   title: "Shared Memory",
@@ -676,27 +681,28 @@ type CommandRepository = CollaborationRepository &
 
 const createPersonalRepository = (): CommandRepository => {
   let channel = personalThreadRecord();
-  const notes = personalThreadRecord({
-    id: ids.notesThread,
-    logicalId: ids.notesLogicalThread,
-    kind: "notes_to_self",
-    name: null,
-    topic: null,
-    latestSequence: 0,
-    unreadCount: 0,
-    participants: [{ userId: ids.actor, displayName: "Alice" }]
-  });
   const messages = [1, 2, 3].map((sequence) => personalMessageRecord(sequence));
   const ownedThread = (actor: { userId: string }, threadId: string) =>
     actor.userId === ids.actor
-      ? ([notes, channel].find((thread) => thread.id === threadId) ?? null)
+      ? channel.id === threadId
+        ? channel
+        : null
       : null;
 
   return {
+    createPersonalNote: async () => {
+      throw new Error("Personal Notes use the Personal Desktop API");
+    },
+    listPersonalNotes: async () => ({ notes: [], nextBeforeSequence: null }),
+    getPersonalNote: async () => null,
+    renamePersonalNote: async () => null,
+    updatePersonalNoteBody: async () => null,
+    listPendingPersonalNoteRevisions: async () => [],
+    markPersonalNoteProjectionAvailable: async () => null,
+    markPersonalNoteProjectionFailed: async () => undefined,
     listTeamParticipants: async () => null,
     createThread: async (actor, input) => {
       if (actor.userId !== ids.actor) return null;
-      if (input.kind === "notes_to_self") return notes;
       if (input.kind !== "personal_channel") return null;
       channel = personalThreadRecord({
         name: input.name,
@@ -707,7 +713,7 @@ const createPersonalRepository = (): CommandRepository => {
     getThread: async (actor, input) => ownedThread(actor, input.threadId),
     listThreads: async (actor, input) =>
       actor.userId === ids.actor && input.scope === "personal"
-        ? [notes, channel]
+        ? [channel]
         : null,
     renameThread: async (actor, input) => {
       if (!ownedThread(actor, input.threadId)) return null;
@@ -747,20 +753,13 @@ const createPersonalRepository = (): CommandRepository => {
       ownedThread(actor, input.threadId)
         ? personalMessageRecord(4, {
             id: input.idempotencyKey,
+            threadId: input.threadId,
             bodyText: input.bodyText
           })
         : null,
     listMessages: async (actor, input) => {
       const thread = ownedThread(actor, input.threadId);
       if (!thread) return null;
-      if (thread.kind === "notes_to_self") {
-        return {
-          messages: [],
-          hasMore: false,
-          nextBeforeSequence: null,
-          nextAfterSequence: null
-        };
-      }
       const ascending = input.afterSequence !== undefined;
       const filtered = messages.filter(
         (message) =>
@@ -818,7 +817,7 @@ const createPersonalRepository = (): CommandRepository => {
             personalOwnerUserId: ids.actor,
             teamId: null,
             highWaterCursor: 9,
-            threads: [notes, channel]
+            threads: [channel]
           }
         : null,
     getCapturedSessionSyncSource: async () => null,
@@ -895,7 +894,16 @@ interface HarnessOptions {
   desktopOwnerUserId?: string;
   activeUser?: { id: string; email: string; displayName: string | null } | null;
   actionGrantControl?: CollaborationActionGrantControl;
-  sharedMemoryControl?: CollaborationSharedMemoryControl;
+  sharedMemoryControl?: Omit<
+    CollaborationSharedMemoryControl,
+    "advanceContinuousPersonalNoteRevision"
+  > &
+    Partial<
+      Pick<
+        CollaborationSharedMemoryControl,
+        "advanceContinuousPersonalNoteRevision"
+      >
+    >;
 }
 
 const resultPayloadFor = (
@@ -965,6 +973,12 @@ const createHarness = (options: HarnessOptions = {}) => {
   const personalRepository =
     options.personalRepository ?? createPersonalRepository();
   const desktopOwnerUserId = options.desktopOwnerUserId ?? ids.actor;
+  const sharedMemoryControl = options.sharedMemoryControl
+    ? {
+        advanceContinuousPersonalNoteRevision: async () => ({ queued: 0 }),
+        ...options.sharedMemoryControl
+      }
+    : undefined;
   let navigationInvalidationListener: ((backendId: string) => void) | null =
     null;
 
@@ -1008,7 +1022,7 @@ const createHarness = (options: HarnessOptions = {}) => {
       return activeUser?.id === userId ? activeUser : null;
     },
     actionGrantControl: options.actionGrantControl,
-    sharedMemoryControl: options.sharedMemoryControl,
+    sharedMemoryControl,
     verifyDesktopLocalCredential: (_koedHome, authorization, family) =>
       authorization === desktopAuthorization
         ? {
@@ -2023,12 +2037,19 @@ describe("local-edge collaboration command route", () => {
       requestId: randomUUID(),
       command: "collaboration.preview_shared_memory",
       input: {
+        source: {
+          kind: "captured_session",
+          sessionId: ids.session,
+          logicalMemoryId: ids.sharedLogicalMemory
+        },
         logicalMemoryId: ids.sharedLogicalMemory,
         teamId: ids.team,
         workspaceId: ids.workspace,
-        representation: "memory_events",
+        sourceCapabilities: ["memory_events"],
+        activationRepresentation: "memory_events",
         maximumFidelity: "memory_events",
         includeCuratedMemory: false,
+        mode: "continuous",
         actionGrant: { id: randomUUID() }
       }
     };
@@ -2084,8 +2105,13 @@ describe("local-edge collaboration command route", () => {
       requestId: randomUUID(),
       command: "collaboration.preview_shared_memory_candidate",
       input: {
-        sessionId: ids.session,
-        representation: "memory_events"
+        source: {
+          kind: "captured_session",
+          sessionId: ids.session,
+          logicalMemoryId: ids.sharedLogicalMemory
+        },
+        activationRepresentation: "memory_events",
+        mode: "continuous"
       }
     };
     const dispatches: unknown[] = [];
@@ -2104,9 +2130,12 @@ describe("local-edge collaboration command route", () => {
             ok: true,
             data: {
               candidate: {
-                sessionId: ids.session,
+                source: command.input.source,
                 logicalMemoryId: ids.sharedLogicalMemory,
-                representation: "memory_events",
+                sourceCapabilities: ["memory_events"],
+                activationRepresentation: "memory_events",
+                mode: "continuous",
+                expiresAt: null,
                 sourceRevision: 0,
                 candidateHash: "a".repeat(64),
                 itemCount: 0,
@@ -2128,7 +2157,11 @@ describe("local-edge collaboration command route", () => {
       requestId: command.requestId,
       command: command.command,
       ok: true,
-      data: { candidate: { sessionId: ids.session } }
+      data: {
+        candidate: {
+          source: { kind: "captured_session", sessionId: ids.session }
+        }
+      }
     });
     expect(dispatches).toEqual([
       {
@@ -2423,7 +2456,7 @@ describe("local-edge collaboration command route", () => {
     });
 
     const tampered = `${cursor!.slice(0, -1)}${cursor!.endsWith("a") ? "b" : "a"}`;
-    const invalidCommands = [
+    const invalidCursorCommands = [
       {
         ...nextCommand,
         requestId: randomUUID(),
@@ -2432,22 +2465,27 @@ describe("local-edge collaboration command route", () => {
       {
         ...nextCommand,
         requestId: randomUUID(),
-        input: {
-          ...nextCommand.input,
-          thread: { scope: "personal", threadId: ids.notesThread }
-        }
-      },
-      {
-        ...nextCommand,
-        requestId: randomUUID(),
         input: { ...nextCommand.input, direction: "newer" }
       }
     ] as CollaborationRendererCommand[];
-    for (const command of invalidCommands) {
+    for (const command of invalidCursorCommands) {
       expect(
         parseResult((await injectPersonalCommand(harness.app, command)).body)
       ).toMatchObject({ ok: false, error: { code: "invalid_input" } });
     }
+    const unauthorizedThread = {
+      ...nextCommand,
+      requestId: randomUUID(),
+      input: {
+        ...nextCommand.input,
+        thread: { scope: "personal", threadId: randomUUID() }
+      }
+    } as CollaborationRendererCommand;
+    expect(
+      parseResult(
+        (await injectPersonalCommand(harness.app, unauthorizedThread)).body
+      )
+    ).toMatchObject({ ok: false, error: { code: "permission_denied" } });
   });
 
   it("composes Personal state with authorized remote Team catalog and Shared Memory indexes", async () => {

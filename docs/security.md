@@ -57,11 +57,14 @@ local-edge upstream transport or its user-configured remote URL policy, and
 remote upstream URLs cannot use that transport to gain private-network access.
 
 Team Shared Memory embedding keeps the exact Share Grant, representation,
-consent, policy, replica, source-artifact, semantic-item, and encrypted-chunk
+consent, policy, source-artifact, semantic-item, and encrypted-chunk
 authorization rows under shared transaction locks from authorization through
-decrypt and Embedding Service handoff. Revocation uses conflicting locks, so
-revocation-first performs no plaintext handoff and an already-active lease
-finishes before revocation commits.
+decrypt and Embedding Service handoff. Captured Session sources also require
+their replica and sync relationship. Personal Note sources instead require the
+strict standalone Note/exact-revision/event binding and forbid replica and sync
+identities. Revocation uses conflicting locks, so revocation-first performs no
+plaintext handoff and an already-active lease finishes before revocation
+commits.
 
 A Team Memory Answer also freezes its admitted authority at run start. The API
 signs an opaque, short-lived contract containing the exact Share Grant set and
@@ -74,9 +77,11 @@ limited to 128 grants and is forwarded by trusted MCP code, not the synthesis
 model.
 
 Direct Team representation reads, semantic searches, score scans, and
-expansion all revalidate current representation, consent, policy, replica,
-source-artifact, and curated-expiry state before returning metadata or
-decrypting content. A mixed permanent/expiring Curated representation expires
+expansion all revalidate current representation, consent, policy,
+source-artifact, source-kind custody, and curated-expiry state before returning
+metadata or decrypting content. Captured Session reads require a current
+authorized replica/sync pair. Personal Note reads require the sessionless
+standalone artifact. A mixed permanent/expiring Curated representation expires
 at its earliest contributing assertion expiry.
 
 ## Data At Rest
@@ -224,6 +229,18 @@ family, and resource scope before selecting or decrypting content. High-risk
 device-mediated administration requires a freshly browser-confirmed, exact,
 one-use action grant; enrollment does not issue reusable admin authority.
 
+Share ownership and Workspace content authority remain separate. An owner who
+loses Workspace Access can still receive redacted management metadata and
+revoke the Share, but receives no Team representation, source preview, or
+companion-discussion binding through that owner-management path.
+
+The fixed owner-authorized Personal Note list, detail, title-rename, and
+revision-update routes also accept the Personal API Token held by Electron
+main. They expose only the owning User's Note metadata and bound Personal
+Memory Event, and do not permit Personal chat access or any Team operation.
+Body mutation requires the expected current revision and an idempotency key.
+The renderer never receives the token.
+
 Desktop also treats rendered content as hostile. Markdown has no raw-HTML path,
 safe protocols are allowlisted, remote images are disabled, oversized input is
 rejected, and external links and clipboard writes use narrow trusted adapters.
@@ -250,6 +267,11 @@ Artifacts, Memory Events, LCM titles and summaries, lexical anchors, Curated
 Memory fields, evidence and expansion material, and embedding inputs. Source
 snapshot and continuous reads, exports, and fork snapshots return sanitized
 artifacts, never exact Personal source.
+
+Team-visible Shared Memory labels are derived only from the sanitized semantic
+representation. Owner-local titles and labels supplied during review are not
+accepted as Team metadata. The safe label is cryptographically bound to the
+sanitized payload and advances monotonically with its source revision.
 
 The effective content policy is versioned and covers `account_number`,
 `private_address`, `private_email`, `private_person`, `private_phone`,
@@ -297,21 +319,20 @@ provenance, Workspace Access, source-owner consent, Share Grant authority, and
 materialized representations as separate checks. Preview admission verifies the
 exact owner-private replica and destination policies. It remains Direct only
 and persists only an inactive, artifact-bound source-owner policy proposal.
-The final reviewed bundle revalidates and activates that exact proposal in the
-same transaction as consent and grant mutation; only then can replacement pause
-active consents and invalidate affected Share Grants. Share and
-representation-change admission validate the persisted preview, proposed
-three-policy intersection, current share permission, and exact grant version.
+The final reviewed bundle revalidates that exact proposal. Acceptance creates
+a durable Pending Share and no Workspace access. Publication atomically
+activates the consent, representation, and Share Grant. Initial and replacement
+admission validate the persisted preview, effective layer intersection,
+current share permission, and exact grant version.
 First-time raw `memory_events` shares use one Step-up at the final share
 decision; their preview remains Direct. Derived shares use Native review.
 Representation fidelity increases remain Step-up, while fidelity decreases and
 owner revocation remain Native review.
-Consent is not a requestable catalog action: supported Desktop flows bind it
-inside the exact share or representation-change bundle and consume the one-use
-Action Grant atomically with both repository stages. Revocation is authorized
-by the exact source-owned Share Grant and deliberately remains possible after
-destination access, policy, sync, consent, or representation availability is
-lost.
+Consent is not a requestable catalog action. Supported Desktop flows bind it
+inside the exact Pending Share or fidelity-change bundle. Acceptance consumes
+the one-use Action Grant. Revocation uses the exact source-owned Share Grant.
+It remains possible after destination access, policy, sync, consent, or
+representation availability is lost.
 
 Commercial entitlement and billing-seat definitions require current Team owner
 authority at admission as well as execution, then bind lifecycle and the exact

@@ -1123,6 +1123,7 @@ const createFakeRepository = () => {
 
   const repository = {
     health: async () => true,
+    getLocalSyncDeployment: async () => null,
     getConversationProjectionBacklog: async () => ({
       liveProjectionRows: 0,
       historicalImportRows: 0,
@@ -3942,6 +3943,193 @@ const createFakeRepository = () => {
         memoryEventScopes: []
       };
     },
+    async createPendingDesktopAsk(actor, input) {
+      const existing = [...memoryQuestions.values()].find(
+        (question) =>
+          question.ownerUserId === actor.userId &&
+          (question as MemoryQuestionDetailRecord & { idempotencyKey?: string })
+            .idempotencyKey === input.idempotencyKey
+      ) as
+        | (MemoryQuestionDetailRecord & { idempotencyKey?: string })
+        | undefined;
+      if (existing) return existing;
+      const askThreadId = input.askThreadId ?? randomUUID();
+      const ownedTurns = [...memoryQuestions.values()].filter(
+        (question) =>
+          question.ownerUserId === actor.userId &&
+          question.origin === "desktop_ask" &&
+          question.askThreadId === askThreadId
+      );
+      if (input.askThreadId && ownedTurns.length === 0) {
+        throw new Error("Ask thread not found or not visible");
+      }
+      const now = new Date().toISOString();
+      const record: MemoryQuestionDetailRecord & { idempotencyKey: string } = {
+        id: randomUUID(),
+        idempotencyKey: input.idempotencyKey,
+        ownerUserId: actor.userId,
+        visibility: "personal",
+        origin: "desktop_ask",
+        retrievalScope: "personal",
+        teamWorkspaceId: null,
+        searchDomain: "global",
+        projectId: null,
+        projectName: null,
+        projectPath: null,
+        sessionId: null,
+        threadId: null,
+        threadName: null,
+        askThreadId,
+        askTurnIndex: ownedTurns.length,
+        query: input.query,
+        answerPreview: null,
+        answerMarkdown: null,
+        errorMessage: null,
+        evidence: null,
+        citations: null,
+        retrieval: null,
+        localMemoryWorker: null,
+        response: null,
+        status: "pending",
+        createdAt: now,
+        updatedAt: now,
+        answeredAt: null,
+        attemptCount: 0,
+        evidenceCount: 0
+      };
+      memoryQuestions.set(record.id, record);
+      return record;
+    },
+    async completePendingDesktopAsk(actor, input) {
+      const existing = memoryQuestions.get(input.questionId);
+      if (
+        !existing ||
+        existing.ownerUserId !== actor.userId ||
+        existing.origin !== "desktop_ask"
+      ) {
+        throw new Error("Ask turn not found or not visible");
+      }
+      if (existing.status !== "pending") return existing;
+      const now = new Date().toISOString();
+      const completed: MemoryQuestionDetailRecord = {
+        ...existing,
+        answerPreview:
+          input.status === "answered"
+            ? input.answerMarkdown.slice(0, 280)
+            : null,
+        answerMarkdown:
+          input.status === "answered" ? input.answerMarkdown : null,
+        errorMessage: input.status === "error" ? input.errorMessage : null,
+        evidence: input.status === "answered" ? (input.evidence ?? null) : null,
+        citations:
+          input.status === "answered" ? (input.citations ?? null) : null,
+        retrieval: input.retrieval ?? null,
+        localMemoryWorker: input.localMemoryWorker ?? null,
+        response: input.response ?? null,
+        status: input.status,
+        updatedAt: now,
+        answeredAt: now,
+        attemptCount: input.attemptCount ?? 1,
+        evidenceCount:
+          input.status === "answered" ? (input.evidence?.length ?? 0) : 0
+      };
+      memoryQuestions.set(completed.id, completed);
+      return completed;
+    },
+    async recoverPendingDesktopAsks(actor, input) {
+      let recovered = 0;
+      const now = new Date().toISOString();
+      for (const question of memoryQuestions.values()) {
+        if (
+          question.ownerUserId !== actor.userId ||
+          question.origin !== "desktop_ask" ||
+          question.status !== "pending"
+        ) {
+          continue;
+        }
+        memoryQuestions.set(question.id, {
+          ...question,
+          errorMessage: input.errorMessage,
+          status: "error",
+          updatedAt: now,
+          answeredAt: now,
+          attemptCount: Math.max(question.attemptCount, 1)
+        });
+        recovered += 1;
+      }
+      return { recovered };
+    },
+    async listDesktopAskThreads(actor, input = {}) {
+      const grouped = new Map<string, MemoryQuestionDetailRecord[]>();
+      for (const question of memoryQuestions.values()) {
+        if (
+          question.ownerUserId !== actor.userId ||
+          question.origin !== "desktop_ask" ||
+          !question.askThreadId
+        ) {
+          continue;
+        }
+        const turns = grouped.get(question.askThreadId) ?? [];
+        turns.push(question);
+        grouped.set(question.askThreadId, turns);
+      }
+      const limit = input.limit ?? 50;
+      const threads = [...grouped.entries()]
+        .map(([askThreadId, turns]) => {
+          const ordered = turns.sort(
+            (left, right) => left.askTurnIndex! - right.askTurnIndex!
+          );
+          const latest = [...turns].sort((left, right) =>
+            right.updatedAt.localeCompare(left.updatedAt)
+          )[0]!;
+          return {
+            askThreadId,
+            firstQuestion: ordered[0]!.query,
+            latestStatus: latest.status,
+            turnCount: turns.length,
+            updatedAt: latest.updatedAt,
+            latestQuestionId: latest.id
+          };
+        })
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      const start = input.cursor
+        ? Math.max(
+            0,
+            threads.findIndex(
+              (thread) =>
+                thread.latestQuestionId === input.cursor?.latestQuestionId
+            ) + 1
+          )
+        : 0;
+      const selected = threads.slice(start, start + limit);
+      const last = selected.at(-1);
+      return {
+        threads: selected.map((thread) => ({
+          askThreadId: thread.askThreadId,
+          firstQuestion: thread.firstQuestion,
+          latestStatus: thread.latestStatus,
+          turnCount: thread.turnCount,
+          updatedAt: thread.updatedAt
+        })),
+        nextCursor:
+          start + limit < threads.length && last
+            ? {
+                latestQuestionId: last.latestQuestionId,
+                updatedAt: last.updatedAt
+              }
+            : null
+      };
+    },
+    async getDesktopAskThread(actor, askThreadId) {
+      return [...memoryQuestions.values()]
+        .filter(
+          (question) =>
+            question.ownerUserId === actor.userId &&
+            question.origin === "desktop_ask" &&
+            question.askThreadId === askThreadId
+        )
+        .sort((left, right) => left.askTurnIndex! - right.askTurnIndex!);
+    },
     async createFinalMemoryQuestion(actor, input) {
       const now = new Date().toISOString();
       const record: MemoryQuestionDetailRecord = {
@@ -3958,6 +4146,8 @@ const createFakeRepository = () => {
         sessionId: input.sessionId ?? null,
         threadId: input.threadId ?? null,
         threadName: input.threadName ?? null,
+        askThreadId: null,
+        askTurnIndex: null,
         query: input.query,
         answerPreview:
           input.status === "answered"
@@ -8195,6 +8385,7 @@ describe("account and access flows", () => {
     });
     const otherCookie = cookieHeader(otherUser);
     const initialChallengeHash = `challenge-${randomUUID()}-${randomUUID()}`;
+    const sourceOwnerPrincipalId = randomUUID();
     const initialKeyId = `device-key-${randomUUID()}`;
     const initialSecret = `device-secret-${randomUUID()}`;
     await app.inject({
@@ -8205,6 +8396,7 @@ describe("account and access flows", () => {
         challenge_hash: initialChallengeHash,
         upstream_backend_id: "team-vps",
         protocol_deployment_id: testProtocolDeploymentId,
+        source_owner_principal_id: sourceOwnerPrincipalId,
         device_instance_id: "desktop-rotation-1",
         requested_operation_families: ["sync"]
       }
@@ -8223,6 +8415,36 @@ describe("account and access flows", () => {
     const initialCredential = jsonBody<{
       credential: { id: string };
     }>(initialRedeem).credential;
+    const changedDeploymentRotation = await app.inject({
+      method: "POST",
+      url: "/v1/local-edge/device-enrollments/challenges",
+      headers: {
+        authorization: `Koed-Device ${initialKeyId}:${initialSecret}`
+      },
+      payload: {
+        challenge_hash: `challenge-${randomUUID()}-${randomUUID()}`,
+        upstream_backend_id: "team-vps",
+        protocol_deployment_id: randomUUID(),
+        source_owner_principal_id: sourceOwnerPrincipalId,
+        rotate_credential_id: initialCredential.id,
+        requested_operation_families: ["sync"]
+      }
+    });
+    const changedPrincipalRotation = await app.inject({
+      method: "POST",
+      url: "/v1/local-edge/device-enrollments/challenges",
+      headers: {
+        authorization: `Koed-Device ${initialKeyId}:${initialSecret}`
+      },
+      payload: {
+        challenge_hash: `challenge-${randomUUID()}-${randomUUID()}`,
+        upstream_backend_id: "team-vps",
+        protocol_deployment_id: testProtocolDeploymentId,
+        source_owner_principal_id: randomUUID(),
+        rotate_credential_id: initialCredential.id,
+        requested_operation_families: ["sync"]
+      }
+    });
     const rotationChallengeHash = `challenge-${randomUUID()}-${randomUUID()}`;
     const rotationChallenge = await app.inject({
       method: "POST",
@@ -8234,6 +8456,7 @@ describe("account and access flows", () => {
         challenge_hash: rotationChallengeHash,
         upstream_backend_id: "team-vps",
         protocol_deployment_id: testProtocolDeploymentId,
+        source_owner_principal_id: sourceOwnerPrincipalId,
         rotate_credential_id: initialCredential.id,
         requested_operation_families: ["sync"]
       }
@@ -8252,6 +8475,7 @@ describe("account and access flows", () => {
         challenge_hash: siblingRotationChallengeHash,
         upstream_backend_id: "team-vps",
         protocol_deployment_id: testProtocolDeploymentId,
+        source_owner_principal_id: sourceOwnerPrincipalId,
         rotate_credential_id: initialCredential.id,
         requested_operation_families: ["sync"]
       }
@@ -8324,6 +8548,8 @@ describe("account and access flows", () => {
     await app.close();
 
     expect(initialRedeem.statusCode).toBe(200);
+    expect(changedDeploymentRotation.statusCode).toBe(403);
+    expect(changedPrincipalRotation.statusCode).toBe(403);
     expect(rotationChallenge.statusCode).toBe(200);
     expect(siblingRotationChallenge.statusCode).toBe(200);
     expect(crossUserDenial.statusCode).toBe(200);
@@ -12439,6 +12665,9 @@ describe("account and access flows", () => {
   });
 
   it("serves Team Shared Memory evidence behind Team authentication", async () => {
+    process.env.KOED_HOME = mkdtempSync(
+      resolve(tmpdir(), "koed-team-note-evidence-")
+    );
     const repository = createFakeRepository();
     const recallInputs: Array<Record<string, unknown>> = [];
     const originalSearchMemoryNodes =
@@ -12448,10 +12677,25 @@ describe("account and access flows", () => {
       return originalSearchMemoryNodes(actor, input);
     };
     const teamCandidateId = randomUUID();
+    const teamShareGrantId = randomUUID();
+    const teamSourceArtifactId = randomUUID();
+    const teamNoteId = randomUUID();
+    const teamMemoryEventId = randomUUID();
+    const teamLogicalMemoryId = randomUUID();
+    const teamSourceRevisionHash = "b".repeat(64);
     repository.searchAuthorizedSharedMemorySemanticItems = async () => [
       {
+        source: {
+          kind: "personal_note",
+          noteId: teamNoteId,
+          noteRevision: 1,
+          memoryEventId: teamMemoryEventId,
+          logicalMemoryId: teamLogicalMemoryId
+        },
         candidateId: teamCandidateId,
-        shareGrantId: randomUUID(),
+        shareGrantId: teamShareGrantId,
+        sourceArtifactId: teamSourceArtifactId,
+        sourceRevisionHash: teamSourceRevisionHash,
         representationId: randomUUID(),
         representation: "lcm_rollups",
         pseudonymousSourceId: "team-source",
@@ -12614,6 +12858,17 @@ describe("account and access flows", () => {
         limit: 1
       }
     });
+    const deviceTeamSearch = await app.inject({
+      method: "POST",
+      url: "/v1/memory/search",
+      headers: { authorization: device.authorization },
+      payload: {
+        query: "Seraphina",
+        retrieval_scope: "personal",
+        team_workspace_id: teamWorkspaceId,
+        limit: 1
+      }
+    });
     const deviceTeamQuestion = await app.inject({
       method: "POST",
       url: "/v1/memory/questions/final",
@@ -12659,6 +12914,7 @@ describe("account and access flows", () => {
     expect(answer.statusCode).toBe(200);
     expect(deviceAnswer.statusCode).toBe(200);
     expect(deviceScoreScan.statusCode).toBe(200);
+    expect(deviceTeamSearch.statusCode).toBe(200);
     expect(deviceTeamQuestion.statusCode).toBe(200);
     expect(rejectedApiTokenTeamQuestion.statusCode).toBe(403);
     const scoreScan = jsonBody<{
@@ -12680,6 +12936,27 @@ describe("account and access flows", () => {
         countAboveThreshold: 1,
         maxAllowed: 1
       })
+    );
+    const teamVisibilityProvenance = jsonBody<{
+      hits: Array<{ visibilityProvenance: Record<string, unknown> }>;
+    }>(deviceTeamSearch).hits[0]?.visibilityProvenance;
+    expect(teamVisibilityProvenance).toEqual({
+      shareGrantId: teamShareGrantId,
+      representation: "lcm_rollups",
+      sourceRevision: 1
+    });
+    expect(JSON.stringify(deviceTeamSearch.json())).not.toContain(teamNoteId);
+    expect(JSON.stringify(deviceTeamSearch.json())).not.toContain(
+      teamMemoryEventId
+    );
+    expect(JSON.stringify(deviceTeamSearch.json())).not.toContain(
+      teamLogicalMemoryId
+    );
+    expect(JSON.stringify(deviceTeamSearch.json())).not.toContain(
+      teamSourceArtifactId
+    );
+    expect(JSON.stringify(deviceTeamSearch.json())).not.toContain(
+      teamSourceRevisionHash
     );
     expect(scoreScan.retrieval.stages).toContainEqual(
       expect.objectContaining({
@@ -12713,8 +12990,17 @@ describe("account and access flows", () => {
   });
 
   it("serves Team Shared Memory expansion behind Team authentication", async () => {
+    process.env.KOED_HOME = mkdtempSync(
+      resolve(tmpdir(), "koed-team-note-expansion-")
+    );
     const repository = createFakeRepository();
     const expandInputs: Array<Record<string, unknown>> = [];
+    const teamShareGrantId = randomUUID();
+    const teamSourceArtifactId = randomUUID();
+    const teamRepresentationId = randomUUID();
+    const teamSourceRevisionHash = "b".repeat(64);
+    const teamProvenanceHash = "a".repeat(64);
+    const pseudonymousSourceId = randomUUID();
     repository.expandMemoryNode = async (nodeId, _actor, input) => {
       expandInputs.push({ nodeId, ...(input as Record<string, unknown>) });
       return {
@@ -12731,14 +13017,21 @@ describe("account and access flows", () => {
       expandInputs.push(input as unknown as Record<string, unknown>);
       return {
         parent: {
+          source: {
+            kind: "captured_session" as const,
+            sessionId: randomUUID(),
+            logicalMemoryId: randomUUID()
+          },
           candidateId: input.candidateId,
-          shareGrantId: randomUUID(),
-          representationId: randomUUID(),
+          shareGrantId: teamShareGrantId,
+          sourceArtifactId: teamSourceArtifactId,
+          sourceRevisionHash: teamSourceRevisionHash,
+          representationId: teamRepresentationId,
           representation: "lcm_rollups" as const,
-          pseudonymousSourceId: randomUUID(),
+          pseudonymousSourceId,
           sourceItemIndex: 0,
           sourceRevision: 1,
-          provenanceHash: "a".repeat(64),
+          provenanceHash: teamProvenanceHash,
           representationPolicyRevision: 1,
           contentPolicyVersion: 1,
           classifierVersion: 1,
@@ -12752,7 +13045,17 @@ describe("account and access flows", () => {
           score: 1,
           freshness: "fresh" as const
         },
-        items: []
+        items: [
+          {
+            candidateId: randomUUID(),
+            pseudonymousSourceId,
+            sourceChunkIndex: 0,
+            itemType: "lcm_leaf" as const,
+            occurredAt: null,
+            text: "Authorized Team evidence.",
+            lexicalAnchors: []
+          }
+        ]
       };
     };
     const app = await buildServer({ repository });
@@ -12800,6 +13103,24 @@ describe("account and access flows", () => {
     );
     expect(deviceExpand.statusCode).toBe(200);
     expect(sessionExpand.statusCode).toBe(200);
+    const expanded = jsonBody<{
+      expanded: {
+        visibilityProvenance: Record<string, unknown>;
+        generation?: unknown;
+        sourceItems: Array<Record<string, unknown>>;
+      };
+    }>(deviceExpand).expanded;
+    expect(expanded.visibilityProvenance).toEqual({
+      shareGrantId: teamShareGrantId,
+      representation: "lcm_rollups",
+      sourceRevision: 1
+    });
+    expect(expanded).not.toHaveProperty("generation");
+    expect(expanded.sourceItems[0]).not.toHaveProperty("sourceTable");
+    expect(JSON.stringify(expanded)).not.toContain(teamSourceArtifactId);
+    expect(JSON.stringify(expanded)).not.toContain(teamRepresentationId);
+    expect(JSON.stringify(expanded)).not.toContain(teamSourceRevisionHash);
+    expect(JSON.stringify(expanded)).not.toContain(teamProvenanceHash);
     expect(expandInputs).toEqual([
       { teamWorkspaceId, candidateId: nodeId, searchDomain: "global" },
       { teamWorkspaceId, candidateId: nodeId, searchDomain: "global" }
@@ -15394,6 +15715,170 @@ describe("account and access flows", () => {
       searchDomain: "project",
       projectId: "project-1"
     });
+  });
+
+  it("creates and completes ordered Desktop Ask turns idempotently", async () => {
+    const app = await buildServer({ repository: createFakeRepository() });
+    const registered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: { email: "desktop-ask@example.com", password: "password123" }
+    });
+    const createdToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: browserSessionHeaders(cookieHeader(registered)),
+      payload: { name: "Desktop" }
+    });
+    const headers = {
+      authorization: `Bearer ${jsonBody<TokenResponse>(createdToken).token}`
+    };
+    const idempotencyKey = `desktop-ask-${randomUUID()}`;
+    const initial = await app.inject({
+      method: "POST",
+      url: "/v1/memory/ask/questions",
+      headers,
+      payload: {
+        idempotency_key: idempotencyKey,
+        query: "What did I decide?"
+      }
+    });
+    const retried = await app.inject({
+      method: "POST",
+      url: "/v1/memory/ask/questions",
+      headers,
+      payload: {
+        idempotency_key: idempotencyKey,
+        query: "This retry must not create a second turn."
+      }
+    });
+    const initialQuestion = jsonBody<MemoryQuestionResponse>(initial).question;
+    const followUp = await app.inject({
+      method: "POST",
+      url: "/v1/memory/ask/questions",
+      headers,
+      payload: {
+        ask_thread_id: initialQuestion.askThreadId,
+        idempotency_key: `desktop-ask-follow-up-${randomUUID()}`,
+        query: "What happened next?"
+      }
+    });
+    const completed = await app.inject({
+      method: "PATCH",
+      url: `/v1/memory/ask/questions/${initialQuestion.id}`,
+      headers,
+      payload: {
+        status: "answered",
+        answer_markdown: "You selected the Personal Memory design.",
+        evidence: [{ id: "evidence-1" }]
+      }
+    });
+    const completedAgain = await app.inject({
+      method: "PATCH",
+      url: `/v1/memory/ask/questions/${initialQuestion.id}`,
+      headers,
+      payload: { status: "error", error_message: "must not replace answer" }
+    });
+    const recovered = await app.inject({
+      method: "POST",
+      url: "/v1/memory/ask/questions/recover-pending",
+      headers,
+      payload: {}
+    });
+    const threads = await app.inject({
+      method: "GET",
+      url: "/v1/memory/ask/threads?limit=50",
+      headers
+    });
+    const thread = await app.inject({
+      method: "GET",
+      url: `/v1/memory/ask/threads/${initialQuestion.askThreadId}`,
+      headers
+    });
+    const otherRegistered = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "desktop-ask-other@example.com",
+        password: "password123"
+      }
+    });
+    const otherToken = await app.inject({
+      method: "POST",
+      url: "/api-tokens",
+      headers: browserSessionHeaders(cookieHeader(otherRegistered)),
+      payload: { name: "Other Desktop" }
+    });
+    const hidden = await app.inject({
+      method: "GET",
+      url: `/v1/memory/ask/threads/${initialQuestion.askThreadId}`,
+      headers: {
+        authorization: `Bearer ${jsonBody<TokenResponse>(otherToken).token}`
+      }
+    });
+    const malformed = await app.inject({
+      method: "POST",
+      url: "/v1/memory/ask/questions",
+      headers,
+      payload: {
+        idempotency_key: `desktop-ask-malformed-${randomUUID()}`,
+        query: "Question",
+        retrieval_scope: "team"
+      }
+    });
+    await app.close();
+
+    expect(initial.statusCode).toBe(200);
+    expect(initialQuestion).toMatchObject({
+      origin: "desktop_ask",
+      searchDomain: "global",
+      retrievalScope: "personal",
+      askTurnIndex: 0,
+      status: "pending"
+    });
+    expect(initialQuestion.askThreadId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    );
+    expect(jsonBody<MemoryQuestionResponse>(retried).question.id).toBe(
+      initialQuestion.id
+    );
+    expect(jsonBody<MemoryQuestionResponse>(followUp).question).toMatchObject({
+      askThreadId: initialQuestion.askThreadId,
+      askTurnIndex: 1,
+      status: "pending"
+    });
+    expect(jsonBody<MemoryQuestionResponse>(completed).question).toMatchObject({
+      status: "answered",
+      answerMarkdown: "You selected the Personal Memory design.",
+      evidenceCount: 1
+    });
+    expect(
+      jsonBody<MemoryQuestionResponse>(completedAgain).question.status
+    ).toBe("answered");
+    expect(jsonBody<{ recovered: number }>(recovered)).toEqual({
+      recovered: 1
+    });
+    expect(jsonBody<{ threads: unknown[] }>(threads).threads).toEqual([
+      expect.objectContaining({
+        askThreadId: initialQuestion.askThreadId,
+        firstQuestion: "What did I decide?",
+        turnCount: 2
+      })
+    ]);
+    expect(
+      jsonBody<{ questions: MemoryQuestionDetailRecord[] }>(
+        thread
+      ).questions.map((question) => question.askTurnIndex)
+    ).toEqual([0, 1]);
+    expect(
+      jsonBody<{ questions: MemoryQuestionDetailRecord[] }>(thread).questions[1]
+    ).toMatchObject({
+      status: "error",
+      errorMessage:
+        "This Ask was interrupted when the Local AI Runtime stopped. Try again."
+    });
+    expect(hidden.statusCode).toBe(404);
+    expect(malformed.statusCode).toBe(400);
   });
 
   it("records final MCP memory answer questions", async () => {

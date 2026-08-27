@@ -73,6 +73,19 @@ const toolRequestSchema = z
   })
   .strict();
 
+const desktopAskRequestSchema = z
+  .object({
+    input: z
+      .object({
+        askThreadId: z.string().uuid().optional(),
+        idempotencyKey: z.string().trim().min(1).max(500),
+        query: z.string().trim().min(1).max(32_000)
+      })
+      .strict(),
+    caller: callerSchema
+  })
+  .strict();
+
 const positiveInteger = (
   value: string | undefined,
   fallback: number
@@ -255,6 +268,11 @@ export interface LocalAiRuntimeToolExecutor {
     caller: z.infer<typeof callerSchema>,
     signal?: AbortSignal
   ): Promise<Record<string, unknown>>;
+  executeDesktopAsk?(
+    input: z.infer<typeof desktopAskRequestSchema>["input"],
+    caller: z.infer<typeof callerSchema>,
+    signal?: AbortSignal
+  ): Promise<Record<string, unknown>>;
 }
 
 export interface LocalAiRuntimeServices {
@@ -277,6 +295,9 @@ export interface LocalAiRuntimeServiceDependencies {
   startClaudeTranscriptWatcher: typeof startClaudeTranscriptWatcher;
   startPiTranscriptWatcher?: typeof startPiTranscriptWatcher;
   startAiClientCapabilityPublisher?: typeof startAiClientCapabilityPublisher;
+  recoverPendingDesktopAsks?: (
+    apiClient: MemoryApiClient
+  ) => Promise<{ recovered: number }>;
   createExecutor(
     apiClient: MemoryApiClient,
     environment: NodeJS.ProcessEnv,
@@ -297,6 +318,8 @@ const defaultServiceDependencies: LocalAiRuntimeServiceDependencies = {
   startClaudeTranscriptWatcher,
   startPiTranscriptWatcher,
   startAiClientCapabilityPublisher,
+  recoverPendingDesktopAsks: (apiClient) =>
+    apiClient.recoverPendingDesktopAsks(),
   createExecutor: (apiClient, environment, services) =>
     new MemoryToolExecutor(apiClient, environment, services)
 };
@@ -309,6 +332,7 @@ export const startDefaultLocalAiRuntimeServices = async (
   }: Parameters<LocalAiRuntimeServiceFactory>[0],
   dependencies: LocalAiRuntimeServiceDependencies = defaultServiceDependencies
 ): Promise<LocalAiRuntimeServices> => {
+  await dependencies.recoverPendingDesktopAsks?.(apiClient);
   const lcmSummaryService = dependencies.startLcmSummaryService(apiClient, {
     serviceConfig: resolveLcmSummaryServiceConfig(environment),
     workerConfig: resolveLcmSummaryWorkerConfig(environment)
@@ -516,6 +540,30 @@ export const startLocalAiRuntime = async ({
                 }
               : {})
           });
+          return;
+        }
+        if (
+          request.method === "POST" &&
+          requestUrl.pathname === "/v1/desktop/ask"
+        ) {
+          if (!executor.executeDesktopAsk) {
+            json(response, 503, { error: "Desktop Ask is unavailable" });
+            return;
+          }
+          const parsed = desktopAskRequestSchema.parse(
+            await readJsonBody(request)
+          );
+          const release = await answerAdmission.acquire(requestAbort.signal);
+          try {
+            const result = await executor.executeDesktopAsk(
+              parsed.input,
+              parsed.caller,
+              requestAbort.signal
+            );
+            if (!requestAbort.signal.aborted) json(response, 200, result);
+          } finally {
+            release();
+          }
           return;
         }
         const toolPrefix = "/v1/tools/";

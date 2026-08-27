@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import pg from "pg";
 import {
   COLLABORATION_CONTRACT_VERSION,
+  crossIdentitySyncDeterministicUuid,
+  logicalMemorySourceRevisionIdentity,
   type EnvelopeEncryptionProvider
 } from "@koed/shared";
 
@@ -21,6 +23,8 @@ const THREAD_TOPIC_MARKER = "[koed encrypted collaboration topic]";
 const MESSAGE_BODY_MARKER = "[koed encrypted collaboration message]";
 const MESSAGE_METADATA_MARKER = "[koed encrypted collaboration metadata]";
 const MESSAGE_PROVENANCE_MARKER = "[koed encrypted collaboration provenance]";
+const PERSONAL_NOTE_TITLE_MARKER = "[koed encrypted personal note title]";
+const PERSONAL_NOTE_BODY_MARKER = "[koed encrypted personal note body]";
 const OUTBOX_REPLAY_DAYS = 30;
 const MAX_THREAD_NAME_CODE_POINTS = 80;
 const MAX_THREAD_TOPIC_BYTES = 1_024;
@@ -34,9 +38,7 @@ const MAX_REALTIME_RECEIPT_UPDATES = 250;
 
 export type CollaborationScope = "personal" | "team";
 
-export type PersonalCollaborationThreadKind =
-  | "notes_to_self"
-  | "personal_channel";
+export type PersonalCollaborationThreadKind = "personal_channel";
 
 export type TeamCollaborationThreadKind =
   | "workspace_channel"
@@ -65,6 +67,7 @@ export type CollaborationEventFamily =
   | "receipt_state_updated"
   | "share_grant_lifecycle"
   | "fidelity_changed"
+  | "source_revision_changed"
   | "memory_event_available"
   | "lcm_leaf_available"
   | "lcm_rollup_available"
@@ -138,6 +141,28 @@ export interface CollaborationMessagePageRecord {
   hasMore: boolean;
   nextBeforeSequence: number | null;
   nextAfterSequence: number | null;
+}
+
+export interface PersonalNoteRecord {
+  noteId: string;
+  logicalMemoryId: string;
+  title: string;
+  titleVersion: number;
+  body: string;
+  revisionId: string;
+  revision: number;
+  contentHash: string;
+  memoryEventId: string | null;
+  projectionState: "pending" | "available" | "failed" | "superseded";
+  projectionFailureCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+  sourceSequence: number;
+}
+
+export interface PersonalNotePageRecord {
+  notes: PersonalNoteRecord[];
+  nextBeforeSequence: number | null;
 }
 
 export interface CollaborationMessageReceiptRecord {
@@ -280,10 +305,6 @@ export type RevokeCollaborationSubscriptionsInput =
 
 export type CreateCollaborationThreadInput =
   | {
-      kind: "notes_to_self";
-      idempotencyKey: string;
-    }
-  | {
       kind: "personal_channel";
       idempotencyKey: string;
       name: string;
@@ -379,6 +400,42 @@ export interface CollaborationRepository {
       limit?: number;
     }
   ): Promise<CollaborationMessagePageRecord | null>;
+  createPersonalNote(
+    actor: ActorContext,
+    input: { body: string; idempotencyKey: string }
+  ): Promise<PersonalNoteRecord>;
+  listPersonalNotes(
+    actor: ActorContext,
+    input?: { beforeSequence?: number; limit?: number }
+  ): Promise<PersonalNotePageRecord>;
+  getPersonalNote(
+    actor: ActorContext,
+    input: { noteId: string }
+  ): Promise<PersonalNoteRecord | null>;
+  renamePersonalNote(
+    actor: ActorContext,
+    input: { noteId: string; expectedTitleVersion: number; title: string }
+  ): Promise<PersonalNoteRecord | null>;
+  updatePersonalNoteBody(
+    actor: ActorContext,
+    input: {
+      noteId: string;
+      expectedRevision: number;
+      body: string;
+      idempotencyKey: string;
+    }
+  ): Promise<PersonalNoteRecord | null>;
+  listPendingPersonalNoteRevisions(input?: {
+    limit?: number;
+  }): Promise<Array<{ ownerUserId: string; noteId: string; revision: number }>>;
+  markPersonalNoteProjectionAvailable(
+    actor: ActorContext,
+    input: { noteId: string; revision: number; memoryEventId: string }
+  ): Promise<PersonalNoteRecord | null>;
+  markPersonalNoteProjectionFailed(
+    actor: ActorContext,
+    input: { noteId: string; revision: number; failureCode: string }
+  ): Promise<void>;
   advanceReadState(
     actor: ActorContext,
     input: { threadId: string; messageId: string }
@@ -573,7 +630,102 @@ type SubscriptionRow = {
   revoked_at: Date | null;
 };
 
+type PersonalNoteRow = {
+  id: string;
+  logical_memory_id: string;
+  owner_user_id: string;
+  sequence: number | string;
+  title_version: number;
+  current_revision: number;
+  lifecycle: "active" | "archived" | "deleted";
+  created_at: Date;
+  updated_at: Date;
+  revision_id: string;
+  revision: number;
+  content_hash: string;
+  memory_event_id: string | null;
+  projection_state: "pending" | "available" | "failed" | "superseded";
+  projection_failure_code: string | null;
+};
+
 const iso = (value: Date | null): string | null => value?.toISOString() ?? null;
+
+const normalizePersonalNoteTitle = (value: string): string => {
+  const title = value.trim().normalize("NFC");
+  if (title.length === 0 || Array.from(title).length > 80) {
+    throw new TypeError("Personal Note title must contain 1 to 80 characters");
+  }
+  return title;
+};
+
+const derivePersonalNoteTitle = (body: string): string => {
+  const firstLine = body
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find(Boolean);
+  return (
+    Array.from(firstLine ?? "Untitled Note")
+      .slice(0, 80)
+      .join("") || "Untitled Note"
+  );
+};
+
+const selectPersonalNoteSql = `
+  select note.id,note.owner_user_id,note.sequence,note.title_version,
+         note.current_revision,note.lifecycle,note.created_at,note.updated_at,
+         revision.id as revision_id,revision.revision,revision.content_hash,
+         revision.memory_event_id,revision.projection_state,
+         revision.projection_failure_code,source.logical_memory_id
+    from personal_notes note
+    join local_personal_note_logical_memories source
+      on source.local_note_id=note.id and source.owner_user_id=note.owner_user_id
+    join personal_note_revisions revision
+      on revision.note_id=note.id
+     and revision.owner_user_id=note.owner_user_id
+     and revision.revision=note.current_revision
+`;
+
+const decryptPersonalNote = async (
+  client: pg.Pool | pg.PoolClient,
+  actor: ActorContext,
+  provider: EnvelopeEncryptionProvider,
+  row: PersonalNoteRow
+): Promise<PersonalNoteRecord> => {
+  const [titlePayload, bodyPayload] = await Promise.all([
+    decryptAuthorizedEncryptedFieldPayloadWithClient(client, actor, provider, {
+      sourceTable: "personal_notes",
+      sourceId: row.id,
+      sourceColumn: "title"
+    }),
+    decryptAuthorizedEncryptedFieldPayloadWithClient(client, actor, provider, {
+      sourceTable: "personal_note_revisions",
+      sourceId: row.revision_id,
+      sourceColumn: "body"
+    })
+  ]);
+  if (
+    typeof titlePayload?.plaintext !== "string" ||
+    typeof bodyPayload?.plaintext !== "string"
+  ) {
+    throw new Error("Personal Note encrypted payload is unavailable");
+  }
+  return {
+    noteId: row.id,
+    logicalMemoryId: row.logical_memory_id,
+    title: normalizePersonalNoteTitle(titlePayload.plaintext),
+    titleVersion: row.title_version,
+    body: bodyPayload.plaintext,
+    revisionId: row.revision_id,
+    revision: row.revision,
+    contentHash: row.content_hash,
+    memoryEventId: row.memory_event_id,
+    projectionState: row.projection_state,
+    projectionFailureCode: row.projection_failure_code,
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+    sourceSequence: Number(row.sequence)
+  };
+};
 
 const boundedLimit = (
   value: number | undefined,
@@ -940,11 +1092,11 @@ const activeShareGrant = async (
     `
       select exists (
         select 1
-        from team_session_share_grants sg
+        from team_memory_share_grants sg
         join source_owner_representation_consents consent
           on consent.id = sg.consent_id
          and consent.logical_memory_id = sg.logical_memory_id
-         and consent.remote_replica_id = sg.remote_replica_id
+         and consent.remote_replica_id is not distinct from sg.remote_replica_id
          and consent.source_owner_principal_id = sg.owner_principal_id
          and consent.team_id = sg.team_id
          and consent.team_workspace_id = sg.team_workspace_id
@@ -1014,7 +1166,7 @@ const pendingShareGrant = async (
   const result = await client.query<{ allowed: boolean }>(
     `select exists (
        select 1
-         from team_session_share_grants g
+         from team_memory_share_grants g
          join pending_share_operations p on p.grant_id=g.id
         where g.id=$1 and g.team_id=$2 and g.team_workspace_id=$3
           and g.logical_memory_id=$4 and g.owner_user_id=$5
@@ -1056,7 +1208,7 @@ const authorizedThreadJoinsSql = `
    and workspace_access.team_id = ct.team_id
    and workspace_access.user_id = $1
    and workspace_access.disabled_at is null
-  left join team_session_share_grants share_grant
+  left join team_memory_share_grants share_grant
     on share_grant.id = ct.share_grant_id
    and share_grant.team_id = ct.team_id
    and share_grant.team_workspace_id = ct.team_workspace_id
@@ -1064,7 +1216,7 @@ const authorizedThreadJoinsSql = `
   left join source_owner_representation_consents share_consent
     on share_consent.id = share_grant.consent_id
    and share_consent.logical_memory_id = share_grant.logical_memory_id
-   and share_consent.remote_replica_id = share_grant.remote_replica_id
+   and share_consent.remote_replica_id is not distinct from share_grant.remote_replica_id
    and share_consent.source_owner_principal_id = share_grant.owner_principal_id
    and share_consent.team_id = share_grant.team_id
    and share_consent.team_workspace_id = share_grant.team_workspace_id
@@ -1108,7 +1260,7 @@ const authorizedThreadPredicate = (required: "read" | "write"): string => `
     (
       ct.scope = 'personal'
       and ct.personal_owner_user_id = $1
-      and ct.kind in ('notes_to_self', 'personal_channel')
+      and ct.kind = 'personal_channel'
     )
     or (
       ct.scope = 'team'
@@ -1212,7 +1364,7 @@ const getAuthorizedThreadRow = async (
                   ct.kind = 'shared_session_discussion'
                   and exists (
                     select 1
-                      from team_session_share_grants pending_grant
+                      from team_memory_share_grants pending_grant
                       join pending_share_operations pending_share
                         on pending_share.grant_id = pending_grant.id
                      where pending_grant.id = ct.share_grant_id
@@ -1853,6 +2005,7 @@ const sharedMemoryScopedEventSql = `(
   event.family in (
     'share_grant_lifecycle',
     'fidelity_changed',
+    'source_revision_changed',
     'memory_event_available',
     'lcm_leaf_available',
     'lcm_rollup_available'
@@ -1862,11 +2015,11 @@ const sharedMemoryScopedEventSql = `(
 
 const activeSharedMemoryGrantEventAuthorizationSql = `exists (
   select 1
-  from team_session_share_grants realtime_grant
+  from team_memory_share_grants realtime_grant
   join source_owner_representation_consents realtime_consent
     on realtime_consent.id = realtime_grant.consent_id
    and realtime_consent.logical_memory_id = realtime_grant.logical_memory_id
-   and realtime_consent.remote_replica_id = realtime_grant.remote_replica_id
+   and realtime_consent.remote_replica_id is not distinct from realtime_grant.remote_replica_id
    and realtime_consent.source_owner_principal_id = realtime_grant.owner_principal_id
    and realtime_consent.team_id = realtime_grant.team_id
    and realtime_consent.team_workspace_id = realtime_grant.team_workspace_id
@@ -1916,7 +2069,7 @@ const activeSharedMemoryGrantEventAuthorizationSql = `exists (
 const sharedMemoryRepresentationEventAuthorizationSql = `exists (
   select 1
   from team_memory_representations realtime_representation
-  join team_session_share_grants realtime_grant
+  join team_memory_share_grants realtime_grant
     on realtime_grant.id = realtime_representation.share_grant_id
    and realtime_grant.consent_id = realtime_representation.consent_id
    and realtime_grant.team_id = realtime_representation.team_id
@@ -1925,7 +2078,7 @@ const sharedMemoryRepresentationEventAuthorizationSql = `exists (
   join source_owner_representation_consents realtime_consent
     on realtime_consent.id = realtime_grant.consent_id
    and realtime_consent.logical_memory_id = realtime_grant.logical_memory_id
-   and realtime_consent.remote_replica_id = realtime_grant.remote_replica_id
+   and realtime_consent.remote_replica_id is not distinct from realtime_grant.remote_replica_id
    and realtime_consent.source_owner_principal_id = realtime_grant.owner_principal_id
    and realtime_consent.team_id = realtime_grant.team_id
    and realtime_consent.team_workspace_id = realtime_grant.team_workspace_id
@@ -2000,7 +2153,7 @@ const sharedMemoryRepresentationEventAuthorizationSql = `exists (
 
 const exactSharedMemoryGrantEventBindingSql = `exists (
   select 1
-  from team_session_share_grants transition_grant
+  from team_memory_share_grants transition_grant
   where transition_grant.id = event.share_grant_id
     and transition_grant.team_id = event.team_id
     and transition_grant.team_workspace_id = event.team_workspace_id
@@ -2019,19 +2172,19 @@ const threadlessTeamEventAuthorizationSql = `
       and ${sharedMemoryRepresentationEventAuthorizationSql}
     )
     or (
-      event.family = 'fidelity_changed'
+      event.family in ('fidelity_changed', 'source_revision_changed')
       and ${sharedMemoryRepresentationEventAuthorizationSql}
     )
     or (
       event.family = 'share_grant_lifecycle'
-      and event.resource_type = 'team_session_share_grant'
+      and event.resource_type = 'team_memory_share_grant'
       and event.resource_id = event.share_grant_id
       and ${activeSharedMemoryGrantEventAuthorizationSql}
     )
     or (
-      event.family = 'fidelity_changed'
+      event.family in ('fidelity_changed', 'source_revision_changed')
       and event.resource_type in (
-        'team_session_share_grant',
+        'team_memory_share_grant',
         'team_memory_representation'
       )
       and event.resource_id = event.share_grant_id
@@ -2039,7 +2192,7 @@ const threadlessTeamEventAuthorizationSql = `
     )
     or (
       event.family = 'access_revoked'
-      and event.resource_type = 'team_session_share_grant'
+      and event.resource_type = 'team_memory_share_grant'
       and event.resource_id = event.share_grant_id
       and ${exactSharedMemoryGrantEventBindingSql}
     )
@@ -2742,24 +2895,20 @@ const prepareThreadCreation = async (
   let participants: string[] = [];
   let participantSetKey: string | null = null;
 
-  if (input.kind === "notes_to_self" || input.kind === "personal_channel") {
+  if (input.kind === "personal_channel") {
     if (!(await activeUser(client, actor))) return null;
     scope = "personal";
     personalOwnerUserId = actor.userId;
-    if (input.kind === "notes_to_self") {
-      participants = [actor.userId];
-    } else {
-      name = requireBoundedCodePoints(
-        input.name,
-        "name",
-        MAX_THREAD_NAME_CODE_POINTS
-      );
-      normalizedNameHash = hashDomain("thread-name", normalizeName(name));
-      topic =
-        input.topic === undefined || input.topic === null
-          ? null
-          : requireBoundedUtf8(input.topic, "topic", MAX_THREAD_TOPIC_BYTES);
-    }
+    name = requireBoundedCodePoints(
+      input.name,
+      "name",
+      MAX_THREAD_NAME_CODE_POINTS
+    );
+    normalizedNameHash = hashDomain("thread-name", normalizeName(name));
+    topic =
+      input.topic === undefined || input.topic === null
+        ? null
+        : requireBoundedUtf8(input.topic, "topic", MAX_THREAD_TOPIC_BYTES);
   } else {
     scope = "team";
     teamId = input.teamId;
@@ -2897,12 +3046,7 @@ const findNaturalThreadId = async (
   input: PreparedThreadCreation
 ): Promise<string | null> => {
   let result: pg.QueryResult<{ id: string }>;
-  if (input.kind === "notes_to_self") {
-    result = await client.query(
-      `select id from collaboration_threads where kind = 'notes_to_self' and personal_owner_user_id = $1 limit 1`,
-      [input.personalOwnerUserId]
-    );
-  } else if (input.kind === "personal_channel") {
+  if (input.kind === "personal_channel") {
     result = await client.query(
       `select id from collaboration_threads where kind = 'personal_channel' and personal_owner_user_id = $1 and normalized_name_hash = $2 and lifecycle = 'active' limit 1`,
       [input.personalOwnerUserId, input.normalizedNameHash]
@@ -4120,7 +4264,7 @@ export const createCollaborationRepository = (
     threadId: string
   ): Promise<EnvelopeEncryptionProvider> => {
     const result = await client.query<{ scope: CollaborationScope }>(
-      `select scope from collaboration_threads where id = $1 limit 1`,
+      `select scope from collaboration_threads where id=$1 limit 1`,
       [threadId]
     );
     return requireProvider(result.rows[0]?.scope);
@@ -4247,6 +4391,728 @@ export const createCollaborationRepository = (
         actor,
         await requireThreadProvider(pool, input.threadId),
         input
+      );
+    },
+
+    async createPersonalNote(actor, input) {
+      const body = requireBoundedText(
+        input.body,
+        "Personal Note body",
+        MAX_MESSAGE_BODY_BYTES
+      );
+      const idempotencyKey = requireBoundedText(
+        input.idempotencyKey,
+        "idempotencyKey",
+        MAX_IDEMPOTENCY_KEY_LENGTH
+      );
+      const idempotencyKeyHash = hashDomain(
+        "personal-note-idempotency",
+        idempotencyKey
+      );
+      const creationRequestHash = requestHash({ body });
+      const contentHash = hashDomain("personal-note-body", body);
+      const title = derivePersonalNoteTitle(body);
+      return withTransaction(pool, async (client) => {
+        const existing = await client.query<PersonalNoteRow>(
+          `${selectPersonalNoteSql}
+            where note.owner_user_id=$1
+              and note.idempotency_key_hash=$2
+              and note.lifecycle='active'
+            limit 1
+            for update of note`,
+          [actor.userId, idempotencyKeyHash]
+        );
+        if (existing.rows[0]) {
+          const hash = await client.query<{ request_hash: string }>(
+            `select request_hash from personal_notes where id=$1`,
+            [existing.rows[0].id]
+          );
+          if (hash.rows[0]?.request_hash !== creationRequestHash) {
+            throw new CollaborationStateConflictError(
+              "Personal Note idempotency key was reused with different content"
+            );
+          }
+          return decryptPersonalNote(
+            client,
+            actor,
+            requireProvider(),
+            existing.rows[0]
+          );
+        }
+        const noteId = randomUUID();
+        const revisionId = randomUUID();
+        const inserted = await client.query<{ id: string }>(
+          `insert into personal_notes (
+             id,owner_user_id,title_marker,title_version,current_revision,
+             idempotency_key_hash,request_hash
+           ) values ($1,$2,$3,1,1,$4,$5)
+           on conflict (owner_user_id,idempotency_key_hash) do nothing
+           returning id`,
+          [
+            noteId,
+            actor.userId,
+            PERSONAL_NOTE_TITLE_MARKER,
+            idempotencyKeyHash,
+            creationRequestHash
+          ]
+        );
+        if (!inserted.rows[0]) {
+          const raced = await client.query<PersonalNoteRow>(
+            `${selectPersonalNoteSql}
+              where note.owner_user_id=$1
+                and note.idempotency_key_hash=$2
+                and note.lifecycle='active'
+              limit 1
+              for update of note`,
+            [actor.userId, idempotencyKeyHash]
+          );
+          const racedHash = await client.query<{ request_hash: string }>(
+            `select request_hash from personal_notes where id=$1`,
+            [raced.rows[0]?.id]
+          );
+          if (
+            !raced.rows[0] ||
+            racedHash.rows[0]?.request_hash !== creationRequestHash
+          ) {
+            throw new CollaborationStateConflictError(
+              "Personal Note idempotency key was reused with different content"
+            );
+          }
+          return decryptPersonalNote(
+            client,
+            actor,
+            requireProvider(),
+            raced.rows[0]
+          );
+        }
+        await client.query(
+          `insert into personal_note_revisions (
+             id,note_id,owner_user_id,revision,idempotency_key_hash,
+             request_hash,body_marker,content_hash
+           ) values ($1,$2,$3,1,$4,$5,$6,$7)`,
+          [
+            revisionId,
+            noteId,
+            actor.userId,
+            idempotencyKeyHash,
+            creationRequestHash,
+            PERSONAL_NOTE_BODY_MARKER,
+            contentHash
+          ]
+        );
+        const deployment = await client.query<{
+          id: string;
+          protocol_deployment_id: string;
+        }>(
+          `select id,protocol_deployment_id
+             from deployment_identities
+            where locality='local' and disabled_at is null
+            limit 1`
+        );
+        const localDeployment = deployment.rows[0];
+        if (!localDeployment) {
+          throw new CollaborationStateConflictError(
+            "Local deployment identity is required for Personal Notes"
+          );
+        }
+        const logicalMemoryId = crossIdentitySyncDeterministicUuid({
+          protocol: "koed.personal-note-share/v1",
+          sourceDeploymentId: localDeployment.protocol_deployment_id,
+          sourceOwnerPrincipalId: actor.userId,
+          noteId,
+          identity: "logical-memory"
+        });
+        await client.query(
+          `insert into logical_memories (
+             id,protocol_logical_id,owner_user_id,owner_principal_id,
+             origin_deployment_identity_id,source_kind,logical_key,
+             latest_source_revision
+           ) values ($1,$1,$2,$2,$3,'personal_note',$4,0)`,
+          [
+            logicalMemoryId,
+            actor.userId,
+            localDeployment.id,
+            `personal_note:${localDeployment.protocol_deployment_id}:${noteId}`
+          ]
+        );
+        await client.query(
+          `insert into personal_note_logical_memories
+             (logical_memory_id,source_note_id,owner_principal_id)
+           values ($1,$2,$3)`,
+          [logicalMemoryId, noteId, actor.userId]
+        );
+        await client.query(
+          `insert into local_personal_note_logical_memories
+             (logical_memory_id,local_note_id,owner_user_id)
+           values ($1,$2,$3)`,
+          [logicalMemoryId, noteId, actor.userId]
+        );
+        await Promise.all([
+          upsertEncryptedFieldPayloadWithClient(
+            client,
+            actor,
+            requireProvider(),
+            {
+              sourceTable: "personal_notes",
+              sourceId: noteId,
+              sourceColumn: "title",
+              plaintext: title,
+              scope: { objectClass: "personal_note" },
+              rowFamily: "personal_note",
+              aad: { noteId, ownerUserId: actor.userId }
+            }
+          ),
+          upsertEncryptedFieldPayloadWithClient(
+            client,
+            actor,
+            requireProvider(),
+            {
+              sourceTable: "personal_note_revisions",
+              sourceId: revisionId,
+              sourceColumn: "body",
+              plaintext: body,
+              scope: { objectClass: "personal_note_revision" },
+              rowFamily: "personal_note_revision",
+              aad: { noteId, revision: 1, ownerUserId: actor.userId }
+            }
+          )
+        ]);
+        await client.query(`select pg_notify('koed_graph_updates',$1)`, [
+          JSON.stringify({
+            table: "personal_notes",
+            operation: "INSERT",
+            id: noteId,
+            ownerUserId: actor.userId,
+            visibility: "personal",
+            changedAt: new Date().toISOString()
+          })
+        ]);
+        const created = await client.query<PersonalNoteRow>(
+          `${selectPersonalNoteSql} where note.id=$1 and note.owner_user_id=$2`,
+          [noteId, actor.userId]
+        );
+        return decryptPersonalNote(
+          client,
+          actor,
+          requireProvider(),
+          created.rows[0]!
+        );
+      });
+    },
+
+    async listPersonalNotes(actor, input = {}) {
+      const limit = boundedLimit(input.limit, 50, 50);
+      const result = await pool.query<PersonalNoteRow>(
+        `${selectPersonalNoteSql}
+          where note.owner_user_id=$1
+            and note.lifecycle='active'
+            and ($2::bigint is null or note.sequence < $2)
+          order by note.sequence desc
+          limit $3`,
+        [actor.userId, input.beforeSequence ?? null, limit + 1]
+      );
+      const hasMore = result.rows.length > limit;
+      const rows = result.rows.slice(0, limit);
+      const notes = await Promise.all(
+        rows.map((row) =>
+          decryptPersonalNote(pool, actor, requireProvider(), row)
+        )
+      );
+      return {
+        notes,
+        nextBeforeSequence: hasMore
+          ? (notes.at(-1)?.sourceSequence ?? null)
+          : null
+      };
+    },
+
+    async getPersonalNote(actor, input) {
+      const result = await pool.query<PersonalNoteRow>(
+        `${selectPersonalNoteSql}
+          where note.id=$1 and note.owner_user_id=$2
+            and note.lifecycle='active'
+          limit 1`,
+        [input.noteId, actor.userId]
+      );
+      return result.rows[0]
+        ? decryptPersonalNote(pool, actor, requireProvider(), result.rows[0])
+        : null;
+    },
+
+    async renamePersonalNote(actor, input) {
+      const title = normalizePersonalNoteTitle(input.title);
+      const expectedTitleVersion = requirePositiveInteger(
+        input.expectedTitleVersion,
+        "expectedTitleVersion"
+      );
+      return withTransaction(pool, async (client) => {
+        const result = await client.query<PersonalNoteRow>(
+          `${selectPersonalNoteSql}
+            where note.id=$1 and note.owner_user_id=$2
+              and note.lifecycle='active'
+            limit 1
+            for update of note`,
+          [input.noteId, actor.userId]
+        );
+        if (!result.rows[0]) return null;
+        const current = await decryptPersonalNote(
+          client,
+          actor,
+          requireProvider(),
+          result.rows[0]
+        );
+        if (current.titleVersion !== expectedTitleVersion) {
+          throw new CollaborationStateConflictError(
+            "Personal Note title version conflict"
+          );
+        }
+        if (current.title === title) return current;
+        const nextVersion = current.titleVersion + 1;
+        await upsertEncryptedFieldPayloadWithClient(
+          client,
+          actor,
+          requireProvider(),
+          {
+            sourceTable: "personal_notes",
+            sourceId: current.noteId,
+            sourceColumn: "title",
+            plaintext: title,
+            scope: { objectClass: "personal_note" },
+            rowFamily: "personal_note",
+            aad: { noteId: current.noteId, ownerUserId: actor.userId }
+          }
+        );
+        await client.query(
+          `update personal_notes
+              set title_version=$3,updated_at=now()
+            where id=$1 and owner_user_id=$2`,
+          [current.noteId, actor.userId, nextVersion]
+        );
+        await client.query(`select pg_notify('koed_graph_updates',$1)`, [
+          JSON.stringify({
+            table: "personal_notes",
+            operation: "UPDATE",
+            id: current.noteId,
+            ownerUserId: actor.userId,
+            visibility: "personal",
+            changedAt: new Date().toISOString()
+          })
+        ]);
+        return { ...current, title, titleVersion: nextVersion };
+      });
+    },
+
+    async updatePersonalNoteBody(actor, input) {
+      const body = requireBoundedText(
+        input.body,
+        "Personal Note body",
+        MAX_MESSAGE_BODY_BYTES
+      );
+      const expectedRevision = requirePositiveInteger(
+        input.expectedRevision,
+        "expectedRevision"
+      );
+      const idempotencyKey = requireBoundedText(
+        input.idempotencyKey,
+        "idempotencyKey",
+        MAX_IDEMPOTENCY_KEY_LENGTH
+      );
+      const idempotencyKeyHash = hashDomain(
+        "personal-note-revision-idempotency",
+        idempotencyKey
+      );
+      const revisionRequestHash = requestHash({ body });
+      const contentHash = hashDomain("personal-note-body", body);
+      return withTransaction(pool, async (client) => {
+        const existing = await client.query<{
+          request_hash: string;
+        }>(
+          `select revision.request_hash
+             from personal_note_revisions revision
+            where revision.note_id=$1
+              and revision.owner_user_id=$2
+              and revision.idempotency_key_hash=$3
+            limit 1`,
+          [input.noteId, actor.userId, idempotencyKeyHash]
+        );
+        if (existing.rows[0]) {
+          if (existing.rows[0].request_hash !== revisionRequestHash) {
+            throw new CollaborationStateConflictError(
+              "Personal Note revision idempotency key was reused with different content"
+            );
+          }
+          const current = await client.query<PersonalNoteRow>(
+            `${selectPersonalNoteSql}
+              where note.id=$1 and note.owner_user_id=$2
+                and note.lifecycle='active'
+              limit 1`,
+            [input.noteId, actor.userId]
+          );
+          if (!current.rows[0]) return null;
+          return decryptPersonalNote(
+            client,
+            actor,
+            requireProvider(),
+            current.rows[0]
+          );
+        }
+        const locked = await client.query<PersonalNoteRow>(
+          `${selectPersonalNoteSql}
+            where note.id=$1 and note.owner_user_id=$2
+              and note.lifecycle='active'
+            limit 1
+            for update of note`,
+          [input.noteId, actor.userId]
+        );
+        if (!locked.rows[0]) return null;
+        const current = locked.rows[0];
+        if (current.current_revision !== expectedRevision) {
+          throw new CollaborationStateConflictError(
+            "Personal Note body revision conflict"
+          );
+        }
+        if (current.content_hash === contentHash) {
+          return decryptPersonalNote(client, actor, requireProvider(), current);
+        }
+        const nextRevision = current.current_revision + 1;
+        const revisionId = randomUUID();
+        await client.query(
+          `insert into personal_note_revisions (
+             id,note_id,owner_user_id,revision,idempotency_key_hash,
+             request_hash,body_marker,content_hash
+           ) values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [
+            revisionId,
+            input.noteId,
+            actor.userId,
+            nextRevision,
+            idempotencyKeyHash,
+            revisionRequestHash,
+            PERSONAL_NOTE_BODY_MARKER,
+            contentHash
+          ]
+        );
+        await upsertEncryptedFieldPayloadWithClient(
+          client,
+          actor,
+          requireProvider(),
+          {
+            sourceTable: "personal_note_revisions",
+            sourceId: revisionId,
+            sourceColumn: "body",
+            plaintext: body,
+            scope: { objectClass: "personal_note_revision" },
+            rowFamily: "personal_note_revision",
+            aad: {
+              noteId: input.noteId,
+              revision: nextRevision,
+              ownerUserId: actor.userId
+            }
+          }
+        );
+        await client.query(
+          `update personal_notes
+              set current_revision=$3,updated_at=now()
+            where id=$1 and owner_user_id=$2`,
+          [input.noteId, actor.userId, nextRevision]
+        );
+        await client.query(`select pg_notify('koed_graph_updates',$1)`, [
+          JSON.stringify({
+            table: "personal_notes",
+            operation: "UPDATE",
+            id: input.noteId,
+            ownerUserId: actor.userId,
+            visibility: "personal",
+            changedAt: new Date().toISOString()
+          })
+        ]);
+        const updated = await client.query<PersonalNoteRow>(
+          `${selectPersonalNoteSql} where note.id=$1 and note.owner_user_id=$2`,
+          [input.noteId, actor.userId]
+        );
+        return decryptPersonalNote(
+          client,
+          actor,
+          requireProvider(),
+          updated.rows[0]!
+        );
+      });
+    },
+
+    async listPendingPersonalNoteRevisions(input = {}) {
+      const limit = boundedLimit(input.limit, 100, 50);
+      const result = await pool.query<{
+        owner_user_id: string;
+        note_id: string;
+        revision: number;
+      }>(
+        `select revision.owner_user_id,revision.note_id,revision.revision
+           from personal_note_revisions revision
+           join personal_notes note
+             on note.id=revision.note_id
+            and note.owner_user_id=revision.owner_user_id
+            and note.current_revision=revision.revision
+          where note.lifecycle='active'
+            and revision.projection_state in ('pending','failed')
+          order by revision.created_at,revision.id
+          limit $1`,
+        [limit]
+      );
+      return result.rows.map((row) => ({
+        ownerUserId: row.owner_user_id,
+        noteId: row.note_id,
+        revision: row.revision
+      }));
+    },
+
+    async markPersonalNoteProjectionAvailable(actor, input) {
+      return withTransaction(pool, async (client) => {
+        const updated = await client.query<{
+          note_id: string;
+          id: string;
+          content_hash: string;
+        }>(
+          `update personal_note_revisions revision
+              set projection_state='available',memory_event_id=$4,
+                  projection_failure_code=null,projected_at=now(),
+                  superseded_at=null
+             from personal_notes note
+            where revision.note_id=$1 and revision.owner_user_id=$2
+              and revision.revision=$3
+              and note.id=revision.note_id
+              and note.owner_user_id=revision.owner_user_id
+              and note.current_revision=revision.revision
+              and note.lifecycle='active'
+              and revision.projection_state in ('pending','failed','available')
+            returning revision.note_id,revision.id,revision.content_hash`,
+          [input.noteId, actor.userId, input.revision, input.memoryEventId]
+        );
+        if (!updated.rows[0]) {
+          await client.query(
+            `update memory_events
+                set invalidated_at=coalesce(invalidated_at,now()),
+                    invalidation_reason='personal_note_projection_race',
+                    include_in_embedding=false,
+                    updated_at=now()
+              where id=$1 and owner_user_id=$2 and visibility='personal'
+                and payload ->> 'rawEventType'='personal_note_revision'
+                and payload #>> '{metadata,personalNoteId}'=$3
+                and payload #>> '{metadata,personalNoteRevision}'=$4`,
+            [
+              input.memoryEventId,
+              actor.userId,
+              input.noteId,
+              String(input.revision)
+            ]
+          );
+          return null;
+        }
+        const sourceRoot = await client.query<{ logical_memory_id: string }>(
+          `select logical_memory_id
+             from local_personal_note_logical_memories
+            where local_note_id=$1 and owner_user_id=$2
+            limit 1`,
+          [input.noteId, actor.userId]
+        );
+        const logicalMemoryId = sourceRoot.rows[0]?.logical_memory_id;
+        if (!logicalMemoryId) {
+          throw new CollaborationStateConflictError(
+            "Personal Note logical Memory binding is unavailable"
+          );
+        }
+        const source = {
+          kind: "personal_note" as const,
+          noteId: input.noteId,
+          noteRevision: input.revision,
+          memoryEventId: input.memoryEventId,
+          logicalMemoryId
+        };
+        const sourceRevisionIdentity = logicalMemorySourceRevisionIdentity({
+          source,
+          ownerPrincipalId: actor.userId,
+          sourceRevision: input.revision
+        });
+        const sourceRevisionBindingHash = sourceRevisionIdentity.bindingHash;
+        const deterministicSourceRevisionId = sourceRevisionIdentity.id;
+        const sourceRevision = await client.query<{ id: string }>(
+          `insert into logical_memory_source_revisions
+             (id,logical_memory_id,owner_principal_id,source_kind,revision,
+              binding_hash)
+           values ($1,$2,$3,'personal_note',$4,$5)
+           on conflict (logical_memory_id,revision) do update
+             set binding_hash=logical_memory_source_revisions.binding_hash
+           where logical_memory_source_revisions.owner_principal_id=excluded.owner_principal_id
+             and logical_memory_source_revisions.source_kind=excluded.source_kind
+             and logical_memory_source_revisions.binding_hash=excluded.binding_hash
+           returning id`,
+          [
+            deterministicSourceRevisionId,
+            logicalMemoryId,
+            actor.userId,
+            input.revision,
+            sourceRevisionBindingHash
+          ]
+        );
+        const sourceRevisionId = sourceRevision.rows[0]?.id;
+        if (!sourceRevisionId) {
+          throw new CollaborationStateConflictError(
+            "Personal Note source revision binding changed"
+          );
+        }
+        const sourceBinding = await client.query<{
+          source_revision_id: string;
+        }>(
+          `insert into personal_note_source_revisions (
+             source_revision_id,logical_memory_id,owner_principal_id,
+             source_note_id,revision,source_memory_event_id
+           ) values ($1,$2,$3,$4,$5,$6)
+           on conflict (source_note_id,revision) do update
+             set source_revision_id=personal_note_source_revisions.source_revision_id
+           where personal_note_source_revisions.source_revision_id=excluded.source_revision_id
+             and personal_note_source_revisions.source_memory_event_id=excluded.source_memory_event_id
+           returning source_revision_id`,
+          [
+            sourceRevisionId,
+            logicalMemoryId,
+            actor.userId,
+            input.noteId,
+            input.revision,
+            input.memoryEventId
+          ]
+        );
+        if (!sourceBinding.rows[0]) {
+          throw new CollaborationStateConflictError(
+            "Personal Note source revision binding changed"
+          );
+        }
+        await client.query(
+          `insert into local_personal_note_source_revisions (
+             source_revision_id,note_revision_id,local_note_id,revision,
+             local_memory_event_id
+           ) values ($1,$2,$3,$4,$5)
+           on conflict (source_revision_id) do nothing`,
+          [
+            sourceRevisionId,
+            updated.rows[0].id,
+            input.noteId,
+            input.revision,
+            input.memoryEventId
+          ]
+        );
+        await client.query(
+          `update logical_memories
+              set latest_source_revision=greatest(latest_source_revision,$2),
+                  updated_at=now()
+            where id=$1 and owner_principal_id=$3 and source_kind='personal_note'`,
+          [logicalMemoryId, input.revision, actor.userId]
+        );
+        await client.query(
+          `update memory_events event
+              set invalidated_at=coalesce(event.invalidated_at,now()),
+                  invalidation_reason='personal_note_revision_superseded',
+                  updated_at=now()
+             from personal_note_revisions revision
+            where revision.note_id=$1
+              and revision.owner_user_id=$2
+              and revision.revision < $3
+              and revision.memory_event_id=event.id
+              and event.owner_user_id=$2
+              and event.visibility='personal'`,
+          [input.noteId, actor.userId, input.revision]
+        );
+        await client.query(
+          `update personal_note_revisions
+              set projection_state='superseded',superseded_at=now(),
+                  projection_failure_code=null
+            where note_id=$1 and owner_user_id=$2
+              and revision < $3
+              and projection_state in ('pending','available','failed')`,
+          [input.noteId, actor.userId, input.revision]
+        );
+        await client.query(
+          `update collaboration_continuous_note_advancement_work work
+              set state='completed',locked_at=null,completed_at=now(),
+                  redacted_failure_code='superseded',updated_at=now()
+             from collaboration_shared_memory_enrollments enrollment,
+                  personal_note_source_revisions source_revision,
+                  local_personal_note_source_revisions local_source_revision
+            where work.enrollment_id=enrollment.id
+              and work.source_revision_id=source_revision.source_revision_id
+              and local_source_revision.source_revision_id=source_revision.source_revision_id
+              and enrollment.local_owner_user_id=$2
+              and enrollment.revoked_at is null
+              and local_source_revision.local_note_id=$1
+              and source_revision.revision<$3
+              and work.state in ('pending','failed')`,
+          [input.noteId, actor.userId, input.revision]
+        );
+        await client.query(
+          `insert into collaboration_continuous_note_advancement_work
+             (enrollment_id,local_owner_user_id,source_revision_id)
+           select enrollment.id,$1,$2
+             from collaboration_shared_memory_enrollments enrollment
+            where enrollment.local_owner_user_id=$1
+              and enrollment.revoked_at is null
+              and exists (
+                select 1
+                  from collaboration_shared_memory_grants active_grant
+                 where active_grant.enrollment_id=enrollment.id
+                   and active_grant.logical_memory_id=$3
+                   and active_grant.mode='continuous'
+                   and active_grant.lifecycle='active'
+                   and not exists (
+                     select 1
+                       from collaboration_shared_memory_grants newer_grant
+                      where newer_grant.enrollment_id=active_grant.enrollment_id
+                        and newer_grant.share_grant_id=active_grant.share_grant_id
+                        and newer_grant.grant_version>active_grant.grant_version
+                   )
+              )
+           on conflict (enrollment_id,source_revision_id)
+           do nothing`,
+          [actor.userId, sourceRevisionId, logicalMemoryId]
+        );
+        await client.query(`select pg_notify('koed_graph_updates',$1)`, [
+          JSON.stringify({
+            table: "personal_notes",
+            operation: "UPDATE",
+            id: input.noteId,
+            ownerUserId: actor.userId,
+            visibility: "personal",
+            changedAt: new Date().toISOString()
+          })
+        ]);
+        const current = await client.query<PersonalNoteRow>(
+          `${selectPersonalNoteSql}
+           where note.id=$1 and note.owner_user_id=$2 and note.lifecycle='active'`,
+          [input.noteId, actor.userId]
+        );
+        if (!current.rows[0]) return null;
+        return decryptPersonalNote(
+          client,
+          actor,
+          requireProvider(),
+          current.rows[0]
+        );
+      });
+    },
+
+    async markPersonalNoteProjectionFailed(actor, input) {
+      const failureCode = input.failureCode.trim().slice(0, 80);
+      if (!failureCode) throw new TypeError("failureCode is required");
+      await pool.query(
+        `update personal_note_revisions revision
+            set projection_state='failed',projection_failure_code=$4,
+                memory_event_id=null,projected_at=null
+           from personal_notes note
+          where revision.note_id=$1 and revision.owner_user_id=$2
+            and revision.revision=$3
+            and note.id=revision.note_id
+            and note.owner_user_id=revision.owner_user_id
+            and note.current_revision=revision.revision
+            and note.lifecycle='active'
+            and revision.projection_state in ('pending','failed')`,
+        [input.noteId, actor.userId, input.revision, failureCode]
       );
     },
 

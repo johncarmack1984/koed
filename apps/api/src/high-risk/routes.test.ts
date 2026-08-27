@@ -252,7 +252,7 @@ const buildServer = async (overrides?: {
       currentAccessVersion: 1
     })),
     getSharedMemoryCandidatePreviewAdmission: vi.fn(async (_actor, input) => ({
-      effectivePolicyIntersection: input.allowedRepresentations,
+      effectivePolicyIntersection: input.sourceCapabilities,
       teamPolicyVersion: 1,
       teamPolicyHash: "a".repeat(64),
       workspacePolicyVersion: 1,
@@ -267,7 +267,7 @@ const buildServer = async (overrides?: {
       team: { id: input.teamId, name: "Koed Team" },
       workspace: { id: input.teamWorkspaceId, name: "Product" },
       remoteReplicaId: input.remoteReplicaId,
-      representation: input.representation,
+      representation: input.activationRepresentation,
       requestedMaximumFidelity: input.maximumFidelity,
       requestedIncludeCuratedMemory: input.includeCuratedMemory,
       effectiveMaximumFidelity: input.maximumFidelity,
@@ -307,10 +307,11 @@ const buildServer = async (overrides?: {
         previewId: input.preview.previewId,
         previewHash: input.preview.previewHash,
         previewRevision: input.previewRevision,
-        representation: input.selectedRepresentation,
+        representation: input.activationRepresentation,
         sourceRevision: 1
       },
-      effectivePolicyIntersection: input.allowedRepresentations,
+      maximumFidelity: input.maximumFidelity,
+      includeCuratedMemory: input.includeCuratedMemory,
       sourceOwnerPolicyWillActivate: true as const,
       sourceOwnerPolicyWillReplace: false as const
     })),
@@ -1015,11 +1016,18 @@ describe("high-risk action grant routes", () => {
         grantCommitment: `v1:${"f".repeat(64)}`,
         intent: {
           action: "shared_memory.preview",
+          source: {
+            kind: "captured_session",
+            sessionId: ids.target,
+            logicalMemoryId: ids.target
+          },
+          sourceCapabilities: ["memory_events"],
+          activationRepresentation: "memory_events",
           logicalMemoryId: ids.target,
           remoteReplicaId: ids.target,
           teamId: ids.team,
           teamWorkspaceId: ids.target,
-          representation: "memory_events",
+          mode: "snapshot",
           maximumFidelity: "memory_events",
           includeCuratedMemory: false
         }
@@ -1061,11 +1069,18 @@ describe("high-risk action grant routes", () => {
     });
     const expectedSharedBinding = sharedMemoryPreviewActionGrantBinding({
       referenceId: binding.id,
+      source: {
+        kind: "captured_session",
+        sessionId: ids.target,
+        logicalMemoryId: ids.target
+      },
+      sourceCapabilities: ["memory_events"],
+      activationRepresentation: "memory_events",
       logicalMemoryId: ids.target,
       remoteReplicaId: ids.target,
       teamId: ids.team,
       teamWorkspaceId: ids.target,
-      representation: "memory_events",
+      mode: "snapshot",
       maximumFidelity: "memory_events",
       includeCuratedMemory: false
     });
@@ -1074,8 +1089,7 @@ describe("high-risk action grant routes", () => {
         .mock.calls[0]?.[0]
     ).toMatchObject({
       operationFamily: "share_grant_management",
-      action:
-        "shared_memory.preview.memory_events.max_memory_events.curated_false",
+      action: expectedSharedBinding.action,
       teamId: ids.team,
       targetId: ids.target,
       scopeHash: expectedSharedBinding.scopeHash,
@@ -1098,11 +1112,18 @@ describe("high-risk action grant routes", () => {
         grantCommitment: `v1:${"c".repeat(64)}`,
         intent: {
           action: "shared_memory.preview",
+          source: {
+            kind: "captured_session",
+            sessionId: ids.target,
+            logicalMemoryId: ids.target
+          },
+          sourceCapabilities: ["memory_events"],
+          activationRepresentation: "memory_events",
           logicalMemoryId: ids.target,
           remoteReplicaId: ids.target,
           teamId: ids.team,
           teamWorkspaceId: ids.target,
-          representation: "memory_events",
+          mode: "snapshot",
           maximumFidelity: "memory_events",
           includeCuratedMemory: false
         }
@@ -1118,7 +1139,7 @@ describe("high-risk action grant routes", () => {
     const fixture = await buildServer({
       deviceOperationFamilies: ["share_grant_management"],
       repository: {
-        getSharedMemoryShareReview: vi.fn(async (_actor, input) => ({
+        getSharedMemoryPendingShareReview: vi.fn(async (_actor, input) => ({
           source: {
             logicalMemoryId,
             title: "Quarterly planning with Platform",
@@ -1130,14 +1151,13 @@ describe("high-risk action grant routes", () => {
             previewId: input.preview.previewId,
             previewHash: input.preview.previewHash,
             previewRevision: input.previewRevision,
-            remoteReplicaId: ids.target,
-            representation: input.maximumFidelity,
+            representation: input.activationRepresentation,
             sourceRevision: 1
           },
           maximumFidelity: input.maximumFidelity,
           includeCuratedMemory: input.includeCuratedMemory,
-          sourceOwnerPolicyWillActivate: false,
-          sourceOwnerPolicyWillReplace: false
+          sourceOwnerPolicyWillActivate: true as const,
+          sourceOwnerPolicyWillReplace: false as const
         }))
       }
     });
@@ -1151,7 +1171,14 @@ describe("high-risk action grant routes", () => {
         clientRequestId: randomUUID(),
         grantCommitment: `v1:${"a".repeat(64)}`,
         intent: {
-          action: "shared_memory.share",
+          action: "shared_memory.pending_share",
+          source: {
+            kind: "captured_session",
+            sessionId: randomUUID(),
+            logicalMemoryId
+          },
+          sourceCapabilities: ["lcm_rollups", "lcm_leaves", "memory_events"],
+          activationRepresentation: "lcm_rollups",
           mutationId: randomUUID(),
           logicalGrantId: randomUUID(),
           logicalMemoryId,

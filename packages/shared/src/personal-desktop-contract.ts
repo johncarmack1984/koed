@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const PERSONAL_DESKTOP_CONTRACT_VERSION = 3;
+export const PERSONAL_DESKTOP_CONTRACT_VERSION = 7;
 export const PERSONAL_DESKTOP_INITIAL_EVENT_LIMIT = 50;
 export const PERSONAL_DESKTOP_OLDER_EVENT_LIMIT = 500;
 
@@ -203,6 +203,7 @@ export const personalDesktopProjectThreadSchema = z
     id: identifierSchema,
     name: z.string().max(512),
     sessionId: z.uuid().nullable(),
+    logicalMemoryId: z.uuid().nullable().optional(),
     sourceAiClient: z
       .enum(["codex", "codex-cli", "claude-code", "pi"])
       .nullable(),
@@ -332,13 +333,29 @@ export const personalDesktopChangeEventRefSchema = z
   })
   .strict();
 
-export const personalDesktopChangeSchema = z
-  .object({
-    contractVersion: z.literal(PERSONAL_DESKTOP_CONTRACT_VERSION),
-    type: z.literal("conversation_events_changed"),
-    eventRefs: z.array(personalDesktopChangeEventRefSchema).min(1).max(500)
-  })
-  .strict();
+export const personalDesktopChangeSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      contractVersion: z.literal(PERSONAL_DESKTOP_CONTRACT_VERSION),
+      type: z.literal("conversation_events_changed"),
+      eventRefs: z.array(personalDesktopChangeEventRefSchema).min(1).max(500)
+    })
+    .strict(),
+  z
+    .object({
+      contractVersion: z.literal(PERSONAL_DESKTOP_CONTRACT_VERSION),
+      type: z.literal("ask_questions_changed"),
+      questionIds: z.array(z.uuid()).min(1).max(500)
+    })
+    .strict(),
+  z
+    .object({
+      contractVersion: z.literal(PERSONAL_DESKTOP_CONTRACT_VERSION),
+      type: z.literal("notes_changed"),
+      noteIds: z.array(z.uuid()).min(1).max(500)
+    })
+    .strict()
+]);
 
 export const personalDesktopEventPageInputSchema = z
   .object({
@@ -398,6 +415,110 @@ export const personalDesktopSessionTitleInputSchema = z
   })
   .strict();
 
+export const personalDesktopAskTurnSchema = z
+  .object({
+    id: z.uuid(),
+    askThreadId: z.uuid(),
+    askTurnIndex: z.number().int().safe().nonnegative(),
+    query: z.string().min(1).max(32_000),
+    answerMarkdown: z.string().max(1_048_576).nullable(),
+    errorMessage: z.string().max(8_192).nullable(),
+    status: z.enum(["pending", "answered", "error"]),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+    answeredAt: timestampSchema.nullable()
+  })
+  .strict();
+
+export const personalDesktopAskThreadSchema = z
+  .object({
+    askThreadId: z.uuid(),
+    firstQuestion: z.string().min(1).max(32_000),
+    latestStatus: z.enum(["pending", "answered", "error"]),
+    turnCount: z.number().int().safe().positive(),
+    updatedAt: timestampSchema
+  })
+  .strict();
+
+export const personalDesktopAskListInputSchema = z
+  .object({
+    cursor: z.string().min(1).max(512).optional(),
+    limit: z.literal(50)
+  })
+  .strict();
+
+export const personalDesktopAskThreadInputSchema = z
+  .object({ askThreadId: z.uuid() })
+  .strict();
+
+export const personalDesktopAskSubmitInputSchema = z
+  .object({
+    askThreadId: z.uuid().optional(),
+    idempotencyKey: z.string().trim().min(1).max(500),
+    query: z.string().trim().min(1).max(32_000)
+  })
+  .strict();
+
+export const personalDesktopNoteSummarySchema = z
+  .object({
+    noteId: z.uuid(),
+    title: z.string().trim().min(1).max(80),
+    titleVersion: z.number().int().safe().positive(),
+    revisionId: z.uuid(),
+    revision: z.number().int().safe().positive(),
+    contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+    memoryEventId: z.uuid().nullable(),
+    projectionState: z.enum(["pending", "available", "failed"]),
+    projectionFailureCode: z.string().max(80).nullable(),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+    sourceSequence: z.number().int().safe().positive()
+  })
+  .strict();
+
+export const personalDesktopNoteSchema = personalDesktopNoteSummarySchema
+  .extend({
+    body: z.string().min(1).max(32_768),
+    logicalMemoryId: z.uuid(),
+    event: personalDesktopConversationEventSchema.nullable()
+  })
+  .strict();
+
+export const personalDesktopNoteListInputSchema = z
+  .object({
+    beforeSequence: z.number().int().safe().positive().optional(),
+    limit: z.number().int().safe().min(1).max(50)
+  })
+  .strict();
+
+export const personalDesktopNoteLoadInputSchema = z
+  .object({ noteId: z.uuid() })
+  .strict();
+
+export const personalDesktopNoteCreateInputSchema = z
+  .object({
+    body: z.string().trim().min(1).max(32_768),
+    idempotencyKey: z.string().trim().min(1).max(500)
+  })
+  .strict();
+
+export const personalDesktopNoteRenameInputSchema = z
+  .object({
+    noteId: z.uuid(),
+    expectedTitleVersion: z.number().int().safe().positive(),
+    title: z.string().trim().min(1).max(80)
+  })
+  .strict();
+
+export const personalDesktopNoteUpdateInputSchema = z
+  .object({
+    noteId: z.uuid(),
+    expectedRevision: z.number().int().safe().positive(),
+    body: z.string().trim().min(1).max(32_768),
+    idempotencyKey: z.string().trim().min(1).max(500)
+  })
+  .strict();
+
 export const personalDesktopRequestSchema = z.discriminatedUnion("operation", [
   z
     .object({
@@ -433,6 +554,62 @@ export const personalDesktopRequestSchema = z.discriminatedUnion("operation", [
       operation: z.literal("personal.sessions.update_title"),
       input: personalDesktopSessionTitleInputSchema
     })
+    .strict(),
+  z
+    .object({
+      contractVersion: z.literal(PERSONAL_DESKTOP_CONTRACT_VERSION),
+      operation: z.literal("personal.ask.threads.list"),
+      input: personalDesktopAskListInputSchema
+    })
+    .strict(),
+  z
+    .object({
+      contractVersion: z.literal(PERSONAL_DESKTOP_CONTRACT_VERSION),
+      operation: z.literal("personal.ask.thread.load"),
+      input: personalDesktopAskThreadInputSchema
+    })
+    .strict(),
+  z
+    .object({
+      contractVersion: z.literal(PERSONAL_DESKTOP_CONTRACT_VERSION),
+      operation: z.literal("personal.ask.submit"),
+      input: personalDesktopAskSubmitInputSchema
+    })
+    .strict(),
+  z
+    .object({
+      contractVersion: z.literal(PERSONAL_DESKTOP_CONTRACT_VERSION),
+      operation: z.literal("personal.notes.list"),
+      input: personalDesktopNoteListInputSchema
+    })
+    .strict(),
+  z
+    .object({
+      contractVersion: z.literal(PERSONAL_DESKTOP_CONTRACT_VERSION),
+      operation: z.literal("personal.notes.load"),
+      input: personalDesktopNoteLoadInputSchema
+    })
+    .strict(),
+  z
+    .object({
+      contractVersion: z.literal(PERSONAL_DESKTOP_CONTRACT_VERSION),
+      operation: z.literal("personal.notes.create"),
+      input: personalDesktopNoteCreateInputSchema
+    })
+    .strict(),
+  z
+    .object({
+      contractVersion: z.literal(PERSONAL_DESKTOP_CONTRACT_VERSION),
+      operation: z.literal("personal.notes.rename"),
+      input: personalDesktopNoteRenameInputSchema
+    })
+    .strict(),
+  z
+    .object({
+      contractVersion: z.literal(PERSONAL_DESKTOP_CONTRACT_VERSION),
+      operation: z.literal("personal.notes.update"),
+      input: personalDesktopNoteUpdateInputSchema
+    })
     .strict()
 ]);
 
@@ -464,6 +641,36 @@ export const personalDesktopSessionTitleDataSchema = z
   .object({
     title: z.string().trim().min(1).max(120)
   })
+  .strict();
+
+export const personalDesktopAskThreadsDataSchema = z
+  .object({
+    threads: z.array(personalDesktopAskThreadSchema).max(50),
+    nextCursor: z.string().max(512).nullable()
+  })
+  .strict();
+
+export const personalDesktopAskThreadDataSchema = z
+  .object({ turns: z.array(personalDesktopAskTurnSchema).max(10_000) })
+  .strict();
+
+export const personalDesktopAskSubmitDataSchema = z
+  .object({ question: personalDesktopAskTurnSchema })
+  .strict();
+
+export const personalDesktopNotesDataSchema = z
+  .object({
+    notes: z.array(personalDesktopNoteSummarySchema).max(50),
+    nextBeforeSequence: z.number().int().safe().positive().nullable()
+  })
+  .strict();
+
+export const personalDesktopNoteDataSchema = z
+  .object({ note: personalDesktopNoteSchema })
+  .strict();
+
+export const personalDesktopNoteRenameDataSchema = z
+  .object({ note: personalDesktopNoteSummarySchema })
   .strict();
 
 export const personalDesktopErrorSchema = z
@@ -538,7 +745,79 @@ export const personalDesktopResultSchema = z.union([
       data: personalDesktopSessionTitleDataSchema
     })
     .strict(),
-  failedResult("personal.sessions.update_title")
+  failedResult("personal.sessions.update_title"),
+  z
+    .object({
+      ...resultBase,
+      operation: z.literal("personal.ask.threads.list"),
+      ok: z.literal(true),
+      data: personalDesktopAskThreadsDataSchema
+    })
+    .strict(),
+  failedResult("personal.ask.threads.list"),
+  z
+    .object({
+      ...resultBase,
+      operation: z.literal("personal.ask.thread.load"),
+      ok: z.literal(true),
+      data: personalDesktopAskThreadDataSchema
+    })
+    .strict(),
+  failedResult("personal.ask.thread.load"),
+  z
+    .object({
+      ...resultBase,
+      operation: z.literal("personal.ask.submit"),
+      ok: z.literal(true),
+      data: personalDesktopAskSubmitDataSchema
+    })
+    .strict(),
+  failedResult("personal.ask.submit"),
+  z
+    .object({
+      ...resultBase,
+      operation: z.literal("personal.notes.list"),
+      ok: z.literal(true),
+      data: personalDesktopNotesDataSchema
+    })
+    .strict(),
+  failedResult("personal.notes.list"),
+  z
+    .object({
+      ...resultBase,
+      operation: z.literal("personal.notes.load"),
+      ok: z.literal(true),
+      data: personalDesktopNoteDataSchema
+    })
+    .strict(),
+  failedResult("personal.notes.load"),
+  z
+    .object({
+      ...resultBase,
+      operation: z.literal("personal.notes.create"),
+      ok: z.literal(true),
+      data: personalDesktopNoteDataSchema
+    })
+    .strict(),
+  failedResult("personal.notes.create"),
+  z
+    .object({
+      ...resultBase,
+      operation: z.literal("personal.notes.rename"),
+      ok: z.literal(true),
+      data: personalDesktopNoteRenameDataSchema
+    })
+    .strict(),
+  failedResult("personal.notes.rename"),
+  z
+    .object({
+      ...resultBase,
+      operation: z.literal("personal.notes.update"),
+      ok: z.literal(true),
+      data: personalDesktopNoteDataSchema
+    })
+    .strict(),
+  failedResult("personal.notes.update")
 ]);
 
 export type PersonalDesktopProjectThread = z.infer<
@@ -574,6 +853,40 @@ export type PersonalDesktopSessionProjectInput = z.infer<
 >;
 export type PersonalDesktopSessionTitleInput = z.infer<
   typeof personalDesktopSessionTitleInputSchema
+>;
+export type PersonalDesktopAskTurn = z.infer<
+  typeof personalDesktopAskTurnSchema
+>;
+export type PersonalDesktopAskThread = z.infer<
+  typeof personalDesktopAskThreadSchema
+>;
+export type PersonalDesktopAskListInput = z.infer<
+  typeof personalDesktopAskListInputSchema
+>;
+export type PersonalDesktopAskThreadInput = z.infer<
+  typeof personalDesktopAskThreadInputSchema
+>;
+export type PersonalDesktopAskSubmitInput = z.infer<
+  typeof personalDesktopAskSubmitInputSchema
+>;
+export type PersonalDesktopNoteSummary = z.infer<
+  typeof personalDesktopNoteSummarySchema
+>;
+export type PersonalDesktopNote = z.infer<typeof personalDesktopNoteSchema>;
+export type PersonalDesktopNoteListInput = z.infer<
+  typeof personalDesktopNoteListInputSchema
+>;
+export type PersonalDesktopNoteLoadInput = z.infer<
+  typeof personalDesktopNoteLoadInputSchema
+>;
+export type PersonalDesktopNoteCreateInput = z.infer<
+  typeof personalDesktopNoteCreateInputSchema
+>;
+export type PersonalDesktopNoteRenameInput = z.infer<
+  typeof personalDesktopNoteRenameInputSchema
+>;
+export type PersonalDesktopNoteUpdateInput = z.infer<
+  typeof personalDesktopNoteUpdateInputSchema
 >;
 export type PersonalDesktopRequest = z.infer<
   typeof personalDesktopRequestSchema
@@ -657,5 +970,31 @@ export interface PersonalDesktopApi {
   updateSessionTitle: (
     input: PersonalDesktopSessionTitleInput
   ) => Promise<{ title: string }>;
+  listAskThreads?: (input: PersonalDesktopAskListInput) => Promise<{
+    threads: PersonalDesktopAskThread[];
+    nextCursor: string | null;
+  }>;
+  loadAskThread?: (
+    input: PersonalDesktopAskThreadInput
+  ) => Promise<PersonalDesktopAskTurn[]>;
+  submitAsk?: (
+    input: PersonalDesktopAskSubmitInput
+  ) => Promise<PersonalDesktopAskTurn>;
+  listNotes?: (input: PersonalDesktopNoteListInput) => Promise<{
+    notes: PersonalDesktopNoteSummary[];
+    nextBeforeSequence: number | null;
+  }>;
+  loadNote?: (
+    input: PersonalDesktopNoteLoadInput
+  ) => Promise<PersonalDesktopNote>;
+  createNote?: (
+    input: PersonalDesktopNoteCreateInput
+  ) => Promise<PersonalDesktopNote>;
+  renameNote?: (
+    input: PersonalDesktopNoteRenameInput
+  ) => Promise<PersonalDesktopNoteSummary>;
+  updateNote?: (
+    input: PersonalDesktopNoteUpdateInput
+  ) => Promise<PersonalDesktopNote>;
   subscribe: (listener: (change: PersonalDesktopChange) => void) => () => void;
 }

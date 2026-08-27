@@ -1,10 +1,14 @@
-import type {
-  CollaborationDurableSend,
+import {
+  TEAM_ACTIVITY_WRITE_THROTTLE_MS,
+  type CollaborationDurableSend,
   CollaborationSelection,
   CollaborationSnapshot,
   CollaborationThreadReference
 } from "@koed/shared/collaboration";
-import type { PersonalDesktopApi } from "@koed/shared/personal-desktop";
+import type {
+  PersonalDesktopApi,
+  PersonalDesktopAskThread
+} from "@koed/shared/personal-desktop";
 import { Button, ToastProvider } from "@koed/ui";
 import { AlertTriangle, LoaderCircle } from "lucide-react";
 import {
@@ -28,6 +32,8 @@ import type {
   PersonalMemoryRoute
 } from "./views/personal/index.js";
 import { SharesStatusView } from "./views/personal/index.js";
+import { PersonalAskView } from "./views/personal/PersonalAskView.js";
+import { PersonalNotesView } from "./views/personal/PersonalNotesView.js";
 import {
   ActionGrantStatus,
   CollaborationAnnouncementToast
@@ -99,6 +105,47 @@ const fallbackCollaborationClient = (): CollaborationRendererClient =>
     subscribe: () => () => undefined
   });
 
+const PERSONAL_ASK_RECENTS_CACHE_LIMIT = 500;
+
+const mergeAskRecents = (
+  current: readonly PersonalDesktopAskThread[],
+  incoming: readonly PersonalDesktopAskThread[],
+  selectedAskThreadId: string | undefined,
+  replace: boolean
+): PersonalDesktopAskThread[] => {
+  const merged = replace ? [...incoming] : [...current];
+  const positions = new Map(
+    merged.map((thread, index) => [thread.askThreadId, index])
+  );
+  for (const thread of incoming) {
+    const position = positions.get(thread.askThreadId);
+    if (position === undefined) {
+      positions.set(thread.askThreadId, merged.length);
+      merged.push(thread);
+    } else {
+      merged[position] = thread;
+    }
+  }
+  if (replace && selectedAskThreadId) {
+    const selected = current.find(
+      (thread) => thread.askThreadId === selectedAskThreadId
+    );
+    if (selected && !positions.has(selected.askThreadId)) merged.push(selected);
+  }
+  if (merged.length <= PERSONAL_ASK_RECENTS_CACHE_LIMIT) return merged;
+  const bounded = merged.slice(0, PERSONAL_ASK_RECENTS_CACHE_LIMIT);
+  const selected = selectedAskThreadId
+    ? merged.find((thread) => thread.askThreadId === selectedAskThreadId)
+    : undefined;
+  if (
+    selected &&
+    !bounded.some((thread) => thread.askThreadId === selected.askThreadId)
+  ) {
+    bounded[bounded.length - 1] = selected;
+  }
+  return bounded;
+};
+
 const defaultClient = createCollaborationRendererClient(
   window.koedDesktop?.collaboration ?? {
     command: async () => {
@@ -109,11 +156,17 @@ const defaultClient = createCollaborationRendererClient(
 );
 const statusStore = new DesktopStatusStore();
 const themeStore = new ThemeStore();
-const initialEntry = (onboardingComplete: boolean): NavigationEntry => ({
+const initialEntry = (
+  onboardingComplete: boolean,
+  askAvailable: boolean
+): NavigationEntry => ({
   authority: { backendId: null, principalId: "local-personal" },
-  route: onboardingComplete
-    ? { kind: "personal-memory-projects" }
-    : { kind: "onboarding" }
+  route:
+    onboardingComplete && askAvailable
+      ? { kind: "personal-memory-ask" }
+      : onboardingComplete
+        ? { kind: "personal-memory-projects" }
+        : { kind: "onboarding" }
 });
 
 type SharesRouteStatus =
@@ -195,8 +248,6 @@ const selectionRoute = (selection: CollaborationSelection): DesktopRoute => {
   switch (selection.kind) {
     case "personal_memory":
       return { kind: "personal-memory-projects" };
-    case "notes_to_self":
-      return { kind: "personal-chat", threadId: "notes-to-self" };
     case "personal_channel":
       return { kind: "personal-chat", threadId: selection.threadId };
     case "team_people":
@@ -377,6 +428,11 @@ export function App({
   statusReadyOverride,
   statusStoreOverride
 }: AppProps = {}) {
+  const askAvailable = Boolean(
+    personalMemoryApi?.submitAsk &&
+    personalMemoryApi.listAskThreads &&
+    personalMemoryApi.loadAskThread
+  );
   const activeStatusStore = statusStoreOverride ?? statusStore;
   const [navigation, dispatch] = useReducer(
     navigationReducer,
@@ -386,7 +442,7 @@ export function App({
       return createNavigationState(
         initialCollaborationSelection && initialSnapshot
           ? selectionEntry(initialSnapshot, initialCollaborationSelection)
-          : initialEntry(onboardingComplete)
+          : initialEntry(onboardingComplete, askAvailable)
       );
     }
   );
@@ -397,6 +453,11 @@ export function App({
   const [pendingDevicePairingLink, setPendingDevicePairingLink] = useState("");
   const [commandOpen, setCommandOpen] = useState(false);
   const [sharesLoadUnavailable, setSharesLoadUnavailable] = useState(false);
+  const [askRecents, setAskRecents] = useState<PersonalDesktopAskThread[]>([]);
+  const [askRecentsNextCursor, setAskRecentsNextCursor] = useState<
+    string | null
+  >(null);
+  const [askRecentsError, setAskRecentsError] = useState<string | null>(null);
   const [managedConversationRevision, setManagedConversationRevision] =
     useState(0);
   const initialSelectionApplied = useRef(
@@ -436,13 +497,95 @@ export function App({
     localSetupReady ?? false
   );
   const route = currentNavigationEntry(navigation).route;
+  const selectedAskThreadId =
+    route.kind === "personal-memory-ask" ? route.askThreadId : undefined;
   const snapshot = collaboration.snapshot;
   const liveHealthRefreshKey = useRef<string | null>(null);
+  const lastTeamActivityReportAt = useRef(0);
   const activeTeamId = routeTeamId(route);
   const commands = useMemo(
     () => commandEntriesForSnapshot(snapshot, activeTeamId),
     [activeTeamId, snapshot]
   );
+
+  const refreshAskRecents = useCallback(async () => {
+    if (!personalMemoryApi?.listAskThreads) return;
+    try {
+      const page = await personalMemoryApi.listAskThreads({ limit: 50 });
+      setAskRecents((current) =>
+        mergeAskRecents(current, page.threads, selectedAskThreadId, true)
+      );
+      setAskRecentsNextCursor(page.nextCursor);
+      setAskRecentsError(null);
+    } catch {
+      setAskRecentsError("Recents are unavailable.");
+    }
+  }, [personalMemoryApi, selectedAskThreadId]);
+
+  const loadOlderAskRecents = useCallback(async () => {
+    if (!personalMemoryApi?.listAskThreads || !askRecentsNextCursor) return;
+    try {
+      const page = await personalMemoryApi.listAskThreads({
+        cursor: askRecentsNextCursor,
+        limit: 50
+      });
+      setAskRecents((current) =>
+        mergeAskRecents(current, page.threads, selectedAskThreadId, false)
+      );
+      setAskRecentsNextCursor(page.nextCursor);
+      setAskRecentsError(null);
+    } catch {
+      setAskRecentsError("Older Ask threads could not be loaded.");
+    }
+  }, [askRecentsNextCursor, personalMemoryApi, selectedAskThreadId]);
+
+  useEffect(() => {
+    if (!askAvailable || !personalMemoryApi) {
+      setAskRecents([]);
+      setAskRecentsNextCursor(null);
+      setAskRecentsError(null);
+      return;
+    }
+    void refreshAskRecents();
+    return personalMemoryApi.subscribe((change) => {
+      if (change.type === "ask_questions_changed") void refreshAskRecents();
+    });
+  }, [askAvailable, personalMemoryApi, refreshAskRecents]);
+
+  useEffect(() => {
+    const teamIds =
+      snapshot?.navigation.teams
+        .filter((candidate) => candidate.lifecycle === "active")
+        .map((candidate) => candidate.id) ?? [];
+    if (teamIds.length === 0) return;
+    const report = () => {
+      if (
+        document.visibilityState !== "visible" ||
+        Date.now() - lastTeamActivityReportAt.current <
+          TEAM_ACTIVITY_WRITE_THROTTLE_MS
+      ) {
+        return;
+      }
+      lastTeamActivityReportAt.current = Date.now();
+      void client.reportTeamActivity(teamIds).catch(() => {
+        lastTeamActivityReportAt.current = 0;
+      });
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") report();
+    };
+    window.addEventListener("pointerdown", report, { capture: true });
+    window.addEventListener("keydown", report, { capture: true });
+    window.addEventListener("focus", report);
+    document.addEventListener("visibilitychange", onVisibility);
+    if (document.visibilityState === "visible" && document.hasFocus()) report();
+    return () => {
+      window.removeEventListener("pointerdown", report, { capture: true });
+      window.removeEventListener("keydown", report, { capture: true });
+      window.removeEventListener("focus", report);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [client, snapshot?.navigation.teams]);
 
   useEffect(() => {
     void themeStore.load();
@@ -529,7 +672,9 @@ export function App({
           backendId: null,
           principalId: snapshot.navigation.personalOwner.id
         },
-        route: { kind: "personal-memory-projects" }
+        route: askAvailable
+          ? { kind: "personal-memory-ask" }
+          : { kind: "personal-memory-projects" }
       }
     });
     if (inspector && !personalMemoryStore) {
@@ -573,7 +718,6 @@ export function App({
     section:
       | "general"
       | "capture"
-      | "ai-clients"
       | "team-connection"
       | "about"
       | "advanced" = "general"
@@ -594,7 +738,9 @@ export function App({
               principalId:
                 snapshot?.navigation.personalOwner.id ?? "local-personal"
             },
-            route: { kind: "personal-memory-projects" }
+            route: askAvailable
+              ? { kind: "personal-memory-ask" }
+              : { kind: "personal-memory-projects" }
           });
         }}
         statusStore={activeStatusStore}
@@ -751,24 +897,32 @@ export function App({
       />
     ) : (
       <PersonalContextNavigation
-        channels={
-          snapshot?.navigation.personal.channels.map((thread) => ({
-            archived: thread.lifecycle === "archived",
-            id: thread.id,
-            label: thread.name ?? "Channel",
-            selected:
-              route.kind === "personal-chat" && route.threadId === thread.id,
-            unreadCount: thread.unreadCount
-          })) ?? []
+        askRecents={askRecents}
+        askRecentsError={askRecentsError}
+        askRecentsNextCursor={askRecentsNextCursor}
+        askSelected={route.kind === "personal-memory-ask"}
+        notesSelected={route.kind === "personal-memory-notes"}
+        onLoadOlderAskThreads={() => void loadOlderAskRecents()}
+        onOpenAsk={() =>
+          navigate({
+            authority: {
+              backendId: null,
+              principalId:
+                snapshot?.navigation.personalOwner.id ?? "local-personal"
+            },
+            route: { kind: "personal-memory-ask" }
+          })
         }
-        notesSelected={
-          route.kind === "personal-chat" &&
-          snapshot?.selection.kind === "notes_to_self"
+        onOpenNotes={() =>
+          navigate({
+            authority: {
+              backendId: null,
+              principalId:
+                snapshot?.navigation.personalOwner.id ?? "local-personal"
+            },
+            route: { kind: "personal-memory-notes" }
+          })
         }
-        onCreateChannel={() =>
-          collaboration.setModal({ kind: "personal_channel" })
-        }
-        onOpenNotes={() => choose({ kind: "notes_to_self" })}
         onOpenProjects={() =>
           navigate({
             authority: {
@@ -789,15 +943,25 @@ export function App({
             route: { kind: "personal-memory-shares" }
           })
         }
-        onSelectChannel={(threadId) =>
-          choose({ kind: "personal_channel", threadId })
+        onSelectAskThread={(askThreadId) =>
+          navigate({
+            authority: {
+              backendId: null,
+              principalId:
+                snapshot?.navigation.personalOwner.id ?? "local-personal"
+            },
+            route: { kind: "personal-memory-ask", askThreadId }
+          })
         }
         projectsSelected={
           route.kind.startsWith("personal-memory") &&
-          route.kind !== "personal-memory-shares"
+          route.kind !== "personal-memory-shares" &&
+          route.kind !== "personal-memory-ask" &&
+          route.kind !== "personal-memory-notes"
         }
         sharesSelected={route.kind === "personal-memory-shares"}
         sharesUnavailable={sharesUnavailable}
+        selectedAskThreadId={selectedAskThreadId}
       />
     );
 
@@ -805,6 +969,12 @@ export function App({
     if (!route.kind.startsWith("personal-memory")) return null;
     if (route.kind === "personal-memory-shares") {
       return <StaticBreadcrumb labels={["Personal", "Shares"]} />;
+    }
+    if (route.kind === "personal-memory-ask") {
+      return <StaticBreadcrumb labels={["Personal", "Ask"]} />;
+    }
+    if (route.kind === "personal-memory-notes") {
+      return <StaticBreadcrumb labels={["Personal", "Notes"]} />;
     }
     const selectedProject =
       "projectId" in route
@@ -877,12 +1047,6 @@ export function App({
       return <StaticBreadcrumb labels={["Inbox"]} />;
     }
     if (route.kind === "personal-chat") {
-      if (
-        route.threadId === "notes-to-self" ||
-        snapshot?.selection.kind === "notes_to_self"
-      ) {
-        return <StaticBreadcrumb labels={["Notes to self"]} />;
-      }
       const channel = snapshot?.navigation.personal.channels.find(
         ({ id }) => id === route.threadId
       );
@@ -993,6 +1157,99 @@ export function App({
         snapshot={snapshot}
       />
     );
+  } else if (route.kind === "personal-memory-ask") {
+    content =
+      personalMemoryApi?.submitAsk &&
+      personalMemoryApi.listAskThreads &&
+      personalMemoryApi.loadAskThread ? (
+        <PersonalAskView
+          api={personalMemoryApi}
+          markdownAdapters={collaboration.markdownAdapters}
+          onNew={() =>
+            navigate({
+              authority: currentNavigationEntry(navigation).authority,
+              route: { kind: "personal-memory-ask" }
+            })
+          }
+          onSelectThread={(askThreadId) =>
+            navigate({
+              authority: currentNavigationEntry(navigation).authority,
+              route: { kind: "personal-memory-ask", askThreadId }
+            })
+          }
+          onThreadsChanged={() => void refreshAskRecents()}
+          selectedThreadId={route.askThreadId}
+        />
+      ) : (
+        <EmptyRoute
+          description="The protected Personal Ask bridge is unavailable in this window."
+          title="Ask unavailable"
+        />
+      );
+  } else if (route.kind === "personal-memory-notes") {
+    content =
+      personalMemoryApi?.createNote &&
+      personalMemoryApi?.listNotes &&
+      personalMemoryApi.loadNote &&
+      personalMemoryApi.renameNote ? (
+        <PersonalNotesView
+          api={personalMemoryApi}
+          markdownAdapters={collaboration.markdownAdapters}
+          newNote={route.newNote === true}
+          onBack={() =>
+            navigate({
+              authority: currentNavigationEntry(navigation).authority,
+              route: { kind: "personal-memory-notes" }
+            })
+          }
+          onNew={() =>
+            navigate({
+              authority: currentNavigationEntry(navigation).authority,
+              route: { kind: "personal-memory-notes", newNote: true }
+            })
+          }
+          onSave={async (body, idempotencyKey) => {
+            const created = await personalMemoryApi.createNote!({
+              body,
+              idempotencyKey
+            });
+            navigate({
+              authority: currentNavigationEntry(navigation).authority,
+              route: {
+                kind: "personal-memory-notes",
+                noteId: created.noteId
+              }
+            });
+          }}
+          onShare={
+            snapshot?.connection.state === "live" &&
+            snapshot.navigation.teams.some(
+              (team) =>
+                team.lifecycle === "active" &&
+                team.workspaces.some(
+                  (workspace) =>
+                    workspace.lifecycle === "active" &&
+                    workspace.access === "write"
+                )
+            )
+              ? (note) =>
+                  collaboration.setModal({
+                    kind: "share_personal_note",
+                    note
+                  })
+              : undefined
+          }
+          onSelect={(noteId) =>
+            navigate({
+              authority: currentNavigationEntry(navigation).authority,
+              route: { kind: "personal-memory-notes", noteId }
+            })
+          }
+          selectedNoteId={route.noteId}
+        />
+      ) : (
+        <EmptyRoute description="Loading your Notes." title="Opening Notes" />
+      );
   } else if (route.kind === "personal-memory-shares") {
     if (currentSharesStatus.state !== "ready") {
       let onAction: (() => void) | undefined;
@@ -1094,7 +1351,6 @@ export function App({
             }
             managedConversationRevision={managedConversationRevision}
             managedConversations={managedConversations}
-            localAiClients={window.koedDesktop?.localAiClients}
             markdownAdapters={collaboration.markdownAdapters}
             openExternal={platform.openExternal}
             revealLocalProject={platform.revealLocalProject}
@@ -1188,7 +1444,6 @@ export function App({
             }
           })
         }
-        localAiClients={window.koedDesktop?.localAiClients}
         onThemeChange={(preference) => void themeStore.set(preference)}
         statusStore={activeStatusStore}
         theme={theme.preference}
@@ -1331,8 +1586,7 @@ export function App({
         }
         personalUnreadCount={
           snapshot
-            ? snapshot.navigation.personal.notesToSelf.unreadCount +
-              snapshot.navigation.personal.channels.reduce(
+            ? snapshot.navigation.personal.channels.reduce(
                 (total, channel) => total + channel.unreadCount,
                 0
               )

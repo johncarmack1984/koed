@@ -16,6 +16,11 @@
   width: 1px;
 }
 
+[data-personal-route-focus]:focus,
+.personal-route-heading:focus {
+  outline: none;
+}
+
 .personal-projects-pane,
 .personal-memory-detail-pane,
 .personal-project-detail,
@@ -371,9 +376,33 @@
 }
 
 .personal-new-conversation-group {
+  --personal-new-conversation-control-height: 2.5rem;
+  --personal-new-conversation-disabled-picker-width: 2.5rem;
+  --personal-new-conversation-control-width: 3.75rem;
+
   align-items: stretch;
   display: inline-flex;
   flex: 0 0 auto;
+}
+
+.personal-new-conversation-group > .personal-new-conversation,
+.personal-new-conversation-group > .personal-new-conversation-owner-picker {
+  box-sizing: border-box;
+  flex: 0 0 var(--personal-new-conversation-control-width);
+  height: var(--personal-new-conversation-control-height);
+  width: var(--personal-new-conversation-control-width);
+}
+
+.personal-new-conversation-group
+  > button.personal-new-conversation-owner-picker {
+  flex-basis: var(--personal-new-conversation-disabled-picker-width);
+  width: var(--personal-new-conversation-disabled-picker-width);
+}
+
+.personal-new-conversation-group[data-starting="true"]
+  > .personal-new-conversation {
+  flex-basis: auto;
+  width: auto;
 }
 
 .personal-new-conversation {
@@ -391,6 +420,11 @@
   color: var(--primary-foreground);
   min-height: 2.25rem;
   padding: 0.45rem 0.8rem;
+}
+
+.personal-new-conversation-standalone {
+  border-radius: var(--radius);
+  border-right: 1px solid var(--primary);
 }
 
 .personal-new-conversation svg,
@@ -420,9 +454,11 @@ button.personal-new-conversation-owner-picker {
   border-start-start-radius: 0;
   border-start-end-radius: var(--radius);
   color: var(--primary-foreground);
+  box-sizing: border-box;
   display: inline-flex;
   gap: 0.3rem;
   height: 100%;
+  justify-content: center;
   list-style: none;
   min-height: 2.25rem;
   padding: 0.45rem 0.55rem;
@@ -430,6 +466,7 @@ button.personal-new-conversation-owner-picker {
 
 .personal-new-conversation-owner-picker > summary {
   cursor: pointer;
+  min-width: 100%;
 }
 
 .personal-new-conversation-owner-picker > summary::-webkit-details-marker {
@@ -653,6 +690,10 @@ button.personal-new-conversation-owner-picker > svg {
 }
 
 .personal-session-title-row h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  line-height: 1.5rem;
   min-width: 0;
 }
 
@@ -721,6 +762,10 @@ button.personal-new-conversation-owner-picker > svg {
   border-radius: var(--radius);
   color: var(--foreground);
   font: inherit;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  line-height: 1.5rem;
   font-size: 1.5rem;
   font-weight: 600;
   line-height: 1.2;
@@ -1335,6 +1380,16 @@ button.personal-new-conversation-owner-picker > svg {
     display: block;
   }
 
+  .personal-memory-workspace > .personal-projects-pane,
+  .personal-memory-workspace > .personal-memory-detail-pane {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .personal-memory-workspace.route-session > .personal-memory-detail-pane {
+    overflow: hidden;
+  }
+
   .personal-memory-workspace.route-project .personal-projects-pane,
   .personal-memory-workspace.route-session .personal-projects-pane,
   .personal-memory-workspace.route-projects .personal-memory-detail-pane {
@@ -1386,9 +1441,650 @@ button.personal-new-conversation-owner-picker > svg {
   }
 }
 
+.personal-notes-workspace {
+  background: var(--background);
+  color: var(--foreground);
+  display: grid;
+  grid-template-columns: minmax(16rem, 19rem) minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.personal-notes-list {
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.personal-notes-list > header,
+.personal-notes-search,
+.personal-note-items button,
+.personal-notes-back {
+  display: flex;
+  align-items: center;
+}
+
+.personal-notes-list > header {
+  gap: 0.75rem;
+  justify-content: space-between;
+  padding: 1rem;
+}
+
+.personal-notes-list > header h1 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  line-height: 1.5rem;
+}
+
+.personal-notes-list > header span {
+  color: inherit;
+  font-size: inherit;
+}
+
+.personal-note-detail > form > button {
+  align-items: center;
+  background: var(--primary);
+  border: 1px solid var(--primary);
+  border-radius: var(--radius);
+  color: var(--primary-foreground);
+  cursor: pointer;
+  display: inline-flex;
+  gap: 0.35rem;
+  justify-content: center;
+  min-height: 2.25rem;
+  padding: 0.45rem 0.8rem;
+}
+
+.personal-notes-search svg,
+.personal-note-items svg,
+.personal-notes-back svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.personal-notes-search {
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  gap: 0.5rem;
+  margin: 0 0.75rem 0.75rem;
+  min-height: 2.25rem;
+  padding: 0.45rem 0.65rem;
+  position: relative;
+}
+
+.personal-notes-search::after {
+  border-bottom: 1px solid var(--border);
+  bottom: -0.75rem;
+  content: "";
+  left: -0.25rem;
+  position: absolute;
+  right: -0.25rem;
+}
+
+.personal-notes-search:focus-within {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--ring) 22%, transparent);
+}
+
+.personal-notes-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  color: inherit;
+  background: transparent;
+}
+
+.personal-note-items {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0.5rem 0.5rem 1rem;
+}
+
+.personal-note-items button {
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius);
+  color: inherit;
+  cursor: pointer;
+  gap: 0.75rem;
+  padding: 0.625rem;
+  text-align: left;
+  width: 100%;
+}
+
+.personal-note-items button:hover,
+.personal-note-items button[aria-current="page"] {
+  background: var(--accent);
+}
+
+.personal-note-items button > svg {
+  background: color-mix(in oklab, var(--memory) 14%, transparent);
+  border-radius: 0.45rem;
+  box-sizing: content-box;
+  color: var(--memory);
+  flex: 0 0 auto;
+  padding: 0.5rem;
+}
+
+.personal-note-items button > span {
+  min-width: 0;
+}
+
+.personal-note-items strong,
+.personal-note-items small {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.personal-note-items strong {
+  font-weight: 500;
+}
+
+.personal-note-items small {
+  margin-top: 0.25rem;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+
+.personal-note-items > p {
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+  margin: 0.75rem 0.625rem;
+}
+
+.personal-note-detail {
+  background: var(--background);
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.personal-notes-back {
+  display: none;
+  gap: 0.4rem;
+  border: 0;
+  padding: 0;
+  color: var(--muted-foreground);
+  background: transparent;
+}
+
+.personal-note-detail article,
+.personal-note-empty {
+  width: 100%;
+  margin: 0 auto;
+}
+
+.personal-note-detail > form {
+  box-sizing: border-box;
+  margin: 0 auto;
+  padding: clamp(1.25rem, 4vw, 3.5rem);
+  width: min(55rem, 100%);
+}
+
+.personal-note-header {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+  padding: 1rem;
+}
+
+.personal-note-header > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.personal-note-header small,
+.personal-note-header time {
+  color: var(--muted-foreground);
+  display: block;
+  font-size: 0.75rem;
+}
+
+.personal-note-title-row,
+.personal-note-title-editor {
+  align-items: center;
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.15rem;
+  min-width: 0;
+}
+
+.personal-note-title-row h1 {
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  line-height: 1.5rem;
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.personal-note-title-edit,
+.personal-note-title-editor button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 0.35rem;
+  color: var(--muted-foreground);
+  display: inline-flex;
+  flex: 0 0 auto;
+  justify-content: center;
+  min-height: 1.75rem;
+  min-width: 1.75rem;
+  padding: 0.3rem;
+}
+
+.personal-note-title-edit:hover:not(:disabled),
+.personal-note-title-editor button:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.personal-note-title-edit svg,
+.personal-note-title-editor button svg {
+  height: 0.9rem;
+  width: 0.9rem;
+}
+
+.personal-note-title-editor label {
+  min-width: 0;
+}
+
+.personal-note-title-editor input {
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--foreground);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  line-height: 1.5rem;
+  max-width: min(32rem, 60vw);
+  min-width: min(18rem, 50vw);
+  padding: 0.25rem 0.45rem;
+}
+
+.personal-note-header time {
+  margin-top: 0.2rem;
+}
+
+.personal-note-header-actions {
+  flex: 0 0 auto;
+}
+
+.personal-note-header .personal-note-share {
+  align-items: center;
+  background: var(--primary);
+  border: 1px solid var(--primary);
+  border-radius: var(--radius);
+  color: var(--primary-foreground);
+  display: inline-flex;
+  gap: 0.4rem;
+  min-height: 2.25rem;
+  padding: 0.45rem 0.8rem;
+}
+
+.personal-note-header .personal-note-share:disabled,
+.personal-note-title-edit:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.personal-note-markdown {
+  box-sizing: border-box;
+}
+
+.personal-note-body-trigger {
+  box-sizing: border-box;
+  margin: 0 auto;
+  padding: clamp(1.25rem, 4vw, 3.5rem);
+  width: min(55rem, 100%);
+}
+
+.personal-note-body-trigger[data-editable="true"] {
+  cursor: text;
+}
+
+.personal-note-body-trigger:has(.sr-only:focus-visible) {
+  border-radius: var(--radius);
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.personal-note-detail article > form {
+  box-sizing: border-box;
+  padding: 1rem;
+  width: 100%;
+}
+
+.personal-note-edit-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.personal-note-edit-actions button {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  display: inline-flex;
+  justify-content: center;
+  min-height: 2.25rem;
+  padding: 0.45rem 0.8rem;
+}
+
+.personal-note-edit-actions button[type="submit"] {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.personal-note-edit-actions button[type="button"] {
+  background: transparent;
+  color: var(--foreground);
+}
+
+.personal-note-edit-actions button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.personal-note-detail textarea {
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-sizing: border-box;
+  color: inherit;
+  font: inherit;
+  margin-bottom: 0.75rem;
+  min-height: 18rem;
+  padding: 1rem;
+  resize: vertical;
+  width: 100%;
+}
+
+.personal-note-detail textarea:focus {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--ring) 22%, transparent);
+  outline: none;
+}
+
+.personal-note-detail > form > button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.personal-note-empty {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  height: 100%;
+  justify-content: center;
+  min-height: 0;
+  text-align: center;
+}
+
+.personal-note-empty h1,
+.personal-note-empty p {
+  margin: 0;
+}
+
+.personal-note-empty p,
+.personal-note-empty svg {
+  color: var(--muted-foreground);
+}
+
+.personal-note-empty svg {
+  height: 1.5rem;
+  margin-bottom: 0.2rem;
+  width: 1.5rem;
+}
+
+@media (max-width: 1040px) {
+  .personal-notes-workspace {
+    display: block;
+  }
+
+  .personal-notes-list,
+  .personal-note-detail {
+    border: 0;
+    height: 100%;
+  }
+
+  .personal-notes-workspace[data-narrow-view="detail"] .personal-notes-list {
+    display: none;
+  }
+
+  .personal-notes-workspace[data-narrow-view="list"] .personal-note-detail {
+    display: none;
+  }
+
+  .personal-notes-back {
+    display: inline-flex;
+    margin: 1rem 1rem 0;
+  }
+}
+
 @media (forced-colors: active) {
   .native-approval-decision,
   .native-approval-signal {
     border-color: CanvasText;
+  }
+}
+
+.personal-ask-layout {
+  min-height: 100%;
+  background: var(--background);
+}
+
+.personal-ask-conversation-heading,
+.personal-ask-composer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.personal-ask-main {
+  min-width: 0;
+  min-height: 100%;
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: clamp(1.5rem, 5vw, 5rem);
+}
+
+.personal-ask-main[data-view="conversation"] {
+  --personal-ask-inline-inset: clamp(0.75rem, 2vw, 1.5rem);
+
+  place-items: stretch center;
+  padding: 0 0 var(--personal-ask-inline-inset);
+}
+
+.personal-ask-welcome {
+  width: min(48rem, 100%);
+  text-align: center;
+}
+
+.personal-ask-welcome h1 {
+  margin: 0 0 1.5rem;
+  font-size: clamp(1.75rem, 3vw, 2.25rem);
+  letter-spacing: -0.04em;
+}
+
+.personal-ask-composer {
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  background: var(--background);
+  overflow: hidden;
+  text-align: left;
+}
+
+.personal-ask-composer:focus-within {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--ring) 22%, transparent);
+}
+
+.personal-ask-composer textarea {
+  box-sizing: border-box;
+  height: 5rem;
+  max-height: 5rem;
+  min-height: 5rem;
+  overflow-y: auto;
+  resize: none;
+  scrollbar-gutter: stable;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  padding: 1.1rem;
+  color: var(--foreground);
+  background: transparent;
+  font: inherit;
+}
+
+.personal-ask-composer textarea::placeholder {
+  color: var(--muted-foreground);
+}
+
+.personal-ask-composer-footer {
+  justify-content: flex-end;
+  padding: 0.4rem 0.65rem 0.65rem;
+  color: var(--muted-foreground);
+  font-size: 0.85rem;
+}
+
+.personal-ask-composer-footer button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.personal-ask-composer-footer svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.personal-ask-composer-footer button {
+  width: 2rem;
+  height: 2rem;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  color: var(--primary-foreground);
+  background: var(--primary);
+  cursor: pointer;
+}
+
+.personal-ask-composer-footer button:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.personal-ask-conversation {
+  width: 100%;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+}
+
+.personal-ask-conversation-heading {
+  justify-content: flex-end;
+  margin-bottom: 0.25rem;
+  padding: 0.5rem var(--personal-ask-inline-inset);
+  border-bottom: 1px solid var(--border);
+}
+
+.personal-ask-turns,
+.personal-ask-conversation > .personal-ask-composer {
+  width: min(
+    64rem,
+    calc(
+      100% - var(--personal-ask-inline-inset) - var(--personal-ask-inline-inset)
+    )
+  );
+  margin-inline: auto;
+}
+
+.personal-ask-turns {
+  flex: 1;
+}
+
+.personal-ask-turn {
+  padding: 1rem 0;
+}
+
+.personal-ask-question {
+  margin: 0 0 1rem auto;
+  width: fit-content;
+  max-width: 78%;
+  border-radius: 1rem 1rem 0.25rem 1rem;
+  padding: 0.7rem 0.9rem;
+  background: var(--accent);
+}
+
+.personal-ask-question,
+.personal-ask-answer {
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.personal-ask-answer,
+.personal-ask-pending,
+.personal-ask-error {
+  width: fit-content;
+  max-width: 86%;
+  border-radius: 1rem 1rem 1rem 0.25rem;
+  padding: 0.75rem 0.9rem;
+  background: var(--secondary);
+}
+
+.personal-ask-pending,
+.personal-ask-error {
+  margin-block: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--muted-foreground);
+}
+
+.personal-ask-pending svg,
+.personal-ask-spinner {
+  animation: personal-ask-spin 1s linear infinite;
+}
+
+.personal-ask-error,
+.personal-ask-global-error {
+  color: var(--destructive);
+}
+
+@keyframes personal-ask-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 760px) {
+  .personal-ask-main {
+    padding: 1rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .personal-ask-pending svg,
+  .personal-ask-spinner {
+    animation: none;
   }
 }

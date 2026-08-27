@@ -10,11 +10,14 @@ import {
   type CollaborationRendererEvent,
   type CollaborationRendererCommand,
   type CollaborationSnapshot,
-  type OwnedShareItem
+  type OwnedShareItem,
+  type SharedMemoryGrant,
+  type SharedMemoryPreview
 } from "@koed/shared/collaboration";
 import type {
   PersonalDesktopApi,
   PersonalDesktopConversationEvent,
+  PersonalDesktopNote,
   PersonalDesktopProject,
   PersonalDesktopProjectThread
 } from "@koed/shared/personal-desktop";
@@ -23,6 +26,7 @@ import { Profiler, useEffect, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 
 import { createCollaborationRendererClient } from "./collaboration/renderer-client.js";
+import type { ManagedConversationDesktopApi } from "./ipc/managed-conversation-protocol.js";
 import { App } from "./renderer/App.js";
 import "./renderer/index.css";
 
@@ -133,7 +137,8 @@ const parityEvents: PersonalDesktopConversationEvent[] = [
     }
   }),
   personalEvent(490, {
-    actor: "user",
+    actor: null,
+    eventType: "approval_activity",
     content:
       "The following is the Codex agent history whose request action you are assessing. TRANSCRIPT START ... TRANSCRIPT END",
     contentPreview: "Approval review transcript formatting fixture",
@@ -286,6 +291,20 @@ const personalMemoryApi: PersonalDesktopApi = {
   subscribe: () => () => undefined
 };
 
+const managedConversations = {
+  resume: async (input) => ({
+    operation: "resume",
+    status: "read_only",
+    conversation: {
+      executionId: null,
+      projectId: input.projectId,
+      capturedSessionId: input.capturedSessionId,
+      threadId: input.threadId
+    },
+    message: "This browser fixture is read-only."
+  })
+} as ManagedConversationDesktopApi;
+
 const ValidationApp = () => {
   const client = useMemo(
     () =>
@@ -302,6 +321,7 @@ const ValidationApp = () => {
   return (
     <App
       collaborationClient={client}
+      managedConversations={managedConversations}
       onboardingComplete
       personalMemoryApi={personalMemoryApi}
       statusReadyOverride
@@ -359,17 +379,6 @@ const collaborationFixture = (): CollaborationSnapshot => {
     lastActivityAt: timestamp,
     archivedAt: null
   };
-  const notes = {
-    ...baseThread,
-    id: uuid(12),
-    logicalId: uuid(13),
-    scope: "personal" as const,
-    ownerUserId: currentUser.id,
-    kind: "notes_to_self" as const,
-    latestSequence: 2,
-    unreadCount: 2,
-    participants: [participant(currentUser)]
-  };
   const channel = {
     ...baseThread,
     id: uuid(14),
@@ -403,6 +412,12 @@ const collaborationFixture = (): CollaborationSnapshot => {
     title: "Collaboration renderer cutover",
     latestActivityAt: timestamp,
     maximumFidelity: "memory_events" as const,
+    sourceCapabilities: [
+      "memory_events" as const,
+      "lcm_leaves" as const,
+      "lcm_rollups" as const
+    ],
+    activationRepresentation: "memory_events" as const,
     includeCuratedMemory: false,
     liveState: "live" as const,
     sourceState: "ready" as const,
@@ -484,7 +499,7 @@ const collaborationFixture = (): CollaborationSnapshot => {
     navigation: {
       personalOwner: currentUser,
       teamPrincipal,
-      personal: { memory: [], notesToSelf: notes, channels: [] },
+      personal: { memory: [], channels: [] },
       teams
     },
     selection: {
@@ -694,6 +709,16 @@ const interactionIds = {
   betaDiscussionLogical: uuid(129),
   aliceNotes: uuid(130),
   bobNotes: uuid(131),
+  aliceNoteMemoryEvent: uuid(132),
+  bobNoteMemoryEvent: uuid(133),
+  aliceNoteLogicalMemory: uuid(134),
+  bobNoteLogicalMemory: uuid(135),
+  aliceCreatedNote: uuid(136),
+  aliceCreatedNoteMemoryEvent: uuid(137),
+  bobCreatedNote: uuid(138),
+  bobCreatedNoteMemoryEvent: uuid(139),
+  aliceCreatedNoteLogicalMemory: uuid(144),
+  bobCreatedNoteLogicalMemory: uuid(145),
   actionGrant: uuid(140),
   personalSubscription: uuid(141),
   alphaSubscription: uuid(142),
@@ -706,7 +731,14 @@ const interactionIds = {
   pendingPreview: uuid(706),
   activeGrant: uuid(711),
   activeLogicalGrant: uuid(712),
-  activeConsent: uuid(713)
+  activeConsent: uuid(713),
+  notePendingShare: uuid(720),
+  noteMutation: uuid(721),
+  noteLogicalGrant: uuid(722),
+  noteConsent: uuid(723),
+  noteGrant: uuid(724),
+  notePreview: uuid(725),
+  noteDiscussion: uuid(726)
 } as const;
 
 const ownerOnlyCredentialSource =
@@ -719,6 +751,240 @@ const interactionPerson = (actor: StatefulActor) => ({
   presence: "available" as const,
   membershipState: "enabled" as const
 });
+
+const interactionNote = (
+  actor: StatefulActor,
+  title: string,
+  titleVersion: number
+) => {
+  const noteId =
+    actor === "alice" ? interactionIds.aliceNotes : interactionIds.bobNotes;
+  const memoryEventId =
+    actor === "alice"
+      ? interactionIds.aliceNoteMemoryEvent
+      : interactionIds.bobNoteMemoryEvent;
+  const body = "# Browser launch note\nTwo independent reviewers are required.";
+  return {
+    noteId,
+    revisionId: uuid(actor === "alice" ? 730 : 731),
+    revision: 1,
+    contentHash: "a".repeat(64),
+    memoryEventId,
+    projectionState: "available" as const,
+    projectionFailureCode: null,
+    logicalMemoryId:
+      actor === "alice"
+        ? interactionIds.aliceNoteLogicalMemory
+        : interactionIds.bobNoteLogicalMemory,
+    title,
+    titleVersion,
+    body,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    sourceSequence: 1,
+    event: {
+      id: memoryEventId,
+      actor: "user" as const,
+      eventType: "personal_note_created",
+      timestamp,
+      sourceEventTime: timestamp,
+      sourceSequence: 1,
+      content: body,
+      contentPreview: "Browser launch note",
+      metadata: {},
+      invalidatedAt: null
+    }
+  };
+};
+
+const interactionNoteSummary = (note: PersonalDesktopNote) => {
+  return {
+    noteId: note.noteId,
+    memoryEventId: note.memoryEventId,
+    title: note.title,
+    titleVersion: note.titleVersion,
+    revisionId: note.revisionId,
+    revision: note.revision,
+    contentHash: note.contentHash,
+    projectionState: note.projectionState,
+    projectionFailureCode: note.projectionFailureCode,
+    createdAt: note.createdAt,
+    updatedAt: note.updatedAt,
+    sourceSequence: note.sourceSequence
+  };
+};
+
+const interactionNotePreview = (
+  note: PersonalDesktopNote,
+  source: Extract<
+    OwnedShareItem,
+    { kind: "pending" }
+  >["pendingShare"]["source"],
+  mode: "snapshot" | "continuous",
+  previewRevision: number
+): SharedMemoryPreview => ({
+  source,
+  logicalMemoryId: note.logicalMemoryId,
+  teamId: interactionIds.alphaTeam,
+  workspaceId: interactionIds.alphaWorkspace,
+  sourceCapabilities: ["memory_events"],
+  activationRepresentation: "memory_events",
+  maximumFidelity: "memory_events",
+  includeCuratedMemory: false,
+  mode,
+  previewRevision,
+  sourceRevision: note.revision,
+  policyRevision: 1,
+  contentPolicyVersion: 1,
+  classifierVersion: 1,
+  sourceContentHash: note.contentHash,
+  previewHash: note.contentHash,
+  itemCount: 1,
+  items: [
+    {
+      id: note.memoryEventId!,
+      representation: "memory_events",
+      sequence: note.revision,
+      occurredAt: note.updatedAt,
+      sourceItems: [
+        {
+          id: note.memoryEventId!,
+          sourceKind: "user_message",
+          occurredAt: note.updatedAt,
+          body: note.body,
+          actorName: null,
+          toolName: null,
+          toolCallId: null
+        }
+      ]
+    }
+  ],
+  nextCursor: null
+});
+
+const createInteractionPersonalMemoryApi = (
+  actor: StatefulActor,
+  onNoteUpdated?: (note: PersonalDesktopNote) => void
+): PersonalDesktopApi => {
+  let notes: PersonalDesktopNote[] = [
+    interactionNote(actor, "Browser launch note", 1)
+  ];
+  const record = (operation: string, input: unknown) => {
+    const browserWindow = window as Window & {
+      __koedPersonalMemoryCommands?: Array<{
+        operation: string;
+        input: unknown;
+      }>;
+    };
+    browserWindow.__koedPersonalMemoryCommands ??= [];
+    browserWindow.__koedPersonalMemoryCommands.push({ operation, input });
+  };
+  return {
+    ...personalMemoryApi,
+    listNotes: async () => ({
+      notes: notes.map(interactionNoteSummary),
+      nextBeforeSequence: null
+    }),
+    loadNote: async ({ noteId }) => {
+      const note = notes.find((candidate) => candidate.noteId === noteId);
+      if (!note) throw new Error("Personal Note fixture entry is unavailable");
+      return note;
+    },
+    createNote: async (input) => {
+      record("personal.notes.create", input);
+      const noteId =
+        actor === "alice"
+          ? interactionIds.aliceCreatedNote
+          : interactionIds.bobCreatedNote;
+      const memoryEventId =
+        actor === "alice"
+          ? interactionIds.aliceCreatedNoteMemoryEvent
+          : interactionIds.bobCreatedNoteMemoryEvent;
+      const title = input.body.split(/\r?\n/u)[0]?.trim() || "Untitled Note";
+      const note: PersonalDesktopNote = {
+        noteId,
+        memoryEventId,
+        logicalMemoryId:
+          actor === "alice"
+            ? interactionIds.aliceCreatedNoteLogicalMemory
+            : interactionIds.bobCreatedNoteLogicalMemory,
+        title,
+        titleVersion: 1,
+        revisionId: crypto.randomUUID(),
+        revision: 1,
+        contentHash: "b".repeat(64),
+        projectionState: "available",
+        projectionFailureCode: null,
+        body: input.body,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        sourceSequence: 2,
+        event: {
+          id: memoryEventId,
+          actor: "user",
+          eventType: "personal_note_created",
+          timestamp,
+          sourceEventTime: timestamp,
+          sourceSequence: 2,
+          content: input.body,
+          contentPreview: title,
+          metadata: {},
+          invalidatedAt: null
+        }
+      };
+      notes = [note, ...notes];
+      return note;
+    },
+    renameNote: async ({ noteId, title: nextTitle }) => {
+      const index = notes.findIndex((candidate) => candidate.noteId === noteId);
+      if (index < 0)
+        throw new Error("Personal Note fixture entry is unavailable");
+      const renamed = {
+        ...notes[index]!,
+        title: nextTitle,
+        titleVersion: notes[index]!.titleVersion + 1
+      };
+      notes = notes.map((note, noteIndex) =>
+        noteIndex === index ? renamed : note
+      );
+      return interactionNoteSummary(renamed);
+    },
+    updateNote: async (input) => {
+      record("personal.notes.update", input);
+      const { noteId, expectedRevision, body } = input;
+      const index = notes.findIndex((candidate) => candidate.noteId === noteId);
+      if (index < 0 || notes[index]!.revision !== expectedRevision) {
+        throw new Error("Personal Note fixture revision is unavailable");
+      }
+      const memoryEventId = crypto.randomUUID();
+      const updated: PersonalDesktopNote = {
+        ...notes[index]!,
+        memoryEventId,
+        revisionId: crypto.randomUUID(),
+        revision: expectedRevision + 1,
+        contentHash: (expectedRevision + 2).toString(16).repeat(64),
+        body,
+        projectionState: "available",
+        projectionFailureCode: null,
+        updatedAt: new Date().toISOString(),
+        event: {
+          ...notes[index]!.event!,
+          id: memoryEventId,
+          eventType: "personal_note_updated",
+          sourceSequence: notes[index]!.sourceSequence + 1,
+          content: body,
+          contentPreview: body.slice(0, 160)
+        },
+        sourceSequence: notes[index]!.sourceSequence + 1
+      };
+      notes = notes.map((note, noteIndex) =>
+        noteIndex === index ? updated : note
+      );
+      onNoteUpdated?.(updated);
+      return updated;
+    }
+  };
+};
 
 const interactionParticipant = (actor: StatefulActor) => {
   const person = interactionPerson(actor);
@@ -820,6 +1086,13 @@ const interactionSession = (team: "alpha" | "beta") => ({
   latestActivityAt: timestamp,
   maximumFidelity:
     team === "alpha" ? ("memory_events" as const) : ("lcm_rollups" as const),
+  sourceCapabilities: [
+    "memory_events" as const,
+    "lcm_leaves" as const,
+    "lcm_rollups" as const
+  ],
+  activationRepresentation:
+    team === "alpha" ? ("memory_events" as const) : ("lcm_rollups" as const),
   includeCuratedMemory: false,
   liveState: "live" as const,
   sourceState: "ready" as const,
@@ -907,6 +1180,13 @@ const createStatefulCollaborationBridge = (actor: StatefulActor) => {
   let pendingOwnedShare: Extract<OwnedShareItem, { kind: "pending" }> = {
     kind: "pending",
     pendingShare: {
+      source: {
+        kind: "captured_session",
+        sessionId: interactionIds.alphaSession,
+        logicalMemoryId: interactionIds.alphaMemory
+      },
+      sourceCapabilities: ["memory_events", "lcm_leaves", "lcm_rollups"],
+      activationRepresentation: "memory_events",
       id: interactionIds.pendingShare,
       mutationId: interactionIds.pendingMutation,
       logicalGrantId: interactionIds.pendingLogicalGrant,
@@ -914,7 +1194,6 @@ const createStatefulCollaborationBridge = (actor: StatefulActor) => {
       logicalMemoryId: interactionIds.alphaMemory,
       teamId: interactionIds.alphaTeam,
       workspaceId: interactionIds.alphaWorkspace,
-      representation: "memory_events",
       maximumFidelity: "memory_events",
       includeCuratedMemory: false,
       mode: "continuous",
@@ -931,14 +1210,21 @@ const createStatefulCollaborationBridge = (actor: StatefulActor) => {
       updatedAt: timestamp,
       activatedAt: timestamp,
       revokedAt: null,
-      grantId: interactionIds.pendingGrant
+      grantId: interactionIds.pendingGrant,
+      grantVersion: 1
     },
     sourceAccess: null,
     summary: {
+      source: {
+        kind: "captured_session",
+        sessionId: interactionIds.alphaSession,
+        logicalMemoryId: interactionIds.alphaMemory
+      },
       sourceSessionId: interactionIds.alphaSession,
       sourceTitle: "Packaged asynchronous sharing",
       teamName: "Electron Team App",
       workspaceName: "Electron Team App",
+      workspaceContentAccess: "available",
       mode: "continuous",
       authorizedPreview: {
         previewId: interactionIds.pendingPreview,
@@ -953,6 +1239,13 @@ const createStatefulCollaborationBridge = (actor: StatefulActor) => {
   let activeOwnedShare: Extract<OwnedShareItem, { kind: "grant" }> | null = {
     kind: "grant",
     grant: {
+      source: {
+        kind: "captured_session",
+        sessionId: interactionIds.alphaSession,
+        logicalMemoryId: interactionIds.alphaMemory
+      },
+      sourceCapabilities: ["memory_events", "lcm_leaves", "lcm_rollups"],
+      activationRepresentation: "memory_events",
       id: interactionIds.activeGrant,
       logicalGrantId: interactionIds.activeLogicalGrant,
       logicalMemoryId: interactionIds.alphaMemory,
@@ -963,6 +1256,7 @@ const createStatefulCollaborationBridge = (actor: StatefulActor) => {
       teamId: interactionIds.alphaTeam,
       workspaceId: interactionIds.alphaWorkspace,
       consentId: interactionIds.activeConsent,
+      mode: "snapshot",
       maximumFidelity: "memory_events",
       includeCuratedMemory: false,
       fidelityPolicyRevision: 1,
@@ -971,21 +1265,33 @@ const createStatefulCollaborationBridge = (actor: StatefulActor) => {
       lifecycle: "active",
       createdAt: timestamp,
       updatedAt: timestamp,
-      revokedAt: null,
-      companionThreadId: interactionIds.alphaDiscussion
+      revokedAt: null
     },
     sourceAccess: null,
     summary: {
+      source: {
+        kind: "captured_session",
+        sessionId: interactionIds.alphaSession,
+        logicalMemoryId: interactionIds.alphaMemory
+      },
       sourceSessionId: interactionIds.alphaSession,
       sourceTitle: "Packaged revocation fixture",
       teamName: "Electron Team App",
       workspaceName: "Electron Team App",
+      workspaceContentAccess: "available",
       mode: "snapshot",
       authorizedPreview: null,
       lastReadyRevision: 12,
       lastSuccessfulUpdateAt: timestamp
     }
   };
+  let noteOwnedShare: Extract<OwnedShareItem, { kind: "pending" }> | null =
+    null;
+  let noteGrant: SharedMemoryGrant | null = null;
+  let latestProjectedNote: PersonalDesktopNote | null = null;
+  const projectedNotesByRevision = new Map<number, PersonalDesktopNote>([
+    [1, interactionNote(actor, "Browser launch note", 1)]
+  ]);
   const revokedOwnedShares: OwnedShareItem[] = [];
   const messages = new Map<string, ReturnType<typeof interactionMessage>[]>([
     [
@@ -1158,27 +1464,10 @@ const createStatefulCollaborationBridge = (actor: StatefulActor) => {
           ? interactionIds.alicePersonal
           : interactionIds.bobPersonal
     };
-    const notesId =
-      actor === "alice" ? interactionIds.aliceNotes : interactionIds.bobNotes;
-    const notes = {
-      ...interactionThreadBase,
-      id: notesId,
-      logicalId: uuid(actor === "alice" ? 150 : 151),
-      scope: "personal" as const,
-      ownerUserId: currentActor.id,
-      kind: "notes_to_self" as const,
-      participants: [
-        {
-          id: currentActor.id,
-          displayName: currentActor.displayName,
-          membershipState: currentActor.membershipState
-        }
-      ]
-    };
     const navigation = {
       personalOwner: currentActor,
       teamPrincipal: interactionPerson(actor),
-      personal: { memory: [], notesToSelf: notes, channels: [] },
+      personal: { memory: [], channels: [] },
       teams: teams()
     };
     let view: CollaborationSnapshot["view"];
@@ -1275,9 +1564,8 @@ const createStatefulCollaborationBridge = (actor: StatefulActor) => {
       };
     } else {
       view = {
-        kind: "thread",
-        thread: notes,
-        messages: interactionPage(notes.id, [])
+        kind: "personal_memory",
+        entries: navigation.personal.memory
       };
     }
     const parsedSnapshot = collaborationSnapshotSchema.safeParse({
@@ -1379,6 +1667,44 @@ const createStatefulCollaborationBridge = (actor: StatefulActor) => {
           confirmLabel: "Revoke Workspace access",
           details: [
             { label: "Share Grant", value: intent.shareGrantId },
+            { label: "Workspace", value: intent.workspaceId }
+          ]
+        };
+      case "collaboration.preview_shared_memory":
+        return {
+          version: 1 as const,
+          title:
+            intent.mode === "continuous"
+              ? "Review Continuous Note Share?"
+              : "Review Note snapshot?",
+          description: "Review the exact Personal Note revision.",
+          consequence:
+            intent.mode === "continuous"
+              ? "This revision will be reviewed before Continuous sharing starts."
+              : "One immutable Memory Event will be reviewed.",
+          confirmLabel:
+            intent.mode === "continuous" ? "Review Share" : "Review snapshot",
+          details: [
+            { label: "Team", value: intent.teamId },
+            { label: "Workspace", value: intent.workspaceId }
+          ]
+        };
+      case "collaboration.share_memory":
+        return {
+          version: 1 as const,
+          title:
+            intent.mode === "continuous"
+              ? "Start Continuous Note Share?"
+              : "Share Note snapshot?",
+          description: "Approve the exact reviewed Personal Note revision.",
+          consequence:
+            intent.mode === "continuous"
+              ? "Eligible later revisions will replace the Team copy after privacy checks."
+              : "The Workspace will receive one immutable Memory Event.",
+          confirmLabel:
+            intent.mode === "continuous" ? "Start sharing" : "Share snapshot",
+          details: [
+            { label: "Team", value: intent.teamId },
             { label: "Workspace", value: intent.workspaceId }
           ]
         };
@@ -1489,13 +1815,228 @@ const createStatefulCollaborationBridge = (actor: StatefulActor) => {
           shares: parsed.input.history
             ? revokedOwnedShares
             : [
+                ...(noteOwnedShare ? [noteOwnedShare] : []),
                 pendingOwnedShare,
                 ...(activeOwnedShare ? [activeOwnedShare] : [])
               ],
           nextCursor: null
         });
+      case "collaboration.preview_shared_memory_candidate": {
+        if (parsed.input.source.kind === "captured_session") {
+          return result(parsed, {
+            candidate: {
+              source: parsed.input.source,
+              logicalMemoryId: parsed.input.source.logicalMemoryId,
+              sourceCapabilities: [
+                "memory_events",
+                "lcm_leaves",
+                "lcm_rollups"
+              ],
+              activationRepresentation: parsed.input.activationRepresentation,
+              mode: "continuous",
+              expiresAt: null,
+              sourceRevision: 12,
+              candidateHash: "c".repeat(64),
+              itemCount: 1,
+              excludedItemCount: 0,
+              manifest: [
+                {
+                  sourceId: uuid(160),
+                  revisionHash: "d".repeat(64)
+                }
+              ],
+              byteCount: new TextEncoder().encode(ownerOnlyCredentialSource)
+                .byteLength,
+              items: [
+                {
+                  id: uuid(160),
+                  representation: "memory_events",
+                  sequence: 1,
+                  occurredAt: timestamp,
+                  sourceItems: [
+                    {
+                      id: uuid(161),
+                      sourceKind: "agent_message",
+                      occurredAt: timestamp,
+                      body: ownerOnlyCredentialSource,
+                      actorName: "Codex",
+                      toolName: null,
+                      toolCallId: null
+                    }
+                  ]
+                }
+              ]
+            }
+          });
+        }
+        const requestedRevision = parsed.input.source.noteRevision;
+        const note =
+          projectedNotesByRevision.get(requestedRevision) ??
+          interactionNote(actor, "Browser launch note", 1);
+        const logicalMemoryId =
+          actor === "alice"
+            ? interactionIds.aliceNoteLogicalMemory
+            : interactionIds.bobNoteLogicalMemory;
+        const source = parsed.input.source;
+        const item = {
+          id: note.memoryEventId,
+          representation: "memory_events" as const,
+          sequence: 1,
+          occurredAt: timestamp,
+          sourceItems: [
+            {
+              id: note.memoryEventId,
+              sourceKind: "user_message" as const,
+              occurredAt: timestamp,
+              body: note.body,
+              actorName: null,
+              toolName: null,
+              toolCallId: null
+            }
+          ]
+        };
+        return result(parsed, {
+          candidate: {
+            source,
+            logicalMemoryId,
+            sourceCapabilities: ["memory_events"],
+            activationRepresentation: "memory_events",
+            mode: parsed.input.mode,
+            expiresAt: null,
+            sourceRevision: note.revision,
+            candidateHash: "c".repeat(64),
+            itemCount: 1,
+            excludedItemCount: 0,
+            manifest: [
+              { sourceId: note.memoryEventId, revisionHash: "d".repeat(64) }
+            ],
+            byteCount: 256,
+            items: [item]
+          }
+        });
+      }
+      case "collaboration.preview_shared_memory": {
+        const candidate = parsed.input.candidate;
+        if (!candidate) return failure(parsed);
+        const note = interactionNote(actor, "Browser launch note", 1);
+        return result(parsed, {
+          preview: interactionNotePreview(
+            note,
+            candidate.source,
+            parsed.input.mode,
+            1
+          )
+        });
+      }
+      case "collaboration.share_memory": {
+        const acceptedPendingShare: Extract<
+          OwnedShareItem,
+          { kind: "pending" }
+        >["pendingShare"] = {
+          source: parsed.input.source,
+          sourceCapabilities: ["memory_events"],
+          id: interactionIds.notePendingShare,
+          mutationId: parsed.input.mutationId,
+          logicalGrantId: parsed.input.logicalGrantId,
+          consentId: parsed.input.consentId,
+          logicalMemoryId: parsed.input.logicalMemoryId,
+          teamId: parsed.input.teamId,
+          workspaceId: parsed.input.workspaceId,
+          activationRepresentation: "memory_events",
+          maximumFidelity: "memory_events",
+          includeCuratedMemory: false,
+          mode: parsed.input.mode,
+          sourceRevision: 1,
+          state: "preparing",
+          stage: "accepted",
+          workspaceAccessState: "none",
+          sourceUpdateState: "preparing",
+          operationVersion: 1,
+          attemptCount: 0,
+          redactedFailureCode: null,
+          lastProgressAt: timestamp,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          activatedAt: null,
+          revokedAt: null,
+          grantId: null,
+          grantVersion: null
+        };
+        if (parsed.input.source.kind === "personal_note") {
+          const activatedGrant: SharedMemoryGrant = {
+            source: parsed.input.source,
+            sourceCapabilities: ["memory_events"],
+            activationRepresentation: "memory_events",
+            id: interactionIds.noteGrant,
+            logicalGrantId: parsed.input.logicalGrantId,
+            logicalMemoryId: parsed.input.logicalMemoryId,
+            ownerUserId:
+              actor === "alice"
+                ? interactionIds.alicePersonal
+                : interactionIds.bobPersonal,
+            teamId: parsed.input.teamId,
+            workspaceId: parsed.input.workspaceId,
+            consentId: parsed.input.consentId,
+            mode: parsed.input.mode,
+            maximumFidelity: "memory_events",
+            includeCuratedMemory: false,
+            fidelityPolicyRevision: 1,
+            sourceRevision: 1,
+            grantVersion: 1,
+            lifecycle: "active",
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            revokedAt: null,
+            companionThreadId: interactionIds.noteDiscussion
+          };
+          noteGrant = activatedGrant;
+          noteOwnedShare = {
+            kind: "pending",
+            pendingShare: {
+              ...acceptedPendingShare,
+              state: "activated",
+              stage: "complete",
+              workspaceAccessState: "active",
+              sourceUpdateState:
+                parsed.input.mode === "continuous" ? "active" : "stopped",
+              operationVersion: 2,
+              activatedAt: timestamp,
+              grantId: activatedGrant.id,
+              grantVersion: activatedGrant.grantVersion
+            },
+            sourceAccess: null,
+            preview: interactionNotePreview(
+              interactionNote(actor, "Browser launch note", 1),
+              parsed.input.source,
+              parsed.input.mode,
+              1
+            ),
+            summary: {
+              source: acceptedPendingShare.source,
+              sourceSessionId: null,
+              sourceTitle: "Browser launch note",
+              teamName: "Electron Team App",
+              workspaceName: "Electron Team App",
+              workspaceContentAccess: "available",
+              mode: parsed.input.mode,
+              authorizedPreview: {
+                previewId: interactionIds.notePreview,
+                previewHash: "b".repeat(64),
+                previewRevision: 1,
+                sourceRevision: 1
+              },
+              lastReadyRevision: 1,
+              lastSuccessfulUpdateAt: timestamp
+            }
+          };
+        }
+        return result(parsed, {
+          pendingShare: acceptedPendingShare
+        });
+      }
       case "collaboration.get_owned_share": {
         const share = [
+          ...(noteOwnedShare ? [noteOwnedShare] : []),
           pendingOwnedShare,
           ...(activeOwnedShare ? [activeOwnedShare] : []),
           ...revokedOwnedShares
@@ -1508,46 +2049,72 @@ const createStatefulCollaborationBridge = (actor: StatefulActor) => {
         if (!share) return failure(parsed);
         return result(parsed, { share });
       }
-      case "collaboration.preview_shared_memory_candidate":
+      case "collaboration.list_owned_shared_memory_grants":
         return result(parsed, {
-          candidate: {
-            sessionId: parsed.input.sessionId,
-            logicalMemoryId: interactionIds.alphaMemory,
-            representation: parsed.input.representation,
-            sourceRevision: 12,
-            candidateHash: "c".repeat(64),
-            itemCount: 1,
-            excludedItemCount: 0,
-            manifest: [
-              {
-                sourceId: uuid(160),
-                revisionHash: "d".repeat(64)
-              }
-            ],
-            byteCount: new TextEncoder().encode(ownerOnlyCredentialSource)
-              .byteLength,
-            items: [
-              {
-                id: uuid(160),
-                representation: "memory_events",
-                sequence: 1,
-                occurredAt: timestamp,
-                sourceItems: [
+          grants: [
+            ...(noteGrant ? [noteGrant] : []),
+            ...(activeOwnedShare
+              ? [
                   {
-                    id: uuid(161),
-                    sourceKind: "agent_message",
-                    occurredAt: timestamp,
-                    body: ownerOnlyCredentialSource,
-                    actorName: "Codex",
-                    toolName: null,
-                    toolCallId: null
+                    ...activeOwnedShare.grant,
+                    companionThreadId: interactionIds.alphaDiscussion
                   }
                 ]
-              }
-            ]
-          }
+              : [])
+          ].filter(
+            (grant) =>
+              !parsed.input.logicalMemoryId ||
+              grant.logicalMemoryId === parsed.input.logicalMemoryId
+          )
         });
       case "collaboration.control_pending_share": {
+        if (
+          noteOwnedShare &&
+          parsed.input.pendingShareId === noteOwnedShare.pendingShare.id
+        ) {
+          const nextState =
+            parsed.input.action === "pause"
+              ? "paused"
+              : parsed.input.action === "resume"
+                ? latestProjectedNote &&
+                  latestProjectedNote.revision >
+                    (noteOwnedShare.summary.lastReadyRevision ?? 0)
+                  ? "preparing"
+                  : "active"
+                : parsed.input.action === "revoke"
+                  ? "stopped"
+                  : noteOwnedShare.pendingShare.sourceUpdateState;
+          noteOwnedShare = {
+            ...noteOwnedShare,
+            pendingShare: {
+              ...noteOwnedShare.pendingShare,
+              ...(parsed.input.action === "resume" &&
+              latestProjectedNote &&
+              latestProjectedNote.revision >
+                (noteOwnedShare.summary.lastReadyRevision ?? 0)
+                ? {
+                    source: {
+                      kind: "personal_note" as const,
+                      noteId: latestProjectedNote.noteId,
+                      noteRevision: latestProjectedNote.revision,
+                      memoryEventId: latestProjectedNote.memoryEventId!,
+                      logicalMemoryId: latestProjectedNote.logicalMemoryId
+                    },
+                    sourceRevision: latestProjectedNote.revision,
+                    state: "preparing" as const,
+                    stage: "processing" as const
+                  }
+                : {}),
+              sourceUpdateState: nextState,
+              operationVersion:
+                noteOwnedShare.pendingShare.operationVersion + 1,
+              updatedAt: timestamp
+            }
+          };
+          return result(parsed, {
+            pendingShare: noteOwnedShare.pendingShare
+          });
+        }
         const sourceUpdateState =
           parsed.input.action === "pause"
             ? "paused"
@@ -1569,7 +2136,45 @@ const createStatefulCollaborationBridge = (actor: StatefulActor) => {
         });
       }
       case "collaboration.revoke_shared_memory": {
-        if (!activeOwnedShare || activeOwnedShare.kind !== "grant") {
+        if (
+          noteGrant &&
+          noteOwnedShare &&
+          parsed.input.shareGrantId === noteGrant.id
+        ) {
+          noteGrant = {
+            ...noteGrant,
+            lifecycle: "revoked",
+            grantVersion: noteGrant.grantVersion + 1,
+            updatedAt: timestamp,
+            revokedAt: timestamp
+          };
+          noteOwnedShare = {
+            ...noteOwnedShare,
+            pendingShare: {
+              ...noteOwnedShare.pendingShare,
+              state: "revoked",
+              stage: "complete",
+              workspaceAccessState: "revoked",
+              sourceUpdateState: "stopped",
+              operationVersion:
+                noteOwnedShare.pendingShare.operationVersion + 1,
+              updatedAt: timestamp,
+              revokedAt: timestamp
+            }
+          };
+          const revokedNoteShare = noteOwnedShare;
+          revokedOwnedShares.unshift(revokedNoteShare);
+          const revokedGrant = noteGrant;
+          const { companionThreadId, ...revokedOwnedGrant } = revokedGrant;
+          void companionThreadId;
+          noteOwnedShare = null;
+          return result(parsed, { grant: revokedOwnedGrant });
+        }
+        if (
+          !activeOwnedShare ||
+          activeOwnedShare.kind !== "grant" ||
+          parsed.input.shareGrantId !== activeOwnedShare.grant.id
+        ) {
           return failure(parsed);
         }
         const revoked: OwnedShareItem = {
@@ -1802,6 +2407,142 @@ const createStatefulCollaborationBridge = (actor: StatefulActor) => {
       }
     });
   };
+  const emitContinuousNoteStatus = () => {
+    if (!noteOwnedShare) return;
+    deliverySequence += 1;
+    emit({
+      contractVersion: COLLABORATION_CONTRACT_VERSION,
+      type: "update",
+      subscriptionId: interactionIds.personalSubscription,
+      deliveryId: `delivery_browser_${String(deliverySequence).padStart(20, "0")}`,
+      eventId: uuid(950 + deliverySequence),
+      occurredAt: timestamp,
+      family: "pending_share_lifecycle",
+      resource: {
+        scope: "personal",
+        teamId: null,
+        workspaceId: null,
+        threadId: null,
+        messageId: null,
+        sharedSessionId: null,
+        shareGrantId: null
+      },
+      update: {
+        type: "owned_share_status_changed",
+        pendingShareId: noteOwnedShare.pendingShare.id,
+        sourceTitle: noteOwnedShare.summary.sourceTitle,
+        state: noteOwnedShare.pendingShare.state,
+        stage: noteOwnedShare.pendingShare.stage,
+        workspaceAccessState: noteOwnedShare.pendingShare.workspaceAccessState,
+        sourceUpdateState: noteOwnedShare.pendingShare.sourceUpdateState,
+        redactedFailureCode: noteOwnedShare.pendingShare.redactedFailureCode
+      }
+    });
+  };
+  const noteRevisionProjected = (note: PersonalDesktopNote) => {
+    latestProjectedNote = note;
+    projectedNotesByRevision.set(note.revision, note);
+    if (
+      !noteOwnedShare ||
+      noteOwnedShare.pendingShare.mode !== "continuous" ||
+      noteOwnedShare.pendingShare.state === "revoked" ||
+      noteOwnedShare.pendingShare.sourceUpdateState === "paused" ||
+      !note.memoryEventId
+    ) {
+      return;
+    }
+    noteOwnedShare = {
+      ...noteOwnedShare,
+      pendingShare: {
+        ...noteOwnedShare.pendingShare,
+        source: {
+          kind: "personal_note",
+          noteId: note.noteId,
+          noteRevision: note.revision,
+          memoryEventId: note.memoryEventId,
+          logicalMemoryId: note.logicalMemoryId
+        },
+        sourceRevision: note.revision,
+        state: "preparing",
+        stage: "processing",
+        sourceUpdateState: "preparing",
+        operationVersion: noteOwnedShare.pendingShare.operationVersion + 1,
+        updatedAt: timestamp
+      }
+    };
+    emitContinuousNoteStatus();
+  };
+  const completeContinuousNoteRevision = () => {
+    const memoryEventId = latestProjectedNote?.memoryEventId;
+    if (
+      !noteOwnedShare ||
+      !noteGrant ||
+      !latestProjectedNote ||
+      !memoryEventId
+    ) {
+      throw new Error("Continuous Note revision is not ready to complete");
+    }
+    const note = latestProjectedNote;
+    const source = {
+      kind: "personal_note" as const,
+      noteId: note.noteId,
+      noteRevision: note.revision,
+      memoryEventId,
+      logicalMemoryId: note.logicalMemoryId
+    };
+    const sourceTitle =
+      note.body
+        .split(/\r?\n/u)
+        .find((line) => line.trim())
+        ?.replace(/^#+\s*/u, "")
+        .trim() || "Untitled Note";
+    const updatedGrant = {
+      ...noteGrant,
+      source,
+      sourceRevision: note.revision,
+      grantVersion: noteGrant.grantVersion + 1,
+      updatedAt: timestamp
+    };
+    noteGrant = updatedGrant;
+    noteOwnedShare = {
+      ...noteOwnedShare,
+      pendingShare: {
+        ...noteOwnedShare.pendingShare,
+        source,
+        sourceRevision: note.revision,
+        state: "activated",
+        stage: "complete",
+        workspaceAccessState: "active",
+        sourceUpdateState: "active",
+        operationVersion: noteOwnedShare.pendingShare.operationVersion + 1,
+        updatedAt: timestamp,
+        activatedAt: timestamp,
+        grantId: updatedGrant.id,
+        grantVersion: updatedGrant.grantVersion
+      },
+      preview: interactionNotePreview(
+        note,
+        source,
+        noteOwnedShare.pendingShare.mode,
+        (noteOwnedShare.summary.authorizedPreview?.previewRevision ?? 0) + 1
+      ),
+      summary: {
+        ...noteOwnedShare.summary,
+        sourceTitle,
+        authorizedPreview: {
+          previewId: interactionIds.notePreview,
+          previewHash: note.contentHash,
+          previewRevision:
+            (noteOwnedShare.summary.authorizedPreview?.previewRevision ?? 0) +
+            1,
+          sourceRevision: note.revision
+        },
+        lastReadyRevision: note.revision,
+        lastSuccessfulUpdateAt: timestamp
+      }
+    };
+    emitContinuousNoteStatus();
+  };
 
   return {
     bridge: {
@@ -1856,6 +2597,8 @@ const createStatefulCollaborationBridge = (actor: StatefulActor) => {
       },
       emitBackpressure,
       emitPendingShareNeedsAttention,
+      noteRevisionProjected,
+      completeContinuousNoteRevision,
       setReconnecting,
       revokeTeamAccess
     }
@@ -1881,6 +2624,16 @@ const CollaborationInteractionsValidationApp = () => {
       }),
     [fixture]
   );
+  const personalApi = useMemo(() => {
+    const actor =
+      new URLSearchParams(window.location.search).get("actor") === "bob"
+        ? "bob"
+        : "alice";
+    return createInteractionPersonalMemoryApi(
+      actor,
+      fixture.controls.noteRevisionProjected
+    );
+  }, [fixture]);
   useEffect(() => {
     const browserWindow = window as Window & {
       __koedCollaborationInteractions?: StatefulBrowserControls;
@@ -1902,6 +2655,7 @@ const CollaborationInteractionsValidationApp = () => {
         sharedSessionId: interactionIds.alphaSession
       }}
       onboardingComplete
+      personalMemoryApi={personalApi}
       statusReadyOverride
     />
   );

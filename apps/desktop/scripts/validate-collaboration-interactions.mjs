@@ -20,7 +20,12 @@ const ids = {
   betaTeam: uuid(121),
   betaWorkspace: uuid(122),
   betaSession: uuid(127),
-  actionGrant: uuid(140)
+  aliceNote: uuid(130),
+  aliceNoteMemoryEvent: uuid(132),
+  aliceNoteLogicalMemory: uuid(134),
+  actionGrant: uuid(140),
+  notePendingShare: uuid(720),
+  noteGrant: uuid(724)
 };
 const invitationUrl =
   "https://team.example.test/invitations/accept?token=alpha-1";
@@ -133,6 +138,30 @@ const trustedType = async (window, locator, value) => {
   await delay(20);
 };
 
+const trustedReplace = async (window, locator, value) => {
+  await trustedClick(window, locator);
+  await evaluate(
+    window,
+    `(() => {
+      const input = (${locator});
+      const prototype = input instanceof HTMLInputElement
+        ? HTMLInputElement.prototype
+        : input instanceof HTMLTextAreaElement
+          ? HTMLTextAreaElement.prototype
+          : null;
+      if (!prototype) return false;
+      const setter = Object.getOwnPropertyDescriptor(
+        prototype,
+        'value'
+      )?.set;
+      setter?.call(input, ${JSON.stringify(value)});
+      input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      return true;
+    })()`
+  );
+  await delay(20);
+};
+
 const trustedKey = async (window, keyCode) => {
   window.webContents.sendInputEvent({ type: "keyDown", keyCode });
   window.webContents.sendInputEvent({ type: "keyUp", keyCode });
@@ -145,6 +174,8 @@ const bodyExcludes = (text) => `!(${bodyIncludes(text)})`;
 
 const commands = (window) =>
   evaluate(window, `window.__koedCollaborationInteractions.commands()`);
+const personalMemoryCommands = (window) =>
+  evaluate(window, `window.__koedPersonalMemoryCommands ?? []`);
 const lastCommand = async (window, name) => {
   const all = await commands(window);
   const matching = all.filter((command) => command.command === name);
@@ -683,12 +714,319 @@ const run = async () => {
     );
     await trustedClick(
       alice,
+      `${byText(".desktop-sidebar-nav-item", "Notes")}`
+    );
+    await waitFor(
+      alice,
+      `${bodyIncludes("Browser launch note")} && ${bodyIncludes("New Note")}`,
+      "Personal Note list"
+    );
+    await trustedClick(
+      alice,
+      `document.querySelector('[aria-label="New Note"]')`
+    );
+    await waitFor(
+      alice,
+      `Boolean(document.querySelector('textarea[aria-label="Note content"]'))`,
+      "new Personal Note composer"
+    );
+    await trustedType(
+      alice,
+      `document.querySelector('textarea[aria-label="Note content"]')`,
+      "Browser-created durable Note"
+    );
+    await trustedClick(alice, `${byText("button", "Save Note")}`);
+    const noteCommands = await personalMemoryCommands(alice);
+    const createdNote = noteCommands.at(-1);
+    assert.equal(createdNote?.operation, "personal.notes.create");
+    assert.equal(createdNote?.input.body, "Browser-created durable Note");
+    assert.equal(typeof createdNote?.input.idempotencyKey, "string");
+    await trustedClick(
+      alice,
+      `[...document.querySelectorAll('.personal-note-items > button')]
+        .find((button) => button.textContent?.includes('Browser launch note'))`
+    );
+    await waitFor(
+      alice,
+      `${bodyIncludes("Two independent reviewers are required.")} && Boolean(document.querySelector('[aria-label="Rename Note"]'))`,
+      "Personal Note exact detail"
+    );
+    await trustedClick(
+      alice,
+      `document.querySelector('[aria-label="Rename Note"]')`
+    );
+    await waitFor(
+      alice,
+      `Boolean(document.querySelector('.personal-note-header input')) && Boolean(document.querySelector('[aria-label="Save Note title"]'))`,
+      "Personal Note rename editor"
+    );
+    await trustedReplace(
+      alice,
+      `document.querySelector('.personal-note-header input')`,
+      "Renamed browser Note"
+    );
+    await trustedClick(
+      alice,
+      `document.querySelector('[aria-label="Save Note title"]')`
+    );
+    await waitFor(
+      alice,
+      bodyIncludes("Renamed browser Note"),
+      "Personal Note title rename"
+    );
+    await setEmulatedViewport(alice, 640, 800);
+    await waitFor(
+      alice,
+      `document.querySelector('.personal-notes-workspace')?.dataset.narrowView === 'detail' && ${bodyIncludes("Back to Notes")}`,
+      "narrow Personal Note detail"
+    );
+    await setEmulatedViewport(alice, 1280, 800);
+    await trustedClick(
+      alice,
+      `document.querySelector('[aria-label="Share Note"]')`
+    );
+    await waitFor(
+      alice,
+      `${bodyIncludes("Share Note")} && ${bodyIncludes("Keep this Note up to date")} && ${bodyIncludes("Later edits will replace the Team copy after privacy checks finish.")} && ${bodyIncludes("Review")}`,
+      "Continuous Personal Note Share review"
+    );
+    await trustedClick(alice, `${byText("button", "Review")}`);
+    await waitFor(
+      alice,
+      `${bodyIncludes("Approve to share this note with Electron Team App.")} && ${bodyIncludes("Later edits will replace the Team copy after privacy checks finish.")}`,
+      "exact Personal Note candidate preview"
+    );
+    await trustedClick(alice, `${byText("button", "Approve and share")}`);
+    await waitFor(
+      alice,
+      bodyIncludes("Share accepted"),
+      "Personal Note Pending Share progress"
+    );
+    const noteCandidate = await lastCommand(
+      alice,
+      "collaboration.preview_shared_memory_candidate"
+    );
+    assert.deepEqual(noteCandidate.input, {
+      source: {
+        kind: "personal_note",
+        noteId: ids.aliceNote,
+        noteRevision: 1,
+        memoryEventId: ids.aliceNoteMemoryEvent,
+        logicalMemoryId: ids.aliceNoteLogicalMemory
+      },
+      mode: "continuous",
+      activationRepresentation: "memory_events"
+    });
+    const noteShare = await lastCommand(alice, "collaboration.share_memory");
+    assert.deepEqual(noteShare.input.source, {
+      kind: "personal_note",
+      noteId: ids.aliceNote,
+      noteRevision: 1,
+      memoryEventId: ids.aliceNoteMemoryEvent,
+      logicalMemoryId: ids.aliceNoteLogicalMemory
+    });
+    assert.equal(noteShare.input.mode, "continuous");
+    assert.deepEqual(noteShare.input.sourceCapabilities, ["memory_events"]);
+    assert.equal(noteShare.input.activationRepresentation, "memory_events");
+    assert.equal(noteShare.input.maximumFidelity, "memory_events");
+    assert.equal(noteShare.input.includeCuratedMemory, false);
+    await trustedClick(alice, `${byText("button", "Close")}`);
+
+    const revisionTwoBody =
+      "# Continuous browser revision two\nPrivacy-safe replacement content.";
+    await trustedClick(
+      alice,
+      `document.querySelector('[aria-label="Edit Note content"]')`
+    );
+    await waitFor(
+      alice,
+      `Boolean(document.querySelector('textarea[aria-label="Note content"]'))`,
+      "Personal Note revision editor"
+    );
+    await trustedReplace(
+      alice,
+      `document.querySelector('textarea[aria-label="Note content"]')`,
+      revisionTwoBody
+    );
+    await trustedClick(
+      alice,
+      `${byText(".personal-note-edit-actions button", "Save")}`
+    );
+    await waitFor(
+      alice,
+      `${bodyIncludes("Continuous browser revision two")} && !document.querySelector('textarea[aria-label="Note content"]')`,
+      "saved Personal Note revision two"
+    );
+    const revisionTwoCommand = (await personalMemoryCommands(alice)).at(-1);
+    assert.equal(revisionTwoCommand?.operation, "personal.notes.update");
+    assert.equal(revisionTwoCommand?.input.noteId, ids.aliceNote);
+    assert.equal(revisionTwoCommand?.input.expectedRevision, 1);
+    assert.equal(revisionTwoCommand?.input.body, revisionTwoBody);
+    assert.equal(
+      typeof revisionTwoCommand?.input.idempotencyKey,
+      "string",
+      "Personal Note revisions require an idempotency key"
+    );
+
+    await trustedClick(
+      alice,
       `${byText(".desktop-sidebar-nav-item", "Shares")}`
     );
     await waitFor(
       alice,
-      bodyIncludes("Packaged asynchronous sharing"),
+      `${bodyIncludes("Packaged asynchronous sharing")} && ${bodyIncludes("Browser launch note")}`,
       "owner-wide Shares route"
+    );
+    await trustedClick(
+      alice,
+      `[...document.querySelectorAll('.collab-share-row')]
+        .find((item) => item.textContent?.includes('Browser launch note'))`
+    );
+    await waitFor(
+      alice,
+      `${bodyIncludes("Revision 1")} && ${bodyIncludes("Two independent reviewers are required.")} && ${bodyExcludes("Privacy-safe replacement content.")}`,
+      "last authorized Note revision while update is preparing"
+    );
+    await evaluate(
+      alice,
+      `window.__koedCollaborationInteractions.completeContinuousNoteRevision()`
+    );
+    await waitFor(
+      alice,
+      `${bodyIncludes("Continuous browser revision two")} && ${bodyIncludes("Revision 2")} && ${bodyIncludes("Privacy-safe replacement content.")}`,
+      "atomically published Continuous Note revision two"
+    );
+    await trustedClick(alice, `${byText("button", "Modify")}`);
+    await trustedClick(alice, `${byText("button", "Pause updates")}`);
+    await waitFor(
+      alice,
+      `${byText("button", "Resume updates")} === document.activeElement`,
+      "paused Continuous Note updates"
+    );
+    const pauseNote = await lastCommand(
+      alice,
+      "collaboration.control_pending_share"
+    );
+    assert.equal(pauseNote.input.pendingShareId, ids.notePendingShare);
+    assert.equal(pauseNote.input.expectedOperationVersion, 4);
+    assert.equal(pauseNote.input.action, "pause");
+    assert.equal(typeof pauseNote.input.mutationId, "string");
+    await trustedClick(alice, `${byText("button", "Done")}`);
+
+    await trustedClick(
+      alice,
+      `${byText(".desktop-sidebar-nav-item", "Notes")}`
+    );
+    await trustedClick(
+      alice,
+      `[...document.querySelectorAll('.personal-note-items > button')]
+        .find((button) => button.textContent?.includes('Renamed browser Note'))`
+    );
+    await trustedClick(
+      alice,
+      `document.querySelector('[aria-label="Edit Note content"]')`
+    );
+    const revisionThreeBody =
+      "# Continuous browser revision three\nCatch up only after updates resume.";
+    await trustedReplace(
+      alice,
+      `document.querySelector('textarea[aria-label="Note content"]')`,
+      revisionThreeBody
+    );
+    await trustedClick(
+      alice,
+      `${byText(".personal-note-edit-actions button", "Save")}`
+    );
+    await waitFor(
+      alice,
+      `${bodyIncludes("Continuous browser revision three")} && !document.querySelector('textarea[aria-label="Note content"]')`,
+      "saved Personal Note revision three while paused"
+    );
+    await trustedClick(
+      alice,
+      `${byText(".desktop-sidebar-nav-item", "Shares")}`
+    );
+    await trustedClick(
+      alice,
+      `[...document.querySelectorAll('.collab-share-row')]
+        .find((item) => item.textContent?.includes('Continuous browser revision two'))`
+    );
+    await waitFor(
+      alice,
+      `${bodyIncludes("Updates paused")} && ${bodyIncludes("Revision 2")} && ${bodyIncludes("Privacy-safe replacement content.")} && ${bodyExcludes("Catch up only after updates resume.")}`,
+      "paused Note Share retains its last authorized revision"
+    );
+    await trustedClick(alice, `${byText("button", "Modify")}`);
+    await trustedClick(alice, `${byText("button", "Resume updates")}`);
+    await waitFor(
+      alice,
+      bodyIncludes("Sharing updates"),
+      "Continuous Note catch-up preparation"
+    );
+    const resumeNote = await lastCommand(
+      alice,
+      "collaboration.control_pending_share"
+    );
+    assert.equal(resumeNote.input.pendingShareId, ids.notePendingShare);
+    assert.equal(resumeNote.input.expectedOperationVersion, 5);
+    assert.equal(resumeNote.input.action, "resume");
+    assert.equal(typeof resumeNote.input.mutationId, "string");
+    await trustedClick(alice, `${byText("button", "Done")}`);
+    await evaluate(
+      alice,
+      `window.__koedCollaborationInteractions.completeContinuousNoteRevision()`
+    );
+    await waitFor(
+      alice,
+      `${bodyIncludes("Continuous browser revision three")} && ${bodyIncludes("Revision 3")} && ${bodyIncludes("Catch up only after updates resume.")}`,
+      "resumed Continuous Note catches up to revision three"
+    );
+
+    const noteRevocationsBeforeCancel = (await commands(alice)).filter(
+      (command) => command.command === "collaboration.revoke_shared_memory"
+    ).length;
+    await trustedClick(alice, `${byText("button", "Revoke")}`);
+    await waitFor(
+      alice,
+      bodyIncludes("Your Personal Memory will not be deleted."),
+      "Continuous Note revocation confirmation"
+    );
+    await trustedClick(alice, `${byText("button", "Cancel")}`);
+    await waitFor(
+      alice,
+      bodyExcludes("Your Personal Memory will not be deleted."),
+      "canceled Continuous Note revocation confirmation"
+    );
+    assert.equal(
+      (await commands(alice)).filter(
+        (command) => command.command === "collaboration.revoke_shared_memory"
+      ).length,
+      noteRevocationsBeforeCancel,
+      "Canceling Continuous Note revocation must preserve access"
+    );
+    await trustedClick(alice, `${byText("button", "Revoke")}`);
+    await waitFor(
+      alice,
+      bodyIncludes("Your Personal Memory will not be deleted."),
+      "reopened Continuous Note revocation confirmation"
+    );
+    await trustedClick(alice, `${byText("button", "Revoke Share")}`);
+    await waitFor(
+      alice,
+      `[...document.querySelectorAll('[aria-labelledby="collab-revoked-shares"] .collab-share-row')]
+        .some((item) => item.textContent?.includes('Continuous browser revision three'))`,
+      "revoked Continuous Note Share"
+    );
+    const noteRevocation = await lastCommand(
+      alice,
+      "collaboration.revoke_shared_memory"
+    );
+    assert.equal(noteRevocation.input.shareGrantId, ids.noteGrant);
+
+    await trustedClick(
+      alice,
+      `[...document.querySelectorAll('.collab-share-row')]
+        .find((item) => item.textContent?.includes('Packaged asynchronous sharing'))`
     );
     await trustedClick(alice, `${byText("button", "Modify")}`);
     await trustedClick(alice, `${byText("button", "Pause updates")}`);
@@ -705,8 +1043,9 @@ const run = async () => {
     );
     await waitFor(
       alice,
-      bodyIncludes(ownerOnlyCredentialSource),
-      "owner-only Personal source preview"
+      `${bodyIncludes(ownerOnlyCredentialSource)} &&
+        document.querySelector('.collab-share-facts .collab-share-state')?.textContent?.trim().toLowerCase() === 'active'`,
+      "active owner-only Personal source preview"
     );
     assert.equal(
       await evaluate(alice, bodyIncludes(teamSafeCredentialSource)),
@@ -742,6 +1081,20 @@ const run = async () => {
       `Expected reduced transition duration, received ${reducedMotion.transitionDuration}`
     );
 
+    const snapshotRevocationCommandsBeforeCancel = (
+      await commands(alice)
+    ).filter(
+      (command) => command.command === "collaboration.revoke_shared_memory"
+    );
+    assert.deepEqual(
+      snapshotRevocationCommandsBeforeCancel.map(
+        (command) => command.input.shareGrantId
+      ),
+      [ids.noteGrant],
+      "Continuous Note revocation must not revoke another Share Grant"
+    );
+    const snapshotRevocationsBeforeCancel =
+      snapshotRevocationCommandsBeforeCancel.length;
     await trustedClick(alice, `${byText("button", "Revoke")}`);
     await waitFor(
       alice,
@@ -758,10 +1111,15 @@ const run = async () => {
       (await commands(alice)).filter(
         (command) => command.command === "collaboration.revoke_shared_memory"
       ).length,
-      0,
+      snapshotRevocationsBeforeCancel,
       "Canceling destructive confirmation must preserve access"
     );
     await trustedClick(alice, `${byText("button", "Revoke")}`);
+    await waitFor(
+      alice,
+      bodyIncludes("Your Personal Memory will not be deleted."),
+      "reopened captured-session revocation confirmation"
+    );
     await trustedClick(alice, `${byText("button", "Revoke Share")}`);
     await waitFor(
       alice,
@@ -844,7 +1202,7 @@ const run = async () => {
     );
 
     process.stdout.write(
-      "Collaboration interaction validation passed: owner-only source versus Team-safe representation, owner-wide Shares access and accessibility, trusted Team switching, invitations, channel/DM delivery, Shared Memory layouts, reconnect/replay/backpressure recovery, and stale-event access purge.\n"
+      "Collaboration interaction validation passed: Personal Note create/load/rename, Continuous Share revision publication, pause/resume catch-up and revocation, owner-only source versus Team-safe representation, owner-wide Shares access and accessibility, trusted Team switching, invitations, channel/DM delivery, Shared Memory layouts, reconnect/replay/backpressure recovery, and stale-event access purge.\n"
     );
   } finally {
     for (const window of windows) {

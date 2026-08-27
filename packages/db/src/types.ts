@@ -46,9 +46,9 @@ export type CaptureState = "enabled" | "disabled" | "ask";
 
 export type CapturePolicyTarget = "global" | "project" | "thread";
 
-export type MemoryQuestionStatus = "answered" | "error";
+export type MemoryQuestionStatus = "pending" | "answered" | "error";
 
-export type MemoryQuestionOrigin = "mcp_memory_answer";
+export type MemoryQuestionOrigin = "desktop_ask" | "mcp_memory_answer";
 
 export type MemoryQuestionSearchDomain = "global" | "project" | "session";
 
@@ -1624,6 +1624,8 @@ export interface MemoryQuestionShellRecord {
   sessionId: string | null;
   threadId: string | null;
   threadName: string | null;
+  askThreadId: string | null;
+  askTurnIndex: number | null;
   query: string;
   answerPreview: string | null;
   errorMessage: string | null;
@@ -1642,6 +1644,24 @@ export interface MemoryQuestionDetailRecord extends MemoryQuestionShellRecord {
   retrieval: Record<string, unknown> | null;
   localMemoryWorker: Record<string, unknown> | null;
   response: Record<string, unknown> | null;
+}
+
+export interface DesktopAskThreadCursor {
+  latestQuestionId: string;
+  updatedAt: string;
+}
+
+export interface DesktopAskThreadShellRecord {
+  askThreadId: string;
+  firstQuestion: string;
+  latestStatus: MemoryQuestionStatus;
+  turnCount: number;
+  updatedAt: string;
+}
+
+export interface DesktopAskThreadPage {
+  nextCursor: DesktopAskThreadCursor | null;
+  threads: DesktopAskThreadShellRecord[];
 }
 
 export interface LocalMemoryAgentSettingRecord {
@@ -1909,6 +1929,19 @@ export interface MemorySourceRepository
   createUser(input: CreateUserInput): Promise<{ id: string }>;
   findUserByEmail(email: string): Promise<UserRecord | null>;
   getUser(userId: string): Promise<UserRecord | null>;
+  getPersonalNoteMemoryEvent(
+    actor: ActorContext,
+    noteId: string
+  ): Promise<LcmGraphEvent | null>;
+  getPersonalNoteRevisionMemoryEvent(
+    actor: ActorContext,
+    input: { noteId: string; revision: number }
+  ): Promise<LcmGraphEvent | null>;
+  notifyPersonalNoteChanged(
+    actor: ActorContext,
+    noteId: string,
+    operation: "INSERT" | "UPDATE"
+  ): Promise<void>;
   createCuratedMemoryProposal(
     actor: ActorContext,
     input: CuratedMemoryProposalInput
@@ -2511,6 +2544,7 @@ export interface MemorySourceRepository
       includeInvalidated?: boolean;
       includeContent?: boolean;
       includeRaw?: boolean;
+      canonicalCapturedSessionEventsOnly?: boolean;
       limit?: number;
     }
   ): Promise<LcmGraphEvent[]>;

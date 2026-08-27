@@ -115,7 +115,8 @@ other deterministic failures remain terminal and fail closed.
   add bounded storage without duplicating the Personal database.
 - A Privacy Filter outage does not block Personal capture, Projection, LCM, or
   Recall, but it does block new Team materialization.
-- Migration `0030` is an internal alpha baseline and refuses populated legacy
+- Migration `0034` is the internal alpha selective-PII baseline. It refuses
+  populated legacy
   Team-sharing rows whose unsanitized content cannot be given truthful privacy
   provenance. Test data must be reset before applying it; Personal canonical
   source is outside that reset boundary. Release migrations will be collapsed

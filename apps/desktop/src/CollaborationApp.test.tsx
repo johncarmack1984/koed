@@ -3,6 +3,7 @@
 import {
   COLLABORATION_CONTRACT_VERSION,
   COLLABORATION_DEFAULT_LIMITS,
+  PERSONAL_DESKTOP_CONTRACT_VERSION,
   collaborationSafeErrorMessages,
   collaborationSnapshotSchema,
   type CollaborationMessage,
@@ -12,6 +13,7 @@ import {
   type OwnedShareItem,
   type PendingShare,
   type PersonalDesktopApi,
+  type PersonalDesktopNote,
   type SharedMemoryGrant,
   type SharedMemoryPreview,
   type SharedMemoryRepresentation,
@@ -161,7 +163,6 @@ const ids = {
   team: uuid(4),
   teamTwo: uuid(5),
   workspace: uuid(6),
-  notes: uuid(7),
   personalChannel: uuid(8),
   channel: uuid(9),
   dm: uuid(10),
@@ -249,13 +250,6 @@ const baseThread = (id: string, logicalId: string) => ({
   archivedAt: null
 });
 
-const notes = () => ({
-  ...baseThread(ids.notes, uuid(101)),
-  kind: "notes_to_self" as const,
-  scope: "personal" as const,
-  ownerUserId: ids.mark,
-  participants: [participant(mark)]
-});
 type PersonalChannel = Extract<
   CollaborationThread,
   { kind: "personal_channel" }
@@ -311,14 +305,8 @@ const message = (
 ): CollaborationMessage => ({
   id,
   threadId,
-  scope:
-    threadId === ids.notes || threadId === ids.personalChannel
-      ? "personal"
-      : "team",
-  teamId:
-    threadId === ids.notes || threadId === ids.personalChannel
-      ? null
-      : ids.team,
+  scope: threadId === ids.personalChannel ? "personal" : "team",
+  teamId: threadId === ids.personalChannel ? null : ids.team,
   sequence: 1,
   sender: participant(sender),
   senderKind: "user",
@@ -430,6 +418,8 @@ const sharedSession = (
   owner: participant(remoteMark),
   title,
   latestActivityAt: at,
+  sourceCapabilities: ["memory_events", "lcm_leaves", "lcm_rollups"],
+  activationRepresentation: maximumFidelity,
   maximumFidelity,
   includeCuratedMemory: false,
   liveState: "live",
@@ -477,7 +467,6 @@ const baseSnapshot = (): CollaborationSnapshot =>
             syncState: "ready"
           }
         ],
-        notesToSelf: notes(),
         channels: [personalChannel()]
       },
       teams: [
@@ -522,18 +511,22 @@ const baseSnapshot = (): CollaborationSnapshot =>
         }
       ]
     },
-    selection: { kind: "notes_to_self" },
+    selection: { kind: "personal_memory" },
     view: {
-      kind: "thread",
-      thread: notes(),
-      messages: page(ids.notes, [
-        message(
-          uuid(401),
-          ids.notes,
-          "Check the Shared Memory split view.",
-          mark
-        )
-      ])
+      kind: "personal_memory",
+      entries: [
+        {
+          id: uuid(301),
+          logicalMemoryId: uuid(302),
+          title: "Renderer cutover",
+          projectName: "koed",
+          updatedAt: at,
+          preview: "The collaboration renderer uses the shared contract.",
+          eventCount: 12,
+          hasSynchronizedRevision: true,
+          syncState: "ready"
+        }
+      ]
     }
   });
 
@@ -547,20 +540,6 @@ const viewFor = (
       view = {
         kind: "personal_memory",
         entries: current.navigation.personal.memory
-      };
-      break;
-    case "notes_to_self":
-      view = {
-        kind: "thread",
-        thread: notes(),
-        messages: page(ids.notes, [
-          message(
-            uuid(401),
-            ids.notes,
-            "Check the Shared Memory split view.",
-            mark
-          )
-        ])
       };
       break;
     case "personal_channel": {
@@ -994,9 +973,6 @@ const createClient = (initial = baseSnapshot()): MockClient => {
     getOwnedShare: vi.fn(async () => {
       throw new Error("No owned share fixture");
     }),
-    renameOwnedShare: vi.fn(async () => {
-      throw new Error("No owned share fixture");
-    }),
     controlPendingShare: vi.fn(),
     shareConversationSource: vi.fn(),
     revokeConversationSource: vi.fn(),
@@ -1004,16 +980,23 @@ const createClient = (initial = baseSnapshot()): MockClient => {
       async () => current.navigation.personal.memory[0]!
     ),
     previewSharedMemoryCandidate: vi.fn(async (input) => ({
-      sessionId: input.sessionId,
-      logicalMemoryId: ids.logicalMemory,
-      representation: input.representation,
+      source: input.source,
+      logicalMemoryId: input.source.logicalMemoryId,
+      sourceCapabilities: [
+        "memory_events" as const,
+        "lcm_leaves" as const,
+        "lcm_rollups" as const
+      ],
+      activationRepresentation: input.activationRepresentation,
+      mode: input.mode,
+      expiresAt: null,
       sourceRevision: 12,
       candidateHash: "c".repeat(64),
       itemCount: 1,
       excludedItemCount: 0,
-      manifest: candidateManifestFor(input.representation),
+      manifest: candidateManifestFor(input.activationRepresentation),
       byteCount: 128,
-      items: [sourceItem(input.representation)]
+      items: [sourceItem(input.activationRepresentation)]
     })),
     pauseSharedMemorySync: vi.fn(async () => ({
       ...current.navigation.personal.memory[0]!,
@@ -1028,10 +1011,13 @@ const createClient = (initial = baseSnapshot()): MockClient => {
       syncState: "revoked" as const
     })),
     previewSharedMemory: vi.fn(async (input) => ({
+      source: input.source,
+      sourceCapabilities: input.sourceCapabilities,
       logicalMemoryId: input.logicalMemoryId,
       teamId: input.teamId,
       workspaceId: input.workspaceId,
-      representation: input.representation,
+      activationRepresentation: input.activationRepresentation,
+      mode: input.mode,
       maximumFidelity: input.maximumFidelity,
       includeCuratedMemory: input.includeCuratedMemory,
       previewRevision: 1,
@@ -1042,7 +1028,7 @@ const createClient = (initial = baseSnapshot()): MockClient => {
       sourceContentHash: "a".repeat(64),
       previewHash: "b".repeat(64),
       itemCount: 1,
-      items: [sourceItem(input.representation)],
+      items: [sourceItem(input.activationRepresentation)],
       nextCursor: null
     })),
     loadSharedMemoryPreviewPage: vi.fn(async () => {
@@ -1051,6 +1037,9 @@ const createClient = (initial = baseSnapshot()): MockClient => {
       );
     }),
     shareMemory: vi.fn(async (input) => ({
+      source: input.source,
+      sourceCapabilities: input.sourceCapabilities,
+      activationRepresentation: input.activationRepresentation,
       id: ids.grant,
       logicalGrantId: input.logicalGrantId,
       logicalMemoryId: input.logicalMemoryId,
@@ -1058,6 +1047,7 @@ const createClient = (initial = baseSnapshot()): MockClient => {
       teamId: input.teamId,
       workspaceId: input.workspaceId,
       consentId: input.consentId,
+      mode: input.mode,
       maximumFidelity: "memory_events" as const,
       includeCuratedMemory: false,
       fidelityPolicyRevision: 1,
@@ -1095,12 +1085,21 @@ const click = async (container: HTMLElement, label: string) => {
   const button = [...document.body.querySelectorAll("button")].find(
     (item) =>
       item.getAttribute("aria-label") === label ||
+      item.querySelector("strong")?.textContent?.trim() === label ||
       item.querySelector(".desktop-sidebar-nav-label")?.textContent?.trim() ===
         label ||
       item.textContent?.replace(/\s+/g, " ").trim() === label
   ) as HTMLButtonElement | undefined;
   if (!button) throw new Error(`Missing button: ${label}`);
   await act(async () => button.click());
+};
+
+const clickNoteBody = async () => {
+  const body = document.body.querySelector<HTMLElement>(
+    '[aria-label="Edit Note content"]'
+  );
+  if (!body) throw new Error("Missing Note body edit trigger");
+  await act(async () => body.click());
 };
 
 const setValue = (
@@ -1122,6 +1121,107 @@ const submit = async () => {
   await act(async () =>
     form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }))
   );
+};
+
+const testNote = (
+  sequence: number,
+  body = `Personal Note ${sequence}`
+): PersonalDesktopNote => {
+  const noteId = uuid(1_350 + sequence);
+  return {
+    noteId,
+    title: body.split(/\r?\n/u)[0] || "Untitled Note",
+    titleVersion: 1,
+    body,
+    revisionId: uuid(1_550 + sequence),
+    revision: 1,
+    contentHash: sequence.toString(16).padStart(64, "0"),
+    memoryEventId: noteId,
+    projectionState: "available",
+    projectionFailureCode: null,
+    logicalMemoryId: ids.logicalMemory,
+    createdAt: at,
+    updatedAt: at,
+    sourceSequence: sequence,
+    event: {
+      id: noteId,
+      actor: "user",
+      eventType: "personal_note_revision",
+      timestamp: at,
+      sourceEventTime: at,
+      sourceSequence: sequence,
+      content: body,
+      contentPreview: body,
+      invalidatedAt: null,
+      metadata: {}
+    }
+  };
+};
+
+const createPersonalMemoryApi = (): PersonalDesktopApi => {
+  const stored = new Map<string, PersonalDesktopNote>();
+  const initial = testNote(1, "Check the Shared Memory split view.");
+  stored.set(initial.noteId, initial);
+  return {
+    assignSessionProject: vi.fn(async () => ({ projectId: null })),
+    createNote: vi.fn(async ({ body }) => {
+      const created = testNote(stored.size + 1, body);
+      stored.set(created.noteId, created);
+      return created;
+    }),
+    listProjects: vi.fn(async () => []),
+    loadEventPage: vi.fn(async () => []),
+    updateSessionTitle: vi.fn(async ({ title }) => ({ title })),
+    listNotes: vi.fn(async ({ beforeSequence, limit }) => {
+      const eligible = [...stored.values()]
+        .filter(
+          (item) =>
+            beforeSequence === undefined || item.sourceSequence < beforeSequence
+        )
+        .sort((left, right) => right.sourceSequence - left.sourceSequence);
+      const selected = eligible.slice(0, limit);
+      return {
+        notes: selected,
+        nextBeforeSequence:
+          eligible.length > selected.length
+            ? (selected.at(-1)?.sourceSequence ?? null)
+            : null
+      };
+    }),
+    loadNote: vi.fn(async ({ noteId }) => {
+      const note = stored.get(noteId);
+      if (!note) throw new Error("Note not found");
+      return note;
+    }),
+    renameNote: vi.fn(async ({ noteId, expectedTitleVersion, title }) => {
+      const note = stored.get(noteId);
+      if (!note) throw new Error("Note not found");
+      const renamed = {
+        ...note,
+        title,
+        titleVersion: expectedTitleVersion + 1
+      };
+      stored.set(noteId, renamed);
+      return renamed;
+    }),
+    updateNote: vi.fn(async ({ noteId, expectedRevision, body }) => {
+      const note = stored.get(noteId);
+      if (!note) throw new Error("Note not found");
+      const updated: PersonalDesktopNote = {
+        ...note,
+        body,
+        revisionId: uuid(1_750 + expectedRevision),
+        revision: expectedRevision + 1,
+        contentHash: "f".repeat(64),
+        memoryEventId: null,
+        projectionState: "pending",
+        event: null
+      };
+      stored.set(noteId, updated);
+      return updated;
+    }),
+    subscribe: vi.fn(() => () => undefined)
+  };
 };
 
 describe("CollaborationApp", () => {
@@ -1154,13 +1254,17 @@ describe("CollaborationApp", () => {
     ).IS_REACT_ACT_ENVIRONMENT = false;
   });
 
-  const render = async (client = createClient()) => {
+  const render = async (
+    client = createClient(),
+    personalMemoryApi = createPersonalMemoryApi()
+  ) => {
     await act(async () =>
       root.render(
         <App
           collaborationClient={client}
           initialCollaborationSelection={client.current()?.selection}
           onboardingComplete
+          personalMemoryApi={personalMemoryApi}
           statusReadyOverride
         />
       )
@@ -1274,6 +1378,7 @@ describe("CollaborationApp", () => {
               id: "local-thread",
               name: "Local sharing regression",
               sessionId: localSessionId,
+              logicalMemoryId: uuid(308),
               sourceAiClient: "codex-cli",
               projectId: "koed-project",
               projectName: "koed",
@@ -1343,6 +1448,13 @@ describe("CollaborationApp", () => {
     const pending: OwnedShareItem = {
       kind: "pending",
       pendingShare: {
+        source: {
+          kind: "captured_session",
+          sessionId: entry.id,
+          logicalMemoryId: entry.logicalMemoryId!
+        },
+        sourceCapabilities: ["memory_events"],
+        activationRepresentation: "memory_events",
         id: uuid(620),
         mutationId: uuid(621),
         logicalGrantId: uuid(622),
@@ -1350,7 +1462,6 @@ describe("CollaborationApp", () => {
         logicalMemoryId: entry.logicalMemoryId!,
         teamId: ids.team,
         workspaceId: ids.workspace,
-        representation: "memory_events",
         maximumFidelity: "memory_events",
         includeCuratedMemory: false,
         mode: "continuous",
@@ -1367,14 +1478,21 @@ describe("CollaborationApp", () => {
         updatedAt: at,
         activatedAt: null,
         revokedAt: null,
-        grantId: null
+        grantId: null,
+        grantVersion: null
       },
       sourceAccess: null,
       summary: {
+        source: {
+          kind: "captured_session",
+          sessionId: entry.id,
+          logicalMemoryId: entry.logicalMemoryId!
+        },
         sourceSessionId: entry.id,
         sourceTitle: entry.title,
         teamName: "Atlas Research",
         workspaceName: "Launch Plans",
+        workspaceContentAccess: "available",
         mode: "continuous",
         authorizedPreview: {
           previewId: uuid(624),
@@ -1407,7 +1525,9 @@ describe("CollaborationApp", () => {
     );
 
     await vi.waitFor(() =>
-      expect(document.body.textContent).toContain("preparing · processing")
+      expect(document.body.textContent).toContain(
+        "preparing · privacy filtering"
+      )
     );
     expect(document.body.textContent).not.toContain("Not shared yet.");
     expect(client.listOwnedShares).toHaveBeenCalledWith({
@@ -1428,12 +1548,409 @@ describe("CollaborationApp", () => {
     expect(review?.disabled).toBe(true);
   });
 
+  it("defaults a Personal Note Share to continuous updates", async () => {
+    const snapshot = baseSnapshot();
+    const client = createClient(snapshot);
+    const noteId = uuid(640);
+    const memoryEventId = uuid(641);
+    const logicalMemoryId = uuid(642);
+    const source = {
+      kind: "personal_note" as const,
+      noteId,
+      noteRevision: 1,
+      memoryEventId,
+      logicalMemoryId
+    };
+    const item = {
+      id: memoryEventId,
+      representation: "memory_events" as const,
+      sequence: 1,
+      occurredAt: at,
+      sourceItems: [
+        {
+          id: memoryEventId,
+          sourceKind: "user_message" as const,
+          occurredAt: at,
+          body: "The launch date is Tuesday.",
+          actorName: null,
+          toolName: null,
+          toolCallId: null
+        }
+      ]
+    };
+    vi.mocked(client.previewSharedMemoryCandidate).mockResolvedValue({
+      source,
+      sourceCapabilities: ["memory_events" as const],
+      activationRepresentation: "memory_events" as const,
+      mode: "continuous" as const,
+      expiresAt: null,
+      logicalMemoryId,
+      sourceRevision: 1,
+      candidateHash: "c".repeat(64),
+      itemCount: 1,
+      excludedItemCount: 0,
+      manifest: [{ sourceId: memoryEventId, revisionHash: "d".repeat(64) }],
+      byteCount: 128,
+      items: [item]
+    });
+    vi.mocked(client.previewSharedMemory).mockResolvedValue({
+      source,
+      sourceCapabilities: ["memory_events"],
+      activationRepresentation: "memory_events",
+      mode: "continuous",
+      logicalMemoryId,
+      teamId: ids.team,
+      workspaceId: ids.workspace,
+      maximumFidelity: "memory_events",
+      includeCuratedMemory: false,
+      previewRevision: 1,
+      sourceRevision: 1,
+      policyRevision: 1,
+      contentPolicyVersion: 1,
+      classifierVersion: 1,
+      sourceContentHash: "a".repeat(64),
+      previewHash: "b".repeat(64),
+      itemCount: 1,
+      items: [item],
+      nextCursor: null
+    });
+    vi.mocked(client.shareMemory).mockResolvedValue({
+      source,
+      sourceCapabilities: ["memory_events"],
+      activationRepresentation: "memory_events",
+      id: uuid(643),
+      mutationId: uuid(644),
+      logicalGrantId: uuid(645),
+      consentId: uuid(646),
+      logicalMemoryId,
+      teamId: ids.team,
+      workspaceId: ids.workspace,
+      maximumFidelity: "memory_events",
+      includeCuratedMemory: false,
+      mode: "continuous",
+      sourceRevision: 1,
+      state: "preparing",
+      stage: "accepted",
+      workspaceAccessState: "none",
+      sourceUpdateState: "preparing",
+      operationVersion: 1,
+      attemptCount: 0,
+      redactedFailureCode: null,
+      lastProgressAt: at,
+      createdAt: at,
+      updatedAt: at,
+      activatedAt: null,
+      revokedAt: null,
+      grantId: null,
+      grantVersion: null
+    });
+
+    await act(async () =>
+      root.render(
+        <CollaborationModalLayer
+          client={client}
+          markdownAdapters={{ openExternal: vi.fn(), writeClipboard: vi.fn() }}
+          modal={{
+            kind: "share_personal_note",
+            note: {
+              noteId,
+              memoryEventId,
+              logicalMemoryId,
+              title: "Launch date",
+              titleVersion: 1,
+              body: "The launch date is Tuesday.",
+              revisionId: uuid(647),
+              revision: 1,
+              contentHash: "a".repeat(64),
+              projectionState: "available",
+              projectionFailureCode: null,
+              createdAt: at,
+              updatedAt: at,
+              sourceSequence: 1,
+              event: {
+                id: memoryEventId,
+                actor: "user",
+                eventType: "personal_note_created",
+                timestamp: at,
+                sourceEventTime: at,
+                sourceSequence: 1,
+                content: "The launch date is Tuesday.",
+                contentPreview: "The launch date is Tuesday.",
+                metadata: {},
+                invalidatedAt: null
+              }
+            }
+          }}
+          onModalChange={vi.fn()}
+          snapshot={snapshot}
+        />
+      )
+    );
+
+    expect(document.body.querySelector(".collab-share-summary")).toBeNull();
+    expect(document.body.textContent).toContain(
+      "Later edits will replace the Team copy after privacy checks finish."
+    );
+    const continuousMode = Array.from(
+      document.body.querySelectorAll<HTMLInputElement>('input[type="radio"]')
+    ).find((input) =>
+      input.parentElement?.textContent?.includes("Keep this Note up to date")
+    );
+    const snapshotMode = Array.from(
+      document.body.querySelectorAll<HTMLInputElement>('input[type="radio"]')
+    ).find((input) =>
+      input.parentElement?.textContent?.includes("Share only this revision")
+    );
+    expect(continuousMode?.checked).toBe(true);
+    expect(snapshotMode?.checked).toBe(false);
+    expect(document.body.textContent).not.toContain("Curated Assertions");
+    expect(document.body.querySelectorAll("select")).toHaveLength(2);
+    await click(container, "Review");
+    await vi.waitFor(() =>
+      expect(document.body.textContent).toContain(
+        "Approve to share this note with Launch Plans."
+      )
+    );
+    expect(document.body.querySelectorAll("select")).toHaveLength(0);
+    expect(
+      document.body.querySelector(".collab-note-share-approval")?.textContent
+    ).toBe("Approve to share this note with Launch Plans.");
+    await click(container, "Approve and share");
+    await vi.waitFor(() =>
+      expect(document.body.textContent).toContain("Share accepted")
+    );
+    expect(document.body.textContent).toContain(
+      "Note is being shared Launch Plans."
+    );
+    expect(document.body.textContent).not.toContain(
+      "One immutable snapshot of"
+    );
+    expect(client.previewSharedMemoryCandidate).toHaveBeenCalledWith({
+      source,
+      activationRepresentation: "memory_events",
+      mode: "continuous"
+    });
+    expect(client.shareMemory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source,
+        logicalMemoryId,
+        mode: "continuous",
+        sourceCapabilities: ["memory_events"],
+        activationRepresentation: "memory_events",
+        maximumFidelity: "memory_events",
+        includeCuratedMemory: false
+      })
+    );
+  });
+
+  it("shares an explicit Personal Note snapshot over its existing Workspace grant", async () => {
+    const snapshot = baseSnapshot();
+    const client = createClient(snapshot);
+    const noteId = uuid(648);
+    const previousMemoryEventId = uuid(649);
+    const memoryEventId = uuid(650);
+    const logicalMemoryId = uuid(651);
+    const grantId = uuid(652);
+    const source = {
+      kind: "personal_note" as const,
+      noteId,
+      noteRevision: 2,
+      memoryEventId,
+      logicalMemoryId
+    };
+    const item = {
+      id: memoryEventId,
+      representation: "memory_events" as const,
+      sequence: 1,
+      occurredAt: at,
+      sourceItems: [
+        {
+          id: memoryEventId,
+          sourceKind: "user_message" as const,
+          occurredAt: at,
+          body: "The launch date moved to Wednesday.",
+          actorName: null,
+          toolName: null,
+          toolCallId: null
+        }
+      ]
+    };
+    const grant: SharedMemoryGrant = {
+      source: {
+        kind: "personal_note",
+        noteId,
+        noteRevision: 1,
+        memoryEventId: previousMemoryEventId,
+        logicalMemoryId
+      },
+      sourceCapabilities: ["memory_events"],
+      activationRepresentation: "memory_events",
+      id: grantId,
+      logicalGrantId: uuid(653),
+      logicalMemoryId,
+      ownerUserId: ids.remoteMark,
+      teamId: ids.team,
+      workspaceId: ids.workspace,
+      consentId: uuid(654),
+      mode: "snapshot",
+      maximumFidelity: "memory_events",
+      includeCuratedMemory: false,
+      fidelityPolicyRevision: 1,
+      sourceRevision: 1,
+      grantVersion: 4,
+      lifecycle: "active",
+      createdAt: at,
+      updatedAt: at,
+      revokedAt: null,
+      companionThreadId: ids.discussion
+    };
+    const replacement: PendingShare = {
+      source,
+      sourceCapabilities: ["memory_events"],
+      activationRepresentation: "memory_events",
+      id: uuid(655),
+      mutationId: uuid(656),
+      logicalGrantId: grant.logicalGrantId,
+      consentId: uuid(657),
+      logicalMemoryId,
+      teamId: ids.team,
+      workspaceId: ids.workspace,
+      maximumFidelity: "memory_events",
+      includeCuratedMemory: false,
+      mode: "snapshot",
+      sourceRevision: 2,
+      state: "preparing",
+      stage: "accepted",
+      workspaceAccessState: "active",
+      sourceUpdateState: "preparing",
+      operationVersion: 2,
+      attemptCount: 0,
+      redactedFailureCode: null,
+      lastProgressAt: at,
+      createdAt: at,
+      updatedAt: at,
+      activatedAt: null,
+      revokedAt: null,
+      grantId,
+      grantVersion: grant.grantVersion
+    };
+    vi.mocked(client.previewSharedMemoryCandidate).mockResolvedValue({
+      source,
+      sourceCapabilities: ["memory_events"],
+      activationRepresentation: "memory_events",
+      mode: "snapshot",
+      expiresAt: null,
+      logicalMemoryId,
+      sourceRevision: 2,
+      candidateHash: "c".repeat(64),
+      itemCount: 1,
+      excludedItemCount: 0,
+      manifest: [{ sourceId: memoryEventId, revisionHash: "d".repeat(64) }],
+      byteCount: 128,
+      items: [item]
+    });
+    vi.mocked(client.previewSharedMemory).mockResolvedValue({
+      source,
+      sourceCapabilities: ["memory_events"],
+      activationRepresentation: "memory_events",
+      mode: "snapshot",
+      logicalMemoryId,
+      teamId: ids.team,
+      workspaceId: ids.workspace,
+      maximumFidelity: "memory_events",
+      includeCuratedMemory: false,
+      previewRevision: 1,
+      sourceRevision: 2,
+      policyRevision: 1,
+      contentPolicyVersion: 1,
+      classifierVersion: 1,
+      sourceContentHash: "a".repeat(64),
+      previewHash: "b".repeat(64),
+      itemCount: 1,
+      items: [item],
+      nextCursor: null
+    });
+    vi.mocked(client.listOwnedSharedMemoryGrants).mockResolvedValue([grant]);
+    vi.mocked(client.changeSharedMemoryFidelity).mockResolvedValue(replacement);
+
+    await act(async () =>
+      root.render(
+        <CollaborationModalLayer
+          client={client}
+          markdownAdapters={{ openExternal: vi.fn(), writeClipboard: vi.fn() }}
+          modal={{
+            kind: "share_personal_note",
+            note: {
+              noteId,
+              memoryEventId,
+              logicalMemoryId,
+              title: "Launch date",
+              titleVersion: 1,
+              body: "The launch date moved to Wednesday.",
+              revisionId: uuid(658),
+              revision: 2,
+              contentHash: "a".repeat(64),
+              projectionState: "available",
+              projectionFailureCode: null,
+              createdAt: at,
+              updatedAt: at,
+              sourceSequence: 2,
+              event: {
+                id: memoryEventId,
+                actor: "user",
+                eventType: "personal_note_revision",
+                timestamp: at,
+                sourceEventTime: at,
+                sourceSequence: 2,
+                content: "The launch date moved to Wednesday.",
+                contentPreview: "The launch date moved to Wednesday.",
+                metadata: {},
+                invalidatedAt: null
+              }
+            }
+          }}
+          onModalChange={vi.fn()}
+          snapshot={snapshot}
+        />
+      )
+    );
+
+    const snapshotMode = Array.from(
+      document.body.querySelectorAll<HTMLInputElement>('input[type="radio"]')
+    ).find((input) =>
+      input.parentElement?.textContent?.includes("Share only this revision")
+    );
+    expect(snapshotMode).toBeDefined();
+    await act(async () => snapshotMode!.click());
+    await click(container, "Review");
+    await click(container, "Approve and share");
+    await vi.waitFor(() =>
+      expect(client.changeSharedMemoryFidelity).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source,
+          logicalMemoryId,
+          shareGrantId: grantId,
+          expectedGrantVersion: 4,
+          mode: "snapshot"
+        })
+      )
+    );
+    expect(client.shareMemory).not.toHaveBeenCalled();
+  });
+
   it("opens owner-wide Shares from the active Personal Memory route", async () => {
     const snapshot = baseSnapshot();
     const client = createClient(snapshot);
     const pending: OwnedShareItem = {
       kind: "pending",
       pendingShare: {
+        source: {
+          kind: "captured_session",
+          sessionId: ids.eventSession,
+          logicalMemoryId: ids.logicalMemory
+        },
+        sourceCapabilities: ["memory_events"],
+        activationRepresentation: "memory_events",
         id: uuid(611),
         mutationId: uuid(612),
         logicalGrantId: uuid(613),
@@ -1441,7 +1958,6 @@ describe("CollaborationApp", () => {
         logicalMemoryId: ids.logicalMemory,
         teamId: ids.team,
         workspaceId: ids.workspace,
-        representation: "memory_events",
         maximumFidelity: "memory_events",
         includeCuratedMemory: false,
         mode: "continuous",
@@ -1458,14 +1974,21 @@ describe("CollaborationApp", () => {
         updatedAt: at,
         activatedAt: at,
         revokedAt: null,
-        grantId: uuid(615)
+        grantId: uuid(615),
+        grantVersion: 2
       },
       sourceAccess: null,
       summary: {
+        source: {
+          kind: "captured_session",
+          sessionId: ids.eventSession,
+          logicalMemoryId: ids.logicalMemory
+        },
         sourceSessionId: ids.eventSession,
         sourceTitle: "Owner-wide active route fixture",
         teamName: "Atlas Research",
         workspaceName: "Launch Plans",
+        workspaceContentAccess: "available",
         mode: "continuous",
         authorizedPreview: {
           previewId: uuid(616),
@@ -1485,11 +2008,11 @@ describe("CollaborationApp", () => {
         operationVersion: 4
       }
     };
-    const renamed: OwnedShareItem = {
-      ...pending,
-      summary: { ...pending.summary, sourceTitle: "Launch review" }
-    };
     const grant: SharedMemoryGrant = {
+      source: pending.pendingShare.source,
+      sourceCapabilities: pending.pendingShare.sourceCapabilities,
+      activationRepresentation: pending.pendingShare.activationRepresentation,
+      mode: pending.pendingShare.mode,
       id: pending.pendingShare.grantId!,
       logicalGrantId: pending.pendingShare.logicalGrantId,
       logicalMemoryId: pending.pendingShare.logicalMemoryId,
@@ -1510,7 +2033,8 @@ describe("CollaborationApp", () => {
     };
     const replacement: PendingShare = {
       ...pending.pendingShare,
-      representation: "lcm_leaves",
+      activationRepresentation: "lcm_leaves",
+      sourceCapabilities: ["memory_events", "lcm_leaves"],
       maximumFidelity: "lcm_leaves",
       includeCuratedMemory: false,
       state: "preparing",
@@ -1523,11 +2047,17 @@ describe("CollaborationApp", () => {
     });
     vi.mocked(client.listOwnedSharedMemoryGrants).mockResolvedValue([grant]);
     vi.mocked(client.getOwnedShare).mockResolvedValue(pending);
-    vi.mocked(client.renameOwnedShare).mockResolvedValue(renamed);
     vi.mocked(client.controlPendingShare).mockResolvedValue(
       paused.pendingShare
     );
     vi.mocked(client.changeSharedMemoryFidelity).mockResolvedValue(replacement);
+    vi.mocked(client.revokeSharedMemory).mockResolvedValue({
+      ...grant,
+      lifecycle: "revoked",
+      grantVersion: grant.grantVersion + 1,
+      updatedAt: at,
+      revokedAt: at
+    });
     const personalMemoryApi: PersonalDesktopApi = {
       assignSessionProject: vi.fn(async () => ({ projectId: null })),
       listProjects: vi.fn(async () => []),
@@ -1617,7 +2147,13 @@ describe("CollaborationApp", () => {
       [...document.body.querySelectorAll(".collab-share-facts strong")].map(
         (label) => label.textContent
       )
-    ).toEqual(["Status", "Shared detail", "Updates", "Source access"]);
+    ).toEqual([
+      "Status",
+      "Shared detail",
+      "Updates",
+      "Source access",
+      "Workspace access"
+    ]);
     expect(document.body.textContent).not.toContain("Authorized preview");
     expect(
       [...document.body.querySelectorAll("button")].some(
@@ -1655,11 +2191,6 @@ describe("CollaborationApp", () => {
       "Share with another Workspace"
     );
     expect(document.body.textContent).not.toContain("Pause updates");
-    expect(
-      document.body.querySelector(
-        '.collab-change-detail-modal button[aria-label="Rename Share"]'
-      )
-    ).toBeNull();
     const leaves = document.body.querySelector<HTMLInputElement>(
       '.collab-change-detail-modal input[aria-label="Up to LCM Leaves"]'
     );
@@ -1679,7 +2210,11 @@ describe("CollaborationApp", () => {
     await vi.waitFor(() =>
       expect(client.changeSharedMemoryFidelity).toHaveBeenCalledWith(
         expect.objectContaining({
-          candidateSessionId: snapshot.navigation.personal.memory[0]!.id,
+          source: {
+            kind: "captured_session",
+            sessionId: ids.eventSession,
+            logicalMemoryId: grant.logicalMemoryId
+          },
           mode: "continuous",
           maximumFidelity: "lcm_leaves",
           includeCuratedMemory: false,
@@ -1693,21 +2228,6 @@ describe("CollaborationApp", () => {
       document.body.querySelector(".collab-change-detail-modal")
     ).toBeNull();
     await click(container, "Modify");
-    await click(container, "Rename Share");
-    const renameInput = document.body.querySelector<HTMLInputElement>(
-      '.collab-modify-share-modal input[aria-label="Share name"]'
-    );
-    expect(renameInput).not.toBeNull();
-    await act(async () => setValue(renameInput!, "Launch review"));
-    await click(container, "Save Share name");
-    await vi.waitFor(() =>
-      expect(document.body.textContent).toContain("Launch review")
-    );
-    expect(client.renameOwnedShare).toHaveBeenCalledWith({
-      kind: "pending",
-      id: pending.pendingShare.id,
-      title: "Launch review"
-    });
     const pause = Array.from(document.body.querySelectorAll("button")).find(
       (button) => button.textContent === "Pause updates"
     );
@@ -1721,11 +2241,39 @@ describe("CollaborationApp", () => {
       expectedOperationVersion: 3,
       action: "pause"
     });
+    await click(container, "Done");
+    vi.mocked(client.listOwnedSharedMemoryGrants).mockClear();
+    await click(container, "Revoke");
+    await click(container, "Revoke Share");
+    await vi.waitFor(() =>
+      expect(client.revokeSharedMemory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          shareGrantId: grant.id,
+          expectedGrantVersion: grant.grantVersion,
+          teamId: grant.teamId,
+          workspaceId: grant.workspaceId,
+          reasonCode: "owner_revoked"
+        })
+      )
+    );
+    expect(client.listOwnedSharedMemoryGrants).not.toHaveBeenCalled();
+    expect(client.controlPendingShare).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: "revoke" })
+    );
+    expect(document.body.textContent).toContain("Revoked");
   });
 
   it("closes Share revocation confirmation after approval while execution continues", async () => {
     const snapshot = baseSnapshot();
     const grant: SharedMemoryGrant = {
+      source: {
+        kind: "captured_session",
+        sessionId: ids.eventSession,
+        logicalMemoryId: ids.logicalMemory
+      },
+      sourceCapabilities: ["memory_events"],
+      activationRepresentation: "memory_events",
+      mode: "continuous",
       id: uuid(621),
       logicalGrantId: uuid(622),
       logicalMemoryId: ids.logicalMemory,
@@ -1749,10 +2297,12 @@ describe("CollaborationApp", () => {
       grant,
       sourceAccess: null,
       summary: {
+        source: grant.source,
         sourceSessionId: ids.eventSession,
         sourceTitle: "Approval-tracked revoke fixture",
         teamName: "Atlas Research",
         workspaceName: "Launch Plans",
+        workspaceContentAccess: "available",
         mode: "continuous",
         authorizedPreview: null,
         lastReadyRevision: 12,
@@ -1765,6 +2315,13 @@ describe("CollaborationApp", () => {
       nextCursor: null
     });
     vi.mocked(client.getOwnedShare).mockResolvedValue(share);
+    vi.mocked(client.revokeSharedMemory).mockResolvedValue({
+      ...grant,
+      lifecycle: "revoked",
+      grantVersion: 2,
+      updatedAt: at,
+      revokedAt: at
+    });
 
     let actionGrants: readonly CollaborationActionGrantProjection[] = [];
     const actionGrantListeners = new Set<() => void>();
@@ -1837,6 +2394,109 @@ describe("CollaborationApp", () => {
         revokedAt: at
       })
     );
+  });
+
+  it("keeps owner controls without exposing Workspace content after access is removed", async () => {
+    const snapshot = baseSnapshot();
+    const grant: Extract<OwnedShareItem, { kind: "grant" }>["grant"] = {
+      source: {
+        kind: "captured_session",
+        sessionId: ids.eventSession,
+        logicalMemoryId: ids.logicalMemory
+      },
+      sourceCapabilities: ["memory_events"],
+      activationRepresentation: "memory_events",
+      mode: "continuous",
+      id: uuid(626),
+      logicalGrantId: uuid(627),
+      logicalMemoryId: ids.logicalMemory,
+      ownerUserId: ids.remoteMark,
+      teamId: ids.team,
+      workspaceId: ids.workspace,
+      consentId: uuid(628),
+      maximumFidelity: "memory_events",
+      includeCuratedMemory: false,
+      fidelityPolicyRevision: 1,
+      sourceRevision: 12,
+      grantVersion: 1,
+      lifecycle: "active",
+      createdAt: at,
+      updatedAt: at,
+      revokedAt: null
+    };
+    const share: OwnedShareItem = {
+      kind: "grant",
+      grant,
+      sourceAccess: null,
+      summary: {
+        source: grant.source,
+        sourceSessionId: ids.eventSession,
+        companionThreadId: null,
+        sourceTitle: "Retained owner Share",
+        teamName: "Atlas Research",
+        workspaceName: "Launch Plans",
+        workspaceContentAccess: "unavailable",
+        mode: "continuous",
+        authorizedPreview: null,
+        lastReadyRevision: 12,
+        lastSuccessfulUpdateAt: at
+      }
+    };
+    const client = createClient(snapshot);
+    vi.mocked(client.listOwnedShares).mockResolvedValue({
+      shares: [share],
+      nextCursor: null
+    });
+    vi.mocked(client.getOwnedShare).mockResolvedValue(share);
+
+    await act(async () =>
+      root.render(
+        <PersonalMemoryView
+          client={client}
+          initialSection="shares"
+          markdownAdapters={{ openExternal: vi.fn(), writeClipboard: vi.fn() }}
+          onShare={vi.fn()}
+          snapshot={snapshot}
+        />
+      )
+    );
+    await vi.waitFor(() =>
+      expect(document.body.textContent).toContain(share.summary.sourceTitle)
+    );
+    await act(async () =>
+      (
+        document.body.querySelector(".collab-share-row") as HTMLButtonElement
+      ).click()
+    );
+    await vi.waitFor(() =>
+      expect(document.body.textContent).toContain(
+        "Workspace content unavailable"
+      )
+    );
+
+    const modify = [...document.body.querySelectorAll("button")].find(
+      (button) => button.textContent === "Modify"
+    );
+    const revoke = [...document.body.querySelectorAll("button")].find(
+      (button) => button.textContent === "Revoke"
+    );
+    expect(modify?.disabled).toBe(true);
+    expect(revoke?.disabled).toBe(false);
+    expect(client.previewSharedMemoryCandidate).not.toHaveBeenCalled();
+
+    await act(async () => revoke?.click());
+    await click(container, "Revoke Share");
+    await vi.waitFor(() =>
+      expect(client.revokeSharedMemory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          teamId: ids.team,
+          workspaceId: ids.workspace,
+          shareGrantId: grant.id,
+          expectedGrantVersion: grant.grantVersion
+        })
+      )
+    );
+    expect(document.body.textContent).toContain("Revoked");
   });
 
   it("keeps the Shares pane while the responsive status view loads", async () => {
@@ -2058,6 +2718,13 @@ describe("CollaborationApp", () => {
     const failed: OwnedShareItem = {
       kind: "pending",
       pendingShare: {
+        source: {
+          kind: "captured_session",
+          sessionId: source.id,
+          logicalMemoryId: source.logicalMemoryId!
+        },
+        sourceCapabilities: ["memory_events"],
+        activationRepresentation: "memory_events",
         id: uuid(631),
         mutationId: uuid(632),
         logicalGrantId: uuid(633),
@@ -2065,7 +2732,6 @@ describe("CollaborationApp", () => {
         logicalMemoryId: source.logicalMemoryId!,
         teamId: ids.team,
         workspaceId: ids.workspace,
-        representation: "memory_events",
         maximumFidelity: "memory_events",
         includeCuratedMemory: false,
         mode: "continuous",
@@ -2082,14 +2748,21 @@ describe("CollaborationApp", () => {
         updatedAt: at,
         activatedAt: null,
         revokedAt: null,
-        grantId: null
+        grantId: null,
+        grantVersion: null
       },
       sourceAccess: null,
       summary: {
+        source: {
+          kind: "captured_session",
+          sessionId: source.id,
+          logicalMemoryId: source.logicalMemoryId!
+        },
         sourceSessionId: source.id,
         sourceTitle: source.title,
         teamName: "Atlas Research",
         workspaceName: "Launch Plans",
+        workspaceContentAccess: "available",
         mode: "continuous",
         authorizedPreview: null,
         lastReadyRevision: null,
@@ -3047,8 +3720,11 @@ describe("CollaborationApp", () => {
   it("uses concise, page-specific breadcrumbs across Personal and Team routes", async () => {
     await render();
     expect(
-      document.body.querySelector('[aria-label="Breadcrumb: Notes to self"]')
+      document.body.querySelector('[aria-label="Breadcrumb"]')
     ).not.toBeNull();
+    expect(
+      document.body.querySelector('[aria-label="Breadcrumb"]')?.textContent
+    ).toContain("Personal/Projects");
     expect(document.body.querySelector(".collab-day-divider")).toBeNull();
 
     await click(container, "Inbox");
@@ -3111,13 +3787,10 @@ describe("CollaborationApp", () => {
   });
 
   it("shows a spinner while an empty chat selection is loading", async () => {
-    const initial = collaborationSnapshotSchema.parse({
-      ...baseSnapshot(),
-      view: {
-        kind: "thread",
-        thread: notes(),
-        messages: page(ids.notes)
-      }
+    const initial = viewFor(baseSnapshot(), {
+      kind: "team_direct_message",
+      teamId: ids.team,
+      threadId: ids.dm
     });
     const client = createClient(initial);
     let finishSelection:
@@ -3129,17 +3802,31 @@ describe("CollaborationApp", () => {
           finishSelection = resolve;
         })
     );
-    await render(client);
+    await act(async () =>
+      root.render(
+        <App
+          collaborationClient={client}
+          initialCollaborationSelection={{
+            kind: "team_people",
+            teamId: ids.team
+          }}
+          onboardingComplete
+          personalMemoryApi={createPersonalMemoryApi()}
+          statusReadyOverride
+        />
+      )
+    );
 
-    await click(container, "research");
+    await click(container, "Alex Chen");
     expect(
       document.body.querySelector('[aria-label="Loading messages"]')
     ).not.toBeNull();
     expect(document.body.textContent).not.toContain("No messages yet.");
 
     const selected = viewFor(initial, {
-      kind: "personal_channel",
-      threadId: ids.personalChannel
+      kind: "team_direct_message",
+      teamId: ids.team,
+      threadId: ids.dm
     });
     await act(async () => {
       client.emit(selected);
@@ -3220,7 +3907,7 @@ describe("CollaborationApp", () => {
       }
 
       const current = requireCurrent(client);
-      const personal = viewFor(current, { kind: "notes_to_self" });
+      const personal = viewFor(current, { kind: "personal_memory" });
       await act(async () =>
         client.emit(
           collaborationSnapshotSchema.parse({
@@ -3232,9 +3919,7 @@ describe("CollaborationApp", () => {
         )
       );
 
-      expect(document.body.textContent).toContain(
-        "Check the Shared Memory split view."
-      );
+      expect(document.body.textContent).toContain("Projects");
       expect(document.body.textContent).toContain(
         "Access to Team content has ended."
       );
@@ -3268,19 +3953,11 @@ describe("CollaborationApp", () => {
       )
     );
 
-    expect(document.body.textContent).toContain("Notes to self");
+    expect(document.body.textContent).toContain("Personal Memory");
     expect(document.body.querySelector(".collab-rail")).toBeNull();
     expect(document.body.querySelector(".collab-sidebar")).toBeNull();
-    expect(document.body.querySelector(".collab-conversation")).not.toBeNull();
-
-    const actions = document.body.querySelector<HTMLDetailsElement>(
-      "details.collab-message-actions"
-    );
-    expect(actions?.querySelector("summary")?.tabIndex).toBe(0);
-    await click(container, "Copy message");
-    expect(writeClipboard).toHaveBeenCalledWith(
-      "Check the Shared Memory split view."
-    );
+    expect(document.body.querySelector(".collab-index-view")).not.toBeNull();
+    expect(document.body.textContent).toContain("Renderer cutover");
   });
 
   it("keeps Shares detail focus stable while a continuous Pending Share pauses", async () => {
@@ -3289,6 +3966,13 @@ describe("CollaborationApp", () => {
     const pending: OwnedShareItem = {
       kind: "pending",
       pendingShare: {
+        source: {
+          kind: "captured_session",
+          sessionId: ids.eventSession,
+          logicalMemoryId: ids.logicalMemory
+        },
+        sourceCapabilities: ["memory_events"],
+        activationRepresentation: "memory_events",
         id: uuid(601),
         mutationId: uuid(602),
         logicalGrantId: uuid(603),
@@ -3296,7 +3980,6 @@ describe("CollaborationApp", () => {
         logicalMemoryId: ids.logicalMemory,
         teamId: ids.team,
         workspaceId: ids.workspace,
-        representation: "memory_events",
         maximumFidelity: "memory_events",
         includeCuratedMemory: false,
         mode: "continuous",
@@ -3313,14 +3996,21 @@ describe("CollaborationApp", () => {
         updatedAt: at,
         activatedAt: at,
         revokedAt: null,
-        grantId: uuid(605)
+        grantId: uuid(605),
+        grantVersion: 2
       },
       sourceAccess: null,
       summary: {
+        source: {
+          kind: "captured_session",
+          sessionId: ids.eventSession,
+          logicalMemoryId: ids.logicalMemory
+        },
         sourceSessionId: ids.eventSession,
         sourceTitle: "Async sharing fixture",
         teamName: "Atlas Research",
         workspaceName: "Launch Plans",
+        workspaceContentAccess: "available",
         mode: "continuous",
         authorizedPreview: {
           previewId: uuid(606),
@@ -3827,9 +4517,16 @@ pnpm test
       syncState: "ready" as const
     };
     vi.mocked(client.previewSharedMemoryCandidate).mockResolvedValue({
-      sessionId: localSessionId,
+      source: {
+        kind: "captured_session",
+        sessionId: localSessionId,
+        logicalMemoryId: prepared.logicalMemoryId
+      },
+      sourceCapabilities: ["memory_events"],
+      activationRepresentation: "memory_events",
+      mode: "continuous",
+      expiresAt: null,
       logicalMemoryId: prepared.logicalMemoryId,
-      representation: "memory_events",
       sourceRevision: 2,
       candidateHash: "c".repeat(64),
       itemCount: 1,
@@ -3852,7 +4549,7 @@ pnpm test
             sessionId: localSessionId,
             localEntry: {
               ...prepared,
-              logicalMemoryId: null,
+              logicalMemoryId: prepared.logicalMemoryId,
               hasSynchronizedRevision: false,
               syncState: "not_started"
             }
@@ -3876,8 +4573,13 @@ pnpm test
       expect(document.body.querySelector(".collab-preview-list")).not.toBeNull()
     );
     expect(client.previewSharedMemoryCandidate).toHaveBeenCalledWith({
-      sessionId: localSessionId,
-      representation: "memory_events"
+      source: {
+        kind: "captured_session",
+        sessionId: localSessionId,
+        logicalMemoryId: prepared.logicalMemoryId
+      },
+      activationRepresentation: "memory_events",
+      mode: "continuous"
     });
     expect(client.prepareSharedMemorySource).not.toHaveBeenCalled();
     expect(client.previewSharedMemory).toHaveBeenCalledWith(
@@ -3889,9 +4591,16 @@ pnpm test
     const snapshot = baseSnapshot();
     const client = createClient(snapshot);
     vi.mocked(client.previewSharedMemoryCandidate).mockResolvedValue({
-      sessionId: snapshot.navigation.personal.memory[0]!.id,
+      source: {
+        kind: "captured_session",
+        sessionId: snapshot.navigation.personal.memory[0]!.id,
+        logicalMemoryId: ids.logicalMemory
+      },
+      sourceCapabilities: ["memory_events"],
+      activationRepresentation: "memory_events",
+      mode: "continuous",
+      expiresAt: null,
       logicalMemoryId: ids.logicalMemory,
-      representation: "memory_events",
       sourceRevision: 2,
       candidateHash: "c".repeat(64),
       itemCount: 0,
@@ -3956,9 +4665,16 @@ pnpm test
     };
     const client = createClient(snapshot);
     vi.mocked(client.previewSharedMemoryCandidate).mockResolvedValue({
-      sessionId: localSessionId,
+      source: {
+        kind: "captured_session",
+        sessionId: localSessionId,
+        logicalMemoryId
+      },
+      sourceCapabilities: ["memory_events"],
+      activationRepresentation: "memory_events",
+      mode: "continuous",
+      expiresAt: null,
       logicalMemoryId,
-      representation: "memory_events",
       sourceRevision: 2,
       candidateHash: "c".repeat(64),
       itemCount: 1,
@@ -3977,7 +4693,6 @@ pnpm test
       sessionId: localSessionId,
       localEntry: {
         ...processing,
-        logicalMemoryId: null,
         syncState: "not_started" as const
       }
     };
@@ -3999,15 +4714,6 @@ pnpm test
         />
       )
     );
-
-    await click(container, "Rename Share");
-    const titleInput = document.body.querySelector<HTMLInputElement>(
-      'input[aria-label="Share name"]'
-    );
-    expect(titleInput).not.toBeNull();
-    await act(async () => setValue(titleInput!, "Launch review"));
-    await click(container, "Save Share name");
-    expect(document.body.textContent).toContain("Launch review");
 
     await click(container, "Review");
 
@@ -4039,17 +4745,28 @@ pnpm test
       expect.objectContaining({
         logicalMemoryId,
         candidate: expect.objectContaining({
-          sessionId: localSessionId,
+          source: {
+            kind: "captured_session",
+            sessionId: localSessionId,
+            logicalMemoryId
+          },
           candidateHash: "c".repeat(64)
         })
       })
     );
     await act(async () =>
       resolveAuthoritativePreview({
+        source: {
+          kind: "captured_session",
+          sessionId: localSessionId,
+          logicalMemoryId
+        },
+        sourceCapabilities: ["memory_events"],
+        activationRepresentation: "memory_events",
+        mode: "continuous",
         logicalMemoryId,
         teamId: ids.team,
         workspaceId: ids.workspace,
-        representation: "memory_events",
         maximumFidelity: "memory_events",
         includeCuratedMemory: false,
         previewRevision: 1,
@@ -4101,10 +4818,17 @@ pnpm test
     ).toBe("");
     await act(async () =>
       resolveSnapshotPreview({
+        source: {
+          kind: "captured_session",
+          sessionId: localSessionId,
+          logicalMemoryId
+        },
+        sourceCapabilities: ["memory_events"],
+        activationRepresentation: "memory_events",
+        mode: "snapshot",
         logicalMemoryId,
         teamId: ids.team,
         workspaceId: ids.workspace,
-        representation: "memory_events",
         maximumFidelity: "memory_events",
         includeCuratedMemory: false,
         previewRevision: 2,
@@ -4126,7 +4850,6 @@ pnpm test
     expect(client.shareMemory).toHaveBeenCalledWith(
       expect.objectContaining({
         mode: "snapshot",
-        title: "Launch review",
         previewHash: "d".repeat(64)
       })
     );
@@ -4136,18 +4859,17 @@ pnpm test
     expect(
       document.body.querySelector(".collab-share-complete-icon")
     ).not.toBeNull();
-    expect(
-      document.body.querySelector('button[aria-label="Rename Share"]')
-    ).toBeNull();
     expect(document.body.textContent).not.toContain("Not shared yet.");
     await click(container, "View share");
     expect(onViewShare).toHaveBeenCalledWith(`grant:${ids.grant}`);
   });
 
-  it("does not send when Enter confirms an IME composition", async () => {
+  it("requires the explicit Save Note action after IME composition", async () => {
     const client = await render();
+    await click(container, "Notes");
+    await click(container, "New Note");
     const textarea = document.body.querySelector<HTMLTextAreaElement>(
-      'textarea[aria-label="Message Notes to self"]'
+      'textarea[aria-label="Note content"]'
     )!;
     await act(async () => setValue(textarea, "変換中"));
     expect(document.body.textContent).not.toContain(
@@ -4187,142 +4909,320 @@ pnpm test
         })
       );
     });
-    await vi.waitFor(() => expect(client.sendMessage).toHaveBeenCalledTimes(1));
+    expect(client.sendMessage).not.toHaveBeenCalled();
   });
 
-  it("keeps per-thread drafts but purges the current draft on a same-thread canPost downgrade", async () => {
-    const client = await render();
-    const notesComposer = document.body.querySelector<HTMLTextAreaElement>(
-      'textarea[aria-label="Message Notes to self"]'
-    )!;
-    await act(async () => setValue(notesComposer, "Personal draft"));
-
-    await click(container, "research");
-    const researchComposer = document.body.querySelector<HTMLTextAreaElement>(
-      'textarea[aria-label="Message research"]'
-    )!;
-    await act(async () => setValue(researchComposer, "Research draft"));
-    await click(container, "Notes to self");
-    expect(
-      document.body.querySelector<HTMLTextAreaElement>(
-        'textarea[aria-label="Message Notes to self"]'
-      )?.value
-    ).toBe("Personal draft");
-
-    const current = baseSnapshot();
-    const readOnlyNotes = { ...notes(), canPost: false };
-    await act(async () =>
-      client.emit({
-        ...current,
-        navigation: {
-          ...current.navigation,
-          personal: {
-            ...current.navigation.personal,
-            notesToSelf: readOnlyNotes
-          }
-        },
-        selection: { kind: "notes_to_self" },
-        view: {
-          kind: "thread",
-          thread: readOnlyNotes,
-          messages:
-            current.view.kind === "thread"
-              ? current.view.messages
-              : page(ids.notes)
-        }
-      })
-    );
-    const downgradedComposer = document.body.querySelector<HTMLTextAreaElement>(
-      'textarea[aria-label="Message Notes to self"]'
-    )!;
-    expect(downgradedComposer.disabled).toBe(true);
-    expect(downgradedComposer.value).toBe("");
-  });
-
-  it("renders a long collaboration thread through the bounded ChatTimeline route", async () => {
-    const messages = Array.from({ length: 100 }, (_, index) => ({
-      ...message(
-        uuid(1_000 + index),
-        ids.notes,
-        `Long thread message ${index + 1}`,
-        mark
-      ),
-      sequence: index + 1
+  it("saves a Note through the local Personal Memory bridge", async () => {
+    const client = createClient();
+    const personalMemoryApi = createPersonalMemoryApi();
+    const noteId = uuid(1_350);
+    const savedNote: PersonalDesktopNote = {
+      noteId,
+      logicalMemoryId: uuid(1_351),
+      title: "Local durable Note",
+      titleVersion: 1,
+      body: "Local durable Note",
+      revisionId: uuid(1_352),
+      revision: 1,
+      contentHash: "a".repeat(64),
+      memoryEventId: noteId,
+      projectionState: "available",
+      projectionFailureCode: null,
+      createdAt: at,
+      updatedAt: at,
+      sourceSequence: 1,
+      event: {
+        id: noteId,
+        actor: "user",
+        eventType: "personal_note_revision",
+        timestamp: at,
+        sourceEventTime: at,
+        sourceSequence: 1,
+        content: "Local durable Note",
+        contentPreview: "Local durable Note",
+        invalidatedAt: null,
+        metadata: {}
+      }
+    };
+    personalMemoryApi.createNote = vi.fn(async () => savedNote);
+    personalMemoryApi.listNotes = vi.fn(async () => ({
+      notes: [savedNote],
+      nextBeforeSequence: null
     }));
-    const selected = baseSnapshot();
-    const longNotes = { ...notes(), latestSequence: messages.length };
-    const client = createClient(
-      collaborationSnapshotSchema.parse({
-        ...selected,
-        navigation: {
-          ...selected.navigation,
-          personal: {
-            ...selected.navigation.personal,
-            notesToSelf: longNotes
-          }
-        },
-        view: {
-          kind: "thread",
-          thread: longNotes,
-          messages: page(ids.notes, messages)
-        }
-      })
-    );
-    await render(client);
-
-    expect(
-      container
-        .querySelector(".collab-message-history")
-        ?.getAttribute("data-rendered-count")
-    ).toBe("100");
-    expect(document.body.textContent).toContain("Long thread message 100");
-  });
-
-  it("renders sender receipts as sent, delivered to everyone, and read by everyone", async () => {
-    const messages = (["sent", "delivered", "read"] as const).map(
-      (recipientStatus, index) => ({
-        ...message(
-          uuid(1_200 + index),
-          ids.notes,
-          `Receipt ${recipientStatus}`,
-          mark
-        ),
-        sequence: index + 1,
-        recipientStatus
-      })
-    );
-    const selected = baseSnapshot();
-    const receiptNotes = { ...notes(), latestSequence: messages.length };
-    await render(
-      createClient(
-        collaborationSnapshotSchema.parse({
-          ...selected,
-          navigation: {
-            ...selected.navigation,
-            personal: {
-              ...selected.navigation.personal,
-              notesToSelf: receiptNotes
-            }
-          },
-          view: {
-            kind: "thread",
-            thread: receiptNotes,
-            messages: page(ids.notes, messages)
-          }
-        })
+    personalMemoryApi.loadNote = vi.fn(async () => savedNote);
+    await act(async () =>
+      root.render(
+        <App
+          collaborationClient={client}
+          initialCollaborationSelection={client.current()?.selection}
+          onboardingComplete
+          personalMemoryApi={personalMemoryApi}
+          statusReadyOverride
+        />
       )
     );
 
-    expect(document.querySelectorAll('[aria-label="Sent"]')).toHaveLength(1);
+    await click(container, "Notes");
+    await click(container, "New Note");
+    const textarea = document.body.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Note content"]'
+    )!;
+    await act(async () => setValue(textarea, "Local durable Note"));
+    await click(container, "Save Note");
+
+    await vi.waitFor(() =>
+      expect(personalMemoryApi.createNote).toHaveBeenCalledWith({
+        body: "Local durable Note",
+        idempotencyKey: expect.any(String)
+      })
+    );
+    expect(client.sendMessage).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(document.body.textContent).toContain("Local durable Note")
+    );
+  });
+
+  it("reuses Note mutation keys after ambiguous create and update failures", async () => {
+    const client = createClient();
+    const personalMemoryApi = createPersonalMemoryApi();
+    const savedNote = testNote(2, "Durable retry Note");
+    personalMemoryApi.createNote = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("response lost"))
+      .mockResolvedValueOnce(savedNote);
+    personalMemoryApi.listNotes = vi.fn(async () => ({
+      notes: [savedNote],
+      nextBeforeSequence: null
+    }));
+    personalMemoryApi.loadNote = vi.fn(async () => savedNote);
+    await render(client, personalMemoryApi);
+
+    await click(container, "Notes");
+    await click(container, "New Note");
+    const createEditor = document.body.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Note content"]'
+    )!;
+    await act(async () => setValue(createEditor, savedNote.body));
+    await click(container, "Save Note");
+    await vi.waitFor(() =>
+      expect(document.body.textContent).toContain("could not be saved")
+    );
+    await click(container, "Save Note");
+    await vi.waitFor(() =>
+      expect(personalMemoryApi.createNote).toHaveBeenCalledTimes(2)
+    );
+    const createCalls = vi.mocked(personalMemoryApi.createNote!).mock.calls;
+    expect(createCalls[1]?.[0].idempotencyKey).toBe(
+      createCalls[0]?.[0].idempotencyKey
+    );
+
+    personalMemoryApi.updateNote = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("response lost"))
+      .mockResolvedValueOnce({
+        ...savedNote,
+        body: "Updated retry body",
+        revision: 2
+      });
+    await clickNoteBody();
+    const updateEditor = document.body.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Note content"]'
+    )!;
+    await act(async () => setValue(updateEditor, "Updated retry body"));
+    await click(container, "Save");
+    await vi.waitFor(() =>
+      expect(document.body.textContent).toContain("could not be saved")
+    );
+    await click(container, "Save");
+    await vi.waitFor(() =>
+      expect(personalMemoryApi.updateNote).toHaveBeenCalledTimes(2)
+    );
+    const updateCalls = vi.mocked(personalMemoryApi.updateNote!).mock.calls;
+    expect(updateCalls[1]?.[0].idempotencyKey).toBe(
+      updateCalls[0]?.[0].idempotencyKey
+    );
+  });
+
+  it("preserves an active Note draft across unrelated Note invalidations", async () => {
+    const client = createClient();
+    const personalMemoryApi = createPersonalMemoryApi();
+    let publishChange!: Parameters<PersonalDesktopApi["subscribe"]>[0];
+    personalMemoryApi.subscribe = vi.fn((listener) => {
+      publishChange = listener;
+      return () => undefined;
+    });
+    await render(client, personalMemoryApi);
+
+    await click(container, "Notes");
+    await click(container, "Check the Shared Memory split view.");
+    await clickNoteBody();
+    const editor = document.body.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Note content"]'
+    )!;
+    await act(async () => setValue(editor, "Unsaved local draft"));
+    await act(async () =>
+      publishChange({
+        contractVersion: PERSONAL_DESKTOP_CONTRACT_VERSION,
+        type: "notes_changed",
+        noteIds: [uuid(9_999)]
+      })
+    );
+
+    await vi.waitFor(() =>
+      expect(
+        document.body.querySelector<HTMLTextAreaElement>(
+          'textarea[aria-label="Note content"]'
+        )?.value
+      ).toBe("Unsaved local draft")
+    );
+    expect(document.body.textContent).toContain("Save");
+  });
+
+  it("ignores a Note save completion after the editor selection changes", async () => {
+    const client = createClient();
+    const personalMemoryApi = createPersonalMemoryApi();
+    const noteA = testNote(10, "Note A body");
+    const noteB = testNote(11, "Note B body");
+    personalMemoryApi.listNotes = vi.fn(async () => ({
+      notes: [noteB, noteA],
+      nextBeforeSequence: null
+    }));
+    personalMemoryApi.loadNote = vi.fn(async ({ noteId }) =>
+      noteId === noteA.noteId ? noteA : noteB
+    );
+    let resolveUpdate!: (note: PersonalDesktopNote) => void;
+    personalMemoryApi.updateNote = vi.fn(
+      () =>
+        new Promise<PersonalDesktopNote>((resolve) => {
+          resolveUpdate = resolve;
+        })
+    );
+    await render(client, personalMemoryApi);
+
+    await click(container, "Notes");
+    await click(container, noteA.title);
+    await clickNoteBody();
+    const editor = document.body.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Note content"]'
+    )!;
+    await act(async () => setValue(editor, "Note A saved body"));
+    await click(container, "Save");
+    await click(container, noteB.title);
+    await vi.waitFor(() =>
+      expect(document.body.textContent).toContain("Note B body")
+    );
+    await click(container, noteA.title);
+    await vi.waitFor(() =>
+      expect(document.body.textContent).toContain("Note A body")
+    );
+    await act(async () =>
+      resolveUpdate({ ...noteA, body: "Note A saved body", revision: 2 })
+    );
+
+    await vi.waitFor(() =>
+      expect(document.body.textContent).toContain("Note A body")
+    );
+    expect(document.body.textContent).not.toContain("Note A saved body");
+  });
+
+  it("does not carry an unsaved Note draft across navigation", async () => {
+    const client = await render();
+    await click(container, "Notes");
+    await click(container, "New Note");
+    const notesComposer = document.body.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Note content"]'
+    )!;
+    await act(async () => setValue(notesComposer, "Personal draft"));
+
+    await click(container, "Atlas Research");
+    await click(container, "Alex Chen");
+    const researchComposer = document.body.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Message Alex Chen"]'
+    )!;
+    await act(async () => setValue(researchComposer, "Research draft"));
+    await click(container, "Personal");
+    await click(container, "Notes");
+    await click(container, "New Note");
+    expect(
+      document.body.querySelector<HTMLTextAreaElement>(
+        'textarea[aria-label="Note content"]'
+      )?.value
+    ).toBe("");
+    expect(client.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("paginates a long first-class Personal Note history", async () => {
+    const notes = Array.from({ length: 100 }, (_, index) =>
+      testNote(index + 1, `Long Note ${index + 1}`)
+    );
+    const client = createClient();
+    const personalMemoryApi = createPersonalMemoryApi();
+    personalMemoryApi.listNotes = vi.fn(async ({ beforeSequence, limit }) => {
+      const eligible = notes
+        .filter(
+          (note) =>
+            beforeSequence === undefined || note.sourceSequence < beforeSequence
+        )
+        .sort((left, right) => right.sourceSequence - left.sourceSequence);
+      const selected = eligible.slice(0, limit);
+      return {
+        notes: selected,
+        nextBeforeSequence:
+          eligible.length > selected.length
+            ? (selected.at(-1)?.sourceSequence ?? null)
+            : null
+      };
+    });
+    personalMemoryApi.loadNote = vi.fn(
+      async ({ noteId }) => notes.find((note) => note.noteId === noteId)!
+    );
+    await render(client, personalMemoryApi);
+    await click(container, "Notes");
+
+    expect(
+      container.querySelectorAll(".personal-note-items button")
+    ).toHaveLength(52);
+    await click(container, "Load older Notes");
+    await vi.waitFor(() =>
+      expect(
+        container.querySelectorAll(".personal-note-items button")
+      ).toHaveLength(101)
+    );
+    expect(
+      container.querySelectorAll(".personal-note-items button")
+    ).toHaveLength(101);
+    expect(document.body.textContent).toContain("Long Note 100");
+  });
+
+  it("renders Notes without chat receipt chrome", async () => {
+    const notes = (["sent", "delivered", "read"] as const).map(
+      (status, index) => testNote(index + 1, `Receipt ${status}`)
+    );
+    const client = createClient();
+    const personalMemoryApi = createPersonalMemoryApi();
+    personalMemoryApi.listNotes = vi.fn(async () => ({
+      notes,
+      nextBeforeSequence: null
+    }));
+    personalMemoryApi.loadNote = vi.fn(
+      async ({ noteId }) => notes.find((note) => note.noteId === noteId)!
+    );
+    await render(client, personalMemoryApi);
+    await click(container, "Notes");
+
+    expect(
+      container.querySelectorAll(".personal-note-items button")
+    ).toHaveLength(4);
+    expect(document.querySelectorAll('[aria-label="Sent"]')).toHaveLength(0);
     expect(
       document.querySelectorAll('[aria-label="Delivered to everyone"]')
-    ).toHaveLength(1);
+    ).toHaveLength(0);
     expect(
       document.querySelectorAll('[aria-label="Read by everyone"]')
-    ).toHaveLength(1);
+    ).toHaveLength(0);
     expect(
       document.querySelector('.collab-recipient-status[data-status="read"]')
-    ).not.toBeNull();
+    ).toBeNull();
   });
 
   it("replaces Team and Workspace content for suspended, deleting, revoked, and archived lifecycles", async () => {

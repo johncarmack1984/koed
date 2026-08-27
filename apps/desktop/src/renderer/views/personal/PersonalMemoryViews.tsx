@@ -394,15 +394,7 @@ function ProjectsPane({
               Retry
             </button>
           </div>
-        ) : projects.length === 0 ? (
-          <div className="personal-memory-state" role="status">
-            <strong>No Projects yet</strong>
-            <p>
-              Projects appear after the Supported Capture Hook records a
-              Captured Session.
-            </p>
-          </div>
-        ) : filtered.length === 0 ? (
+        ) : projects.length === 0 ? null : filtered.length === 0 ? (
           <div className="personal-memory-state" role="status">
             No Projects match “{query}”.
           </div>
@@ -592,7 +584,7 @@ function NewConversationButton({
   const owners = managedConversationOwners ?? [];
   const pickerDisabled = disabled || !owners.some((owner) => owner.ready);
   return (
-    <div className="personal-new-conversation-group">
+    <div className="personal-new-conversation-group" data-starting={starting}>
       <button
         className="personal-new-conversation"
         disabled={disabled || !managedConversationOwner?.ready || starting}
@@ -673,6 +665,7 @@ function NewConversationButton({
 
 function ProjectDetail({
   error,
+  hasProjects,
   loading,
   managedAiLoadError,
   managedAiReadModel,
@@ -689,6 +682,7 @@ function ProjectDetail({
   project
 }: {
   error: string | null;
+  hasProjects: boolean;
   loading: boolean;
   managedAiLoadError?: string | null;
   managedAiReadModel?: LocalAiClientReadModel | null;
@@ -800,9 +794,13 @@ function ProjectDetail({
         <div>
           <BookText aria-hidden="true" className="personal-empty-icon" />
           <h2 data-personal-route-focus="project" tabIndex={-1}>
-            Select a Project
+            {hasProjects ? "Select a Project" : "No Projects yet"}
           </h2>
-          <p>Choose a Project to inspect its Captured Sessions.</p>
+          <p>
+            {hasProjects
+              ? "Choose a Project to inspect its Captured Sessions."
+              : "Projects appear after the Supported Capture Hook records a Captured Session."}
+          </p>
         </div>
       </section>
     );
@@ -2054,6 +2052,7 @@ export function PersonalMemoryWorkspace({
       <main className="personal-memory-detail-pane">
         {effectiveRoute === "session" && selectedProject && selectedThread ? (
           <SessionDetail
+            key={selectedThread.id}
             assignSessionProject={assignSessionProject}
             authorizeManagedConversationTransfer={
               authorizeManagedConversationTransfer
@@ -2080,6 +2079,7 @@ export function PersonalMemoryWorkspace({
         ) : (
           <ProjectDetail
             error={projects.length === 0 ? snapshot.error : null}
+            hasProjects={projects.length > 0}
             loading={snapshot.loading && projects.length === 0}
             managedAiLoadError={managedAiLoadError}
             managedAiReadModel={managedAiReadModel}

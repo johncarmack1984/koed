@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import {
+  sharedMemoryCandidatePreviewActionGrantBinding,
   sharedMemoryFidelityBundleActionGrantBinding,
+  sharedMemoryPendingShareActionGrantBinding,
   sharedMemoryPreviewActionGrantBinding,
   sharedMemoryRevokeActionGrantBinding,
-  sharedMemoryShareBundleActionGrantBinding,
   sharedMemoryTranscriptAccessActionGrantBinding,
   sharedMemoryTranscriptRevokeActionGrantBinding
 } from "@koed/shared";
@@ -29,20 +30,27 @@ const ids = {
   mutation: randomUUID(),
   request: randomUUID()
 };
+const sourceDeploymentProtocolId = randomUUID();
 
 const source = {
   logicalMemoryId: ids.logicalMemory,
   title: "Architecture review",
   ownerPrincipalId: ids.actor
 };
+const capturedSource = {
+  kind: "captured_session" as const,
+  sessionId: ids.replica,
+  logicalMemoryId: ids.logicalMemory
+};
 const destination = {
   team: { id: ids.team, name: "Koed Team" },
   workspace: { id: ids.workspace, name: "Engineering" }
 };
 
-const repository = () => ({
+const repository = (options?: { sourceOwnerPolicyWillReplace?: boolean }) => ({
   getSharedMemoryCandidatePreviewAdmission: vi.fn(async (_actor, input) => ({
-    effectivePolicyIntersection: input.allowedRepresentations,
+    effectiveMaximumFidelity: input.maximumFidelity,
+    effectiveIncludeCuratedMemory: input.includeCuratedMemory,
     teamPolicyVersion: 1,
     teamPolicyHash: "a".repeat(64),
     workspacePolicyVersion: 1,
@@ -59,22 +67,6 @@ const repository = () => ({
     effectiveIncludeCuratedMemory: input.includeCuratedMemory,
     sourceOwnerPolicyWillChange: false
   })),
-  getSharedMemoryShareReview: vi.fn(async (_actor, input) => ({
-    source,
-    ...destination,
-    preview: {
-      previewId: input.preview.previewId,
-      previewHash: input.preview.previewHash,
-      previewRevision: input.previewRevision,
-      remoteReplicaId: ids.replica,
-      representation: input.maximumFidelity,
-      sourceRevision: 4
-    },
-    maximumFidelity: input.maximumFidelity,
-    includeCuratedMemory: input.includeCuratedMemory,
-    sourceOwnerPolicyWillActivate: false,
-    sourceOwnerPolicyWillReplace: false
-  })),
   getSharedMemoryPendingShareReview: vi.fn(async (_actor, input) => ({
     source,
     ...destination,
@@ -82,12 +74,13 @@ const repository = () => ({
       previewId: input.preview.previewId,
       previewHash: input.preview.previewHash,
       previewRevision: input.previewRevision,
-      representation: input.selectedRepresentation,
+      representation: input.activationRepresentation,
       sourceRevision: 4
     },
-    effectivePolicyIntersection: input.allowedRepresentations,
+    maximumFidelity: input.maximumFidelity,
+    includeCuratedMemory: input.includeCuratedMemory,
     sourceOwnerPolicyWillActivate: true as const,
-    sourceOwnerPolicyWillReplace: false as const
+    sourceOwnerPolicyWillReplace: options?.sourceOwnerPolicyWillReplace === true
   })),
   getSharedMemoryRevokeReview: vi.fn(async (_actor, input) => ({
     source: {
@@ -125,10 +118,12 @@ const repository = () => ({
       teamWorkspaceId: input.teamWorkspaceId,
       grantVersion: input.expectedGrantVersion,
       lifecycle: "active" as const,
+      sourceRevision: 3,
       maximumFidelity: "lcm_leaves" as const,
       includeCuratedMemory: false
     },
-    willReactivate: false
+    willReactivate: false,
+    sourceRevisionChanged: true
   })),
   getTeamConversationSourceGrantReview: vi.fn(async (_actor, input) => ({
     shareGrantId: input.shareGrantId,
@@ -158,7 +153,10 @@ const shareIntent = (
   includeCuratedMemory = false
 ) =>
   ({
-    action: "shared_memory.share",
+    action: "shared_memory.pending_share",
+    source: capturedSource,
+    sourceCapabilities: ["lcm_rollups", "lcm_leaves", "memory_events"],
+    activationRepresentation: maximumFidelity,
     mutationId: ids.mutation,
     logicalGrantId: ids.logicalGrant,
     logicalMemoryId: ids.logicalMemory,
@@ -180,6 +178,9 @@ const fidelityIntent = (
 ) =>
   ({
     action: "shared_memory.change_fidelity",
+    source: capturedSource,
+    sourceCapabilities: ["lcm_rollups", "lcm_leaves", "memory_events"],
+    activationRepresentation: maximumFidelity,
     mutationId: ids.mutation,
     logicalMemoryId: ids.logicalMemory,
     teamId: ids.team,
@@ -197,15 +198,68 @@ const fidelityIntent = (
   }) as const satisfies HighRiskActionGrantIntent;
 
 describe("Shared Memory action definitions", () => {
+  it("uses the public admission reference for candidate-preview execution", async () => {
+    const intent = {
+      action: "shared_memory.candidate_preview",
+      source: capturedSource,
+      sourceCapabilities: ["lcm_rollups", "lcm_leaves", "memory_events"],
+      activationRepresentation: "lcm_leaves",
+      logicalMemoryId: ids.logicalMemory,
+      candidateHash: "c".repeat(64),
+      sourceRevision: 4,
+      itemCount: 1,
+      excludedItemCount: 0,
+      manifest: [{ sourceId: ids.preview, revisionHash: "d".repeat(64) }],
+      byteCount: 256,
+      sourceDeploymentProtocolId,
+      sourceOwnerPrincipalId: ids.actor,
+      teamId: ids.team,
+      teamWorkspaceId: ids.workspace,
+      maximumFidelity: "lcm_leaves",
+      includeCuratedMemory: false,
+      mode: "snapshot",
+      expiresAt: null
+    } as const satisfies HighRiskActionGrantIntent;
+
+    const admitted = await admit(intent);
+
+    expect(admitted).toMatchObject({
+      operation: sharedMemoryCandidatePreviewActionGrantBinding({
+        referenceId: ids.request,
+        source: capturedSource,
+        sourceCapabilities: ["lcm_rollups", "lcm_leaves", "memory_events"],
+        activationRepresentation: "lcm_leaves",
+        logicalMemoryId: ids.logicalMemory,
+        candidateHash: "c".repeat(64),
+        sourceRevision: 4,
+        itemCount: 1,
+        excludedItemCount: 0,
+        manifest: [{ sourceId: ids.preview, revisionHash: "d".repeat(64) }],
+        byteCount: 256,
+        sourceDeploymentProtocolId,
+        sourceOwnerPrincipalId: ids.actor,
+        teamId: ids.team,
+        teamWorkspaceId: ids.workspace,
+        maximumFidelity: "lcm_leaves",
+        includeCuratedMemory: false,
+        mode: "snapshot",
+        expiresAt: null
+      })
+    });
+  });
+
   it("admits an exact authoritative preview as Direct", async () => {
     const repo = repository();
     const intent = {
       action: "shared_memory.preview",
+      source: capturedSource,
+      sourceCapabilities: ["lcm_rollups", "lcm_leaves", "memory_events"],
+      activationRepresentation: "lcm_rollups",
+      mode: "continuous",
       logicalMemoryId: ids.logicalMemory,
       remoteReplicaId: ids.replica,
       teamId: ids.team,
       teamWorkspaceId: ids.workspace,
-      representation: "lcm_rollups",
       maximumFidelity: "lcm_rollups",
       includeCuratedMemory: false
     } as const satisfies HighRiskActionGrantIntent;
@@ -213,11 +267,14 @@ describe("Shared Memory action definitions", () => {
     await expect(admit(intent, repo)).resolves.toEqual({
       operation: sharedMemoryPreviewActionGrantBinding({
         referenceId: ids.request,
+        source: capturedSource,
+        sourceCapabilities: ["lcm_rollups", "lcm_leaves", "memory_events"],
+        activationRepresentation: "lcm_rollups",
+        mode: "continuous",
         logicalMemoryId: ids.logicalMemory,
         remoteReplicaId: ids.replica,
         teamId: ids.team,
         teamWorkspaceId: ids.workspace,
-        representation: "lcm_rollups",
         maximumFidelity: "lcm_rollups",
         includeCuratedMemory: false
       }),
@@ -230,11 +287,19 @@ describe("Shared Memory action definitions", () => {
     const repo = repository();
     const intent = {
       action: "shared_memory.preview",
+      source: capturedSource,
+      sourceCapabilities: [
+        "lcm_rollups",
+        "lcm_leaves",
+        "memory_events",
+        "curated_assertions"
+      ],
+      activationRepresentation: "curated_assertions",
+      mode: "continuous",
       logicalMemoryId: ids.logicalMemory,
       remoteReplicaId: ids.replica,
       teamId: ids.team,
       teamWorkspaceId: ids.workspace,
-      representation: "curated_assertions",
       maximumFidelity: "lcm_rollups",
       includeCuratedMemory: true
     } as const satisfies HighRiskActionGrantIntent;
@@ -246,11 +311,19 @@ describe("Shared Memory action definitions", () => {
     expect(admitted.operation).toEqual(
       sharedMemoryPreviewActionGrantBinding({
         referenceId: ids.request,
+        source: capturedSource,
+        sourceCapabilities: [
+          "lcm_rollups",
+          "lcm_leaves",
+          "memory_events",
+          "curated_assertions"
+        ],
+        activationRepresentation: "curated_assertions",
+        mode: "continuous",
         logicalMemoryId: ids.logicalMemory,
         remoteReplicaId: ids.replica,
         teamId: ids.team,
         teamWorkspaceId: ids.workspace,
-        representation: "curated_assertions",
         maximumFidelity: "lcm_rollups",
         includeCuratedMemory: true
       })
@@ -274,11 +347,14 @@ describe("Shared Memory action definitions", () => {
     );
     const intent = {
       action: "shared_memory.preview",
+      source: capturedSource,
+      sourceCapabilities: ["lcm_rollups", "lcm_leaves", "memory_events"],
+      activationRepresentation: "lcm_rollups",
+      mode: "continuous",
       logicalMemoryId: ids.logicalMemory,
       remoteReplicaId: ids.replica,
       teamId: ids.team,
       teamWorkspaceId: ids.workspace,
-      representation: "lcm_rollups",
       maximumFidelity: "lcm_rollups",
       includeCuratedMemory: false
     } as const satisfies HighRiskActionGrantIntent;
@@ -286,11 +362,14 @@ describe("Shared Memory action definitions", () => {
     await expect(admit(intent, repo)).resolves.toEqual({
       operation: sharedMemoryPreviewActionGrantBinding({
         referenceId: ids.request,
+        source: capturedSource,
+        sourceCapabilities: ["lcm_rollups", "lcm_leaves", "memory_events"],
+        activationRepresentation: "lcm_rollups",
+        mode: "continuous",
         logicalMemoryId: ids.logicalMemory,
         remoteReplicaId: ids.replica,
         teamId: ids.team,
         teamWorkspaceId: ids.workspace,
-        representation: "lcm_rollups",
         maximumFidelity: "lcm_rollups",
         includeCuratedMemory: false
       }),
@@ -301,21 +380,17 @@ describe("Shared Memory action definitions", () => {
   it("binds consent and Share Grant creation in one decision and steps up raw Memory", async () => {
     const derived = shareIntent("lcm_rollups");
     const raw = shareIntent("memory_events");
-    const rawRepository = repository();
-    rawRepository.getSharedMemoryShareReview.mockImplementationOnce(
-      async (actor, input) => ({
-        ...(await repository().getSharedMemoryShareReview(actor, input)),
-        sourceOwnerPolicyWillActivate: true,
-        sourceOwnerPolicyWillReplace: true
-      })
-    );
+    const rawRepository = repository({ sourceOwnerPolicyWillReplace: true });
 
     const admittedDerived = await admit(derived);
     const admittedRaw = await admit(raw, rawRepository);
 
     expect(admittedDerived).toMatchObject({
-      operation: sharedMemoryShareBundleActionGrantBinding({
+      operation: sharedMemoryPendingShareActionGrantBinding({
         referenceId: ids.request,
+        source: capturedSource,
+        sourceCapabilities: ["lcm_rollups", "lcm_leaves", "memory_events"],
+        activationRepresentation: "lcm_rollups",
         mutationId: ids.mutation,
         logicalGrantId: ids.logicalGrant,
         consentId: ids.consent,
@@ -457,6 +532,9 @@ describe("Shared Memory action definitions", () => {
     expect(increase).toMatchObject({
       operation: sharedMemoryFidelityBundleActionGrantBinding({
         referenceId: ids.request,
+        source: capturedSource,
+        sourceCapabilities: ["lcm_rollups", "lcm_leaves", "memory_events"],
+        activationRepresentation: "memory_events",
         mutationId: ids.mutation,
         consentId: ids.consent,
         logicalMemoryId: ids.logicalMemory,
@@ -501,9 +579,25 @@ describe("Shared Memory action definitions", () => {
     });
   });
 
+  it("reviews a newer source revision without pretending fidelity changed", async () => {
+    await expect(admit(fidelityIntent("lcm_leaves"))).resolves.toMatchObject({
+      policy: {
+        disposition: "native_review",
+        review: {
+          title: "Share this newer Memory revision?",
+          confirmLabel: "Share newer revision",
+          details: expect.arrayContaining([
+            { label: "Current source revision", value: "3" },
+            { label: "New source revision", value: "4" }
+          ])
+        }
+      }
+    });
+  });
+
   it("fails closed on missing review state and exposes no standalone consent action", async () => {
     const repo = repository();
-    repo.getSharedMemoryShareReview.mockResolvedValueOnce(null as never);
+    repo.getSharedMemoryPendingShareReview.mockResolvedValueOnce(null as never);
 
     await expect(
       admit(shareIntent("lcm_rollups"), repo)

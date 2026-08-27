@@ -1,5 +1,8 @@
 import type { FastifyInstance } from "fastify";
-import { createEncryptedJsonPackage } from "@koed/shared";
+import {
+  createEncryptedJsonPackage,
+  crossIdentitySyncDeterministicUuid
+} from "@koed/shared";
 import { z } from "zod";
 import type { ApiRouteContext } from "../server/context.js";
 import {
@@ -226,11 +229,27 @@ export const registerGraphRoutes = (
       if (cached) {
         return cached;
       }
+      const [projects, localDeployment] = await Promise.all([
+        repo.listLcmGraphThreads({ userId: user.id }, personalQuery),
+        repo.getLocalSyncDeployment()
+      ]);
       const response = graphThreadIndexResponseSchema.parse({
-        projects: await repo.listLcmGraphThreads(
-          { userId: user.id },
-          personalQuery
-        )
+        projects: projects.map((project) => ({
+          ...project,
+          threads: project.threads.map((thread) => ({
+            ...thread,
+            logicalMemoryId:
+              thread.sessionId && localDeployment
+                ? crossIdentitySyncDeterministicUuid({
+                    protocol: "koed.captured-session-sync/v1",
+                    sourceDeploymentId: localDeployment.protocolDeploymentId,
+                    sourceUserId: user.id,
+                    originSessionId: thread.sessionId,
+                    identity: "logical-memory"
+                  })
+                : null
+          }))
+        }))
       });
       await cacheProvider.setJson(cacheKey, response, graphCacheTtlSeconds);
       return response;
@@ -545,18 +564,8 @@ export const registerGraphRoutes = (
                 sourceRevision: expansion.parent.sourceRevision,
                 visibilityProvenance: {
                   shareGrantId: expansion.parent.shareGrantId,
-                  representationId: expansion.parent.representationId,
                   representation: expansion.parent.representation,
-                  provenanceHash: expansion.parent.provenanceHash
-                },
-                generation: {
-                  representationPolicyRevision:
-                    expansion.parent.representationPolicyRevision,
-                  contentPolicyVersion: expansion.parent.contentPolicyVersion,
-                  classifierVersion: expansion.parent.classifierVersion,
-                  embeddingModel: expansion.parent.embeddingModel,
-                  embeddingDimensions: expansion.parent.embeddingDimensions,
-                  embeddingVersion: expansion.parent.embeddingVersion
+                  sourceRevision: expansion.parent.sourceRevision
                 },
                 sourceItems: expansion.items.map((item, position) => {
                   const sourceType =
@@ -569,7 +578,6 @@ export const registerGraphRoutes = (
                       sourceType === "memory_node"
                         ? "lcm_child"
                         : "memory_event",
-                    sourceTable: "team_memory_representations",
                     sourceId: item.pseudonymousSourceId,
                     canonicalSourceIdentity: canonicalEvidenceSourceIdentity(
                       sourceType,
@@ -584,13 +592,6 @@ export const registerGraphRoutes = (
                       representation: expansion.parent.representation,
                       sourceRevision: expansion.parent.sourceRevision,
                       freshness: expansion.parent.freshness,
-                      provenanceHash: expansion.parent.provenanceHash,
-                      representationPolicyRevision:
-                        expansion.parent.representationPolicyRevision,
-                      contentPolicyVersion:
-                        expansion.parent.contentPolicyVersion,
-                      classifierVersion: expansion.parent.classifierVersion,
-                      embeddingVersion: expansion.parent.embeddingVersion,
                       sourceContract: teamEvidenceSourceContract(
                         sourceType === "memory_node"
                           ? "lcm_leaves"

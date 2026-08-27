@@ -67,9 +67,10 @@ const expectedPre0020Tag = "0019_tidy_rhino";
 const expectedCurrent0020Tag = "0020_zippy_apocalypse";
 const expectedLocalRuntimeCutoverTag = "0026_amused_zeigeist";
 const expectedPreSelectivePiiTag = "0033_fixed_scarlet_witch";
-const expectedLatestMigrationTag = "0034_young_silvermane";
+const expectedSelectivePiiTag = "0034_young_silvermane";
+const expectedLatestMigrationTag = "0035_concerned_the_twelve";
 const preMultiComponentSourceIndex = 29;
-const expectedLatestMigrationIndex = 34;
+const expectedLatestMigrationIndex = 35;
 const expectedPre0020Fingerprint =
   "0308ea8a58969a9dbbfd1fc480d32f71fd4507b2fcc130c73cf9c244af1a8598";
 
@@ -1110,6 +1111,13 @@ try {
       `Expected pre-selective-PII migration ${expectedPreSelectivePiiTag}`
     );
   }
+  if (
+    journal.entries[preSelectivePiiIndex + 1]?.tag !== expectedSelectivePiiTag
+  ) {
+    throw new Error(
+      `Expected selective-PII migration ${expectedSelectivePiiTag} immediately after ${expectedPreSelectivePiiTag}`
+    );
+  }
   const preSelectivePiiFolder = await createMigrationSlice(
     journal,
     preSelectivePiiIndex,
@@ -1158,6 +1166,17 @@ try {
     preMultiComponentSourceFolder,
     journal.entries.slice(0, preMultiComponentSourceIndex + 1)
   );
+  const preGenericSharedMemoryIndex = expectedLatestMigrationIndex - 1;
+  const preGenericSharedMemoryFolder = await createMigrationSlice(
+    journal,
+    preGenericSharedMemoryIndex,
+    { folderPrefix: "koed-pre-generic-shared-memory-" }
+  );
+  temporaryFolders.add(preGenericSharedMemoryFolder);
+  const preGenericSharedMemoryRecords = await migrationRecords(
+    preGenericSharedMemoryFolder,
+    journal.entries.slice(0, preGenericSharedMemoryIndex + 1)
+  );
 
   await runScenario("clean-full-migration", async () => {
     const target = await createDisposableDatabase("clean_full");
@@ -1165,6 +1184,56 @@ try {
       await runDbMigrations(pool);
       await assertMigrationLedger(pool, fullRecords);
       await assertCurrentSchema(pool);
+    });
+  });
+
+  await runScenario("generic-shared-memory-requires-alpha-reset", async () => {
+    const target = await createDisposableDatabase("generic_memory_reset");
+    await withPool(target.url, async (pool) => {
+      await runDbMigrations(pool, {
+        migrationsFolder: preGenericSharedMemoryFolder
+      });
+      await assertMigrationLedger(pool, preGenericSharedMemoryRecords);
+      const ownerUserId = randomUUID();
+      const deploymentIdentityId = randomUUID();
+      await pool.query("insert into users (id, email) values ($1, $2)", [
+        ownerUserId,
+        `generic-memory-reset-${ownerUserId}@example.test`
+      ]);
+      await pool.query(
+        `insert into deployment_identities
+           (id,protocol_deployment_id,locality,profile)
+         values ($1,$2,'local','local_personal')`,
+        [deploymentIdentityId, randomUUID()]
+      );
+      await pool.query(
+        `insert into logical_memories
+           (owner_user_id,source_boundary,logical_key,
+            origin_deployment_identity_id,origin_source_id,owner_principal_id)
+         values ($1,'captured_session',$2,$3,$4,$1)`,
+        [
+          ownerUserId,
+          `generic-memory-reset:${randomUUID()}`,
+          deploymentIdentityId,
+          `session:${randomUUID()}`
+        ]
+      );
+      const migrationError = await runDbMigrations(pool).then(
+        () => null,
+        (error) => error
+      );
+      if (!migrationError) {
+        throw new Error("Populated pre-0035 database unexpectedly upgraded");
+      }
+      const messages = errorMessages(migrationError);
+      if (
+        !messages.includes(
+          "Koed alpha data reset required before enabling generic Shared Memory sources"
+        )
+      ) {
+        throw new Error(`Missing reset-required diagnostic: ${messages}`);
+      }
+      await assertMigrationLedger(pool, preGenericSharedMemoryRecords);
     });
   });
 

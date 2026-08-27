@@ -1,18 +1,21 @@
 import {
-  Archive,
   BookOpen,
   ChevronDown,
   ChevronRight,
+  CircleAlert,
   Folder,
   Hash,
   Library,
+  LoaderCircle,
   LockKeyhole,
   MessageCircle,
   MessagesSquare,
   NotebookPen,
   Plus,
+  Sparkles,
   UsersRound
 } from "lucide-react";
+import type { PersonalDesktopAskThread } from "@koed/shared/personal-desktop";
 import { useState, type ReactNode } from "react";
 
 export type ContextNavItem = {
@@ -57,14 +60,18 @@ function SidebarHeader({
 function Section({
   action,
   children,
+  className,
   title
 }: {
   action?: ReactNode;
   children: ReactNode;
+  className?: string;
   title: string;
 }) {
   return (
-    <section className="desktop-sidebar-section">
+    <section
+      className={`desktop-sidebar-section${className ? ` ${className}` : ""}`}
+    >
       <header>
         <span>{title}</span>
         {action}
@@ -133,6 +140,42 @@ function NavItem({
   );
 }
 
+function AskRecentItem({
+  onSelect,
+  selected,
+  thread
+}: {
+  onSelect: (askThreadId: string) => void;
+  selected: boolean;
+  thread: PersonalDesktopAskThread;
+}) {
+  const icon =
+    thread.latestStatus === "error" ? (
+      <CircleAlert aria-hidden="true" />
+    ) : thread.latestStatus === "pending" ? (
+      <LoaderCircle aria-hidden="true" />
+    ) : (
+      <Sparkles aria-hidden="true" />
+    );
+  return (
+    <button
+      aria-current={selected ? "page" : undefined}
+      className="desktop-sidebar-nav-item desktop-sidebar-ask-recent"
+      data-selected={selected || undefined}
+      onClick={() => onSelect(thread.askThreadId)}
+      type="button"
+    >
+      <span
+        className="desktop-sidebar-nav-icon"
+        data-status={thread.latestStatus}
+      >
+        {icon}
+      </span>
+      <span className="desktop-sidebar-nav-label">{thread.firstQuestion}</span>
+    </button>
+  );
+}
+
 export function LockedFeatureRow({
   explanation,
   label
@@ -149,34 +192,47 @@ export function LockedFeatureRow({
 }
 
 export function PersonalContextNavigation({
-  channels,
+  askRecents = [],
+  askRecentsError,
+  askRecentsNextCursor = null,
+  askSelected = false,
   notesSelected,
-  onCreateChannel,
+  onLoadOlderAskThreads,
+  onOpenAsk = () => undefined,
   onOpenNotes,
   onOpenProjects,
   onOpenShares,
-  onSelectChannel,
+  onSelectAskThread,
   projectsSelected,
+  selectedAskThreadId,
   sharesSelected,
   sharesUnavailable = false
 }: {
-  channels: readonly ContextNavItem[];
+  askRecents?: readonly PersonalDesktopAskThread[];
+  askRecentsError?: string | null;
+  askRecentsNextCursor?: string | null;
+  askSelected?: boolean;
   notesSelected: boolean;
-  onCreateChannel: () => void;
+  onLoadOlderAskThreads?: () => void;
+  onOpenAsk?: () => void;
   onOpenNotes: () => void;
   onOpenProjects: () => void;
   onOpenShares: () => void;
-  onSelectChannel: (threadId: string) => void;
+  onSelectAskThread?: (askThreadId: string) => void;
   projectsSelected: boolean;
+  selectedAskThreadId?: string;
   sharesSelected: boolean;
   sharesUnavailable?: boolean;
 }) {
-  const activeChannels = channels.filter((item) => !item.archived);
-  const archivedChannels = channels.filter((item) => item.archived);
   return (
-    <div className="desktop-context-content">
+    <div className="desktop-context-content desktop-personal-context-content">
       <SidebarHeader eyebrow="Private to you" title="Personal" />
       <Section title="Memory">
+        <NavItem
+          icon={<Sparkles aria-hidden="true" />}
+          item={{ id: "ask", label: "Ask", selected: askSelected }}
+          onSelect={onOpenAsk}
+        />
         <NavItem
           icon={<Folder aria-hidden="true" />}
           item={{
@@ -185,6 +241,15 @@ export function PersonalContextNavigation({
             selected: projectsSelected
           }}
           onSelect={onOpenProjects}
+        />
+        <NavItem
+          icon={<NotebookPen aria-hidden="true" />}
+          item={{
+            id: "notes",
+            label: "Notes",
+            selected: notesSelected
+          }}
+          onSelect={onOpenNotes}
         />
         <NavItem
           icon={<Library aria-hidden="true" />}
@@ -196,53 +261,31 @@ export function PersonalContextNavigation({
           }}
           onSelect={onOpenShares}
         />
-        <LockedFeatureRow
-          explanation="Memory Answer needs a dedicated protected Desktop contract."
-          label="Ask Memory"
-        />
       </Section>
-      <Section
-        title="Channels"
-        action={
-          <IconButton label="Create Personal channel" onClick={onCreateChannel}>
-            <Plus aria-hidden="true" />
-          </IconButton>
-        }
-      >
-        <NavItem
-          icon={<NotebookPen aria-hidden="true" />}
-          item={{
-            id: "notes",
-            label: "Notes to self",
-            selected: notesSelected
-          }}
-          onSelect={onOpenNotes}
-        />
-        {activeChannels.map((item) => (
-          <NavItem
-            icon={<Hash aria-hidden="true" />}
-            item={item}
-            key={item.id}
-            onSelect={onSelectChannel}
+      <Section className="desktop-sidebar-recents-section" title="Recents">
+        {askRecents.map((thread) => (
+          <AskRecentItem
+            key={thread.askThreadId}
+            onSelect={onSelectAskThread ?? (() => undefined)}
+            selected={thread.askThreadId === selectedAskThreadId}
+            thread={thread}
           />
         ))}
+        {askRecentsNextCursor && onLoadOlderAskThreads ? (
+          <button
+            className="desktop-sidebar-load-more"
+            onClick={onLoadOlderAskThreads}
+            type="button"
+          >
+            Load older
+          </button>
+        ) : null}
+        {askRecentsError ? (
+          <p className="desktop-sidebar-section-state" role="status">
+            {askRecentsError}
+          </p>
+        ) : null}
       </Section>
-      {archivedChannels.length ? (
-        <details className="desktop-sidebar-archived">
-          <summary>
-            <Archive aria-hidden="true" />
-            Archived
-          </summary>
-          {archivedChannels.map((item) => (
-            <NavItem
-              icon={<Hash aria-hidden="true" />}
-              item={item}
-              key={item.id}
-              onSelect={onSelectChannel}
-            />
-          ))}
-        </details>
-      ) : null}
     </div>
   );
 }

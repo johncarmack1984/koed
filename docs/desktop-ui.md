@@ -24,7 +24,7 @@ environment and its StatusNotifierItem or legacy tray support.
 The left rail changes the current principal:
 
 - **Personal** is private to the current local User. It contains Personal
-  Memory, Projects, Captured Sessions, notes to self, and Personal channels.
+  Memory, Projects, Captured Sessions, Personal Notes, and Personal channels.
 - A **Team** is a remote identity and membership boundary. Its navigation
   contains people, Team-scoped direct messages, and Workspaces.
 - A **Workspace** is the Team subdivision that contains channels and
@@ -173,6 +173,11 @@ parallel. At narrow widths it becomes accessible **Source** and
 - current, pending, stale, unavailable, or revoked state; and
 - destination Team and Workspace.
 
+The Personal Shares view continues to list an owned Share after the owner loses
+Workspace Access. It marks Workspace content unavailable, disables content and
+detail actions, and keeps revocation available without exposing the source
+preview or companion discussion.
+
 Memory Event bodies and LCM summaries use the same secure rich-text renderer in
 the Shared Memory route and the source-owner consent preview. This keeps
 headings, lists, tables, links, and fenced code consistent before and after a
@@ -220,11 +225,10 @@ Grant. The renderer cannot select or downgrade the tier:
 4. **Bundled stages** retain separate records and audit while sharing the one
    User decision for the surrounding workflow.
 
-Shared Memory preview is Direct. Initial sharing and representation changes
-bundle consent with the Share Grant mutation, so they never prompt for consent
-as a standalone implementation stage. Workspace Access selects edit a visible
-local draft; **Review and apply** shows every before/after value before exact
-changes are classified as Native review or independent Step-up.
+Shared Memory preview is Direct. Initial sharing and fidelity changes bind
+consent to one Pending Share acceptance. They never prompt for consent as a
+standalone stage. Workspace Access selects edit a visible local draft.
+**Review and apply** shows each changed value before Native review or Step-up.
 
 The status surface distinguishes native review, browser Step-up, approved, applying, complete,
 canceled, denied, expired, and failed. Completion is shown only after the
@@ -287,6 +291,10 @@ destinations except explicitly supported local development origins.
 Renderer restart, replay, backpressure, authorization loss, stale events, and
 unknown revocation subscriptions are fail-closed. A revoked or unrecognized
 authority purges Team state before another snapshot can render.
+
+The Personal area also provides the protected Ask and Notes workspaces. See
+[Personal Ask and Notes](personal-ask-and-notes.md) for the durable workflow,
+Local AI Runtime boundary, Recents behavior, and Notes presentation.
 
 ![Team channel in dark theme](assets/desktop-ui/team-channel-dark.png)
 

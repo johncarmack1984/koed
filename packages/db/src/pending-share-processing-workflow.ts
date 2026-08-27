@@ -12,12 +12,12 @@ export interface PendingShareSourceReadinessSnapshot {
 }
 
 export type PendingShareSourceReadinessDecision =
-  | { kind: "ready"; remoteReplicaId: string }
+  | { kind: "ready"; remoteReplicaId: string | null }
   | { kind: "stale" }
   | {
       kind: "waiting";
       state: "preparing" | "needs_attention";
-      stage: "syncing" | "processing";
+      stage: "syncing" | "uploading" | "processing";
       failureCode: "source_preparation_stalled" | null;
       visibleTransition: boolean;
     };

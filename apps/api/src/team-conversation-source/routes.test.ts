@@ -903,7 +903,11 @@ describe("Team Conversation source routes", () => {
     fixture.rotatePrivacyGeneration();
     fixture.notify();
     const deadline = Date.now() + 2_000;
-    while (!received.includes("generation_changed") && Date.now() < deadline) {
+    while (
+      (!received.includes("generation_changed") ||
+        (received.match(/"segmentIndex":0/g)?.length ?? 0) < 2) &&
+      Date.now() < deadline
+    ) {
       const read = await reader.read();
       if (read.done) break;
       received += decoder.decode(read.value, { stream: true });

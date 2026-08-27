@@ -6,6 +6,7 @@ export type RouteIdentity =
   | "session"
   | "api_token"
   | "session_or_api_token"
+  | "session_or_api_token_or_device_credential"
   | "session_or_device_credential"
   | "api_token_or_device_credential"
   | "internal_service_token"
@@ -1053,6 +1054,69 @@ export const routeIdentityContracts = [
 
   route(
     "GET",
+    "/v1/collaboration/personal/notes",
+    "session_or_api_token_or_device_credential",
+    "collaboration",
+    "List owner-authorized Personal Notes."
+  ),
+  route(
+    "POST",
+    "/v1/collaboration/personal/notes",
+    "session_or_api_token_or_device_credential",
+    "collaboration",
+    "Create one owner-authorized Personal Note."
+  ),
+  route(
+    "GET",
+    "/v1/collaboration/personal/notes/{noteId}",
+    "session_or_api_token_or_device_credential",
+    "collaboration",
+    "Read one owner-authorized Personal Note and its bound Memory Event."
+  ),
+  route(
+    "PATCH",
+    "/v1/collaboration/personal/notes/{noteId}/title",
+    "session_or_api_token_or_device_credential",
+    "collaboration",
+    "Rename one owner-authorized Personal Note."
+  ),
+  route(
+    "PATCH",
+    "/v1/collaboration/personal/notes/{noteId}/body",
+    "session_or_api_token_or_device_credential",
+    "collaboration",
+    "Create a new revision of one owner-authorized Personal Note."
+  ),
+  route(
+    "GET",
+    "/v1/memory/ask/threads",
+    "api_token",
+    "local_synthesis",
+    "List Personal Ask threads."
+  ),
+  route(
+    "GET",
+    "/v1/memory/ask/threads/{askThreadId}",
+    "api_token",
+    "local_synthesis",
+    "Read one Personal Ask thread."
+  ),
+  route(
+    "POST",
+    "/v1/memory/ask/questions",
+    "api_token",
+    "local_synthesis",
+    "Create a pending Personal Ask question."
+  ),
+  route(
+    "PATCH",
+    "/v1/memory/ask/questions/{questionId}",
+    "api_token",
+    "local_synthesis",
+    "Complete a pending Personal Ask question."
+  ),
+  route(
+    "GET",
     "/v1/collaboration/teams/{teamId}/participants",
     "session_or_device_credential",
     "collaboration",
@@ -1574,20 +1638,40 @@ export const routeIdentityContracts = [
   ),
   route(
     "POST",
-    "/v1/shared-memory/teams/{teamId}/workspaces/{teamWorkspaceId}/consents",
-    "session_or_device_credential",
+    "/v1/shared-memory/candidate-previews",
+    "device_credential",
     "shared_memory",
-    "Create source-owner consent for Team Workspace sharing.",
+    "Create a reviewed Shared Memory candidate preview.",
     "request_time_shared_memory_owner",
     "implemented",
     teamDeploymentModes
   ),
   route(
     "POST",
-    "/v1/shared-memory/share-grants",
+    "/v1/shared-memory/pending-shares",
     "session_or_device_credential",
     "shared_memory",
-    "Create a Shared Memory Share Grant.",
+    "Accept a reviewed source into the durable Pending Share workflow.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "PUT",
+    "/v1/shared-memory/pending-shares/{pendingShareId}/personal-note-source",
+    "device_credential",
+    "shared_memory",
+    "Upload the exact owner-private source for a pending Personal Note share.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/personal-note-revisions/advance",
+    "device_credential",
+    "shared_memory",
+    "Advance active Continuous Personal Note shares to an exact new revision.",
     "request_time_shared_memory_owner",
     "implemented",
     teamDeploymentModes
@@ -1597,27 +1681,7 @@ export const routeIdentityContracts = [
     "/v1/shared-memory/share-grants/{shareGrantId}/fidelity-bundle",
     "session_or_device_credential",
     "shared_memory",
-    "Atomically update source-owner consent and Share Grant fidelity.",
-    "request_time_shared_memory_owner",
-    "implemented",
-    teamDeploymentModes
-  ),
-  route(
-    "PUT",
-    "/v1/shared-memory/share-grants/{shareGrantId}/fidelity",
-    "session_or_device_credential",
-    "shared_memory",
-    "Select a Share Grant fidelity ceiling.",
-    "request_time_shared_memory_owner",
-    "implemented",
-    teamDeploymentModes
-  ),
-  route(
-    "PUT",
-    "/v1/shared-memory/share-grants/{shareGrantId}/representations/{representation}",
-    "session_or_device_credential",
-    "shared_memory",
-    "Materialize a Share Grant representation.",
+    "Queue a reviewed fidelity replacement through the durable Pending Share workflow.",
     "request_time_shared_memory_owner",
     "implemented",
     teamDeploymentModes
@@ -1648,6 +1712,36 @@ export const routeIdentityContracts = [
     "session_or_device_credential",
     "shared_memory",
     "Revoke independent Conversation Source access.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "GET",
+    "/v1/shared-memory/owned-shares",
+    "session_or_device_credential",
+    "shared_memory",
+    "List the source owner's active and pending shares.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "GET",
+    "/v1/shared-memory/owned-shares/{kind}/{id}",
+    "session_or_device_credential",
+    "shared_memory",
+    "Read one source-owned active or pending share.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/pending-shares/{pendingShareId}/control",
+    "session_or_device_credential",
+    "shared_memory",
+    "Retry, pause, resume, or revoke a durable Pending Share.",
     "request_time_shared_memory_owner",
     "implemented",
     teamDeploymentModes

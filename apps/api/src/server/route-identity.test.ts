@@ -222,6 +222,31 @@ describe("route identity contract", () => {
         "x-koed-team-authority": "none"
       });
     }
+    for (const [method, path] of [
+      ["GET", "/v1/collaboration/personal/notes"],
+      ["POST", "/v1/collaboration/personal/notes"],
+      ["GET", "/v1/collaboration/personal/notes/{noteId}"],
+      ["PATCH", "/v1/collaboration/personal/notes/{noteId}/title"],
+      ["PATCH", "/v1/collaboration/personal/notes/{noteId}/body"]
+    ] as const) {
+      expect(routeIdentityFor(method, path)).toMatchObject({
+        identity: "session_or_api_token_or_device_credential",
+        domain: "collaboration",
+        teamAuthority: "none"
+      });
+    }
+    for (const [method, path] of [
+      ["GET", "/v1/memory/ask/threads"],
+      ["GET", "/v1/memory/ask/threads/{askThreadId}"],
+      ["POST", "/v1/memory/ask/questions"],
+      ["PATCH", "/v1/memory/ask/questions/{questionId}"]
+    ] as const) {
+      expect(routeIdentityFor(method, path)).toMatchObject({
+        identity: "api_token",
+        domain: "local_synthesis",
+        teamAuthority: "none"
+      });
+    }
   });
 
   it("pins public, session, API-token, and mixed route security in OpenAPI", () => {
@@ -504,6 +529,11 @@ describe("route identity contract", () => {
     const routeFamilies = {
       collaboration: [
         "GET /v1/teams/navigation",
+        "GET /v1/collaboration/personal/notes",
+        "POST /v1/collaboration/personal/notes",
+        "GET /v1/collaboration/personal/notes/{noteId}",
+        "PATCH /v1/collaboration/personal/notes/{noteId}/title",
+        "PATCH /v1/collaboration/personal/notes/{noteId}/body",
         "GET /v1/collaboration/teams/{teamId}/participants",
         "GET /v1/collaboration/teams/{teamId}/threads",
         "GET /v1/collaboration/teams/{teamId}/workspaces/{teamWorkspaceId}/channels",
@@ -536,14 +566,17 @@ describe("route identity contract", () => {
         "PUT /v1/shared-memory/teams/{teamId}/policy",
         "PUT /v1/shared-memory/teams/{teamId}/workspaces/{teamWorkspaceId}/policy",
         "POST /v1/shared-memory/previews",
-        "POST /v1/shared-memory/teams/{teamId}/workspaces/{teamWorkspaceId}/consents",
-        "POST /v1/shared-memory/share-grants",
+        "POST /v1/shared-memory/candidate-previews",
+        "POST /v1/shared-memory/pending-shares",
+        "PUT /v1/shared-memory/pending-shares/{pendingShareId}/personal-note-source",
+        "POST /v1/shared-memory/personal-note-revisions/advance",
         "PUT /v1/shared-memory/share-grants/{shareGrantId}/fidelity-bundle",
-        "PUT /v1/shared-memory/share-grants/{shareGrantId}/fidelity",
-        "PUT /v1/shared-memory/share-grants/{shareGrantId}/representations/{representation}",
         "POST /v1/shared-memory/share-grants/{shareGrantId}/revoke",
         "PUT /v1/shared-memory/share-grants/{shareGrantId}/transcript-access",
         "POST /v1/shared-memory/share-grants/{shareGrantId}/transcript-access/revoke",
+        "GET /v1/shared-memory/owned-shares",
+        "GET /v1/shared-memory/owned-shares/{kind}/{id}",
+        "POST /v1/shared-memory/pending-shares/{pendingShareId}/control",
         "GET /v1/shared-memory/share-grants/{shareGrantId}/transcript/manifest",
         "GET /v1/shared-memory/share-grants/{shareGrantId}/transcript/segments/{segmentId}",
         "GET /v1/shared-memory/share-grants/{shareGrantId}/transcript/stream",

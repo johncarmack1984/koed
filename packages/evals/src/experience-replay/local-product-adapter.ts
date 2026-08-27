@@ -536,7 +536,7 @@ const embedPendingSources = async (
       embeddingMaxTextChars: runtime.maxTextChars,
       embeddingMaxRequestChars: runtime.maxRequestChars,
       embeddingRequestTimeoutMs: 900_000
-    },
+    } as Parameters<typeof createEmbeddingWorkflow>[0]["env"],
     repository: () => repository
   });
   for (;;) {

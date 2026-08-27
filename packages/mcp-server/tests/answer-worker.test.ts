@@ -114,6 +114,7 @@ const writeFakeDynamicMemoryAnswerAppServer = (
       | "expandSuccess"
       | "invalidThenValid"
       | "expandBudget"
+      | "emptySearchNotFound"
       | "partialStageNotFound"
       | "refineSearch"
       | "scanLoop"
@@ -267,6 +268,14 @@ lineReader.on("line", (line) => {
         process.exit(69);
       }
       sendFinal(answer);
+      return;
+    }
+    if (mode === "emptySearchNotFound") {
+      if (!text.includes("search_result")) {
+        console.error("expected empty search result, got " + text.slice(0, 200));
+        process.exit(71);
+      }
+      sendFinal(notFoundAnswer);
       return;
     }
     if (!text.includes("KOE144_DYNAMIC_TOOL_EVIDENCE")) {
@@ -474,6 +483,7 @@ describe("memory answer worker", () => {
           model: "gpt-5.4-mini",
           usedFallback: false,
           searchCount: 4,
+          displayMessage: "The worker could not verify this answer.",
           errorMessage: "SECRET WORKER ERROR",
           appServerEvents: []
         }
@@ -487,6 +497,9 @@ describe("memory answer worker", () => {
     expect(response.citations).toEqual([{ sourceId: "selected" }]);
     expect(response.evidenceBundle).toBeUndefined();
     expect(response.localMemoryWorker.searchCount).toBeUndefined();
+    expect(response.localMemoryWorker.displayMessage).toBe(
+      "The worker could not verify this answer."
+    );
     expect(JSON.stringify(response)).not.toMatch(
       /SECRET INTERNAL QUERY|SECRET CALLER HINT|SECRET ERROR|SECRET WORKER ERROR/
     );
@@ -626,7 +639,10 @@ describe("memory answer worker", () => {
           "including recency/conflict reasoning when evidence differs over time",
           '"searchHistory"',
           '"retrievalCoverage"',
-          '"remainingBudgets"'
+          '"remainingBudgets"',
+          '"conversationContext"',
+          "We chose the Personal route.",
+          "What did we choose?"
         ]
       });
 
@@ -646,6 +662,12 @@ describe("memory answer worker", () => {
         retrievalScope: "personal",
         searchDomain: "project",
         projectId: "workspace-1",
+        conversationContext: [
+          {
+            answer: "We chose the Personal route.",
+            question: "What did we choose?"
+          }
+        ],
         config: resolveMemoryAnswerWorkerConfig({
           MEMORY_ANSWER_PROVIDER: "codex",
           MEMORY_ANSWER_CODEX_BINARY: appServerBinary,
@@ -1022,19 +1044,22 @@ describe("memory answer worker", () => {
             MEMORY_ANSWER_PROVIDER: "codex",
             MEMORY_ANSWER_CODEX_BINARY: appServerBinary,
             MEMORY_ANSWER_MAX_SEARCHES: "3",
+            KOED_HOME: directory,
             MEMORY_ANSWER_MAX_CANDIDATES: "2"
           })
         }
       );
 
-      expect(searches).toHaveLength(3);
-      expect(searches[2]).toMatchObject({
+      const refinedSearch = searches.find(
+        (search) => search.query === "deployment sentinel configuration"
+      );
+      expect(refinedSearch).toMatchObject({
         query: "deployment sentinel configuration",
         retrieval_stage: "leaf_search",
         exact_hints: ["DEPLOYMENT_MODE"],
-        strict_limit: true,
         limit: 50
       });
+      expect(refinedSearch).not.toHaveProperty("strict_limit");
       expect(response.localMemoryWorker).toMatchObject({
         usedFallback: false,
         memoryStatus: "found",
@@ -1061,6 +1086,70 @@ describe("memory answer worker", () => {
           }
         }
       });
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts an empty worker-refined search as a valid not-found result", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "koed-answer-"));
+    try {
+      const appServerBinary = writeFakeDynamicMemoryAnswerAppServer(directory, {
+        mode: "emptySearchNotFound"
+      });
+      const searches: Record<string, unknown>[] = [];
+      const client: MemoryAnswerRetrievalClient = {
+        async search(input) {
+          searches.push(input);
+          if (input.retrieval_stage === "score_scan") {
+            return { retrieval: { stages: [] } };
+          }
+          expect(input).not.toHaveProperty("strict_limit");
+          return {
+            hits: [],
+            retrieval: { stage: input.retrieval_stage }
+          };
+        },
+        async expand() {
+          throw new Error("empty search should not require expansion");
+        }
+      };
+
+      const response = await answerWithMemoryWorker(
+        {
+          evidenceBundle: {
+            query: "What is my nickname?",
+            evidence: [],
+            retrieval: { mode: "app_server_dynamic_tools" }
+          }
+        },
+        {
+          client,
+          retrievalScope: "personal",
+          searchDomain: "global",
+          config: resolveMemoryAnswerWorkerConfig({
+            MEMORY_ANSWER_PROVIDER: "codex",
+            MEMORY_ANSWER_CODEX_BINARY: appServerBinary,
+            MEMORY_ANSWER_MAX_ATTEMPTS: "2",
+            MEMORY_ANSWER_MAX_SEARCHES: "3",
+            KOED_HOME: directory
+          })
+        }
+      );
+
+      const workerSearch = searches.find(
+        (search) =>
+          search.query === "koed docker" &&
+          search.retrieval_stage === "leaf_search"
+      );
+      expect(workerSearch).toBeDefined();
+      expect(workerSearch).not.toHaveProperty("strict_limit");
+      expect(response.localMemoryWorker).toMatchObject({
+        usedFallback: false,
+        memoryStatus: "not_found",
+        searchCount: 3
+      });
+      expect(response.localMemoryWorker.errorMessage).toBeUndefined();
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
@@ -1138,6 +1227,9 @@ describe("memory answer worker", () => {
       expect(response.structuredAnswer).toMatchObject({
         memory_status: "insufficient"
       });
+      expect(response.markdown).toBe(
+        "The Codex worker did not finish the Personal Memory search in time. Try again."
+      );
       expect(response.localMemoryWorker.appServerExecutions).toHaveLength(1);
       expect(
         response.localMemoryWorker.appServerExecutions?.map(
@@ -2009,7 +2101,7 @@ describe("memory answer worker", () => {
         "without resolvable supporting evidence"
       );
       expect(response.markdown).toBe(
-        "Memory retrieval was incomplete, so there is not enough evidence to answer reliably."
+        "The Codex worker reached the Memory Answer resource limit before it could produce a reliable answer. Try a narrower question."
       );
       expect(response.localMemoryWorker.memoryStatus).toBe("insufficient");
       expect(response.structuredAnswer).toMatchObject({
@@ -2752,9 +2844,11 @@ describe("memory answer worker", () => {
   });
 
   it("propagates semantic-stage incompleteness instead of treating it as absence", async () => {
+    const requests: Record<string, unknown>[] = [];
     const result = await runScriptedMemoryAnswerFirstPass({
       client: {
-        async search() {
+        async search(input) {
+          requests.push(input);
           return {
             hits: [],
             retrieval: {
@@ -2776,6 +2870,11 @@ describe("memory answer worker", () => {
     });
 
     expect(result.evidence).toEqual([]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).not.toHaveProperty("retrieval_stage");
+    expect(result.searches).toEqual([
+      expect.objectContaining({ retrievalStage: "all_stages" })
+    ]);
     expect(result.errors).toEqual([
       expect.stringMatching(/semantic retrieval incomplete.*offline/i)
     ]);

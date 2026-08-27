@@ -21,7 +21,7 @@ User
 |
 +-- Personal
 |   +-- Personal Memory
-|   +-- Notes to self
+|   +-- Personal Notes
 |   +-- Personal channels
 |
 +-- Team
@@ -45,7 +45,8 @@ User
 - Every Team channel belongs to one Workspace.
 - Team direct messages and group direct messages belong to one Team and do not
   belong to a Workspace.
-- Personal channels and notes-to-self belong only to their Personal owner.
+- Personal Notes and Personal channels belong only to their Personal owner.
+  Notes are revisioned Personal Memory objects, not chat threads.
 - A shared Captured Session appears in the Workspace named by its Share Grant.
 - Its companion discussion is attached to the shared source and does not appear
   in the ordinary channel list.
@@ -140,7 +141,6 @@ Team Chat Threads express their scope and kind directly.
 
 | Kind                      | Scope    | Owner | Team | Workspace | Participants                   |
 | ------------------------- | -------- | ----- | ---- | --------- | ------------------------------ |
-| Notes to self             | Personal | yes   | no   | no        | owner                          |
 | Personal channel          | Personal | yes   | no   | no        | owner                          |
 | Team channel              | Team     | no    | yes  | yes       | current Workspace audience     |
 | Direct message            | Team     | no    | yes  | no        | two enabled Team members       |
@@ -149,7 +149,6 @@ Team Chat Threads express their scope and kind directly.
 
 The data model enforces valid scope combinations and durable identity:
 
-- one notes-to-self thread per Personal owner;
 - unique active normalized Personal-channel names per owner;
 - unique active normalized Team-channel names per Workspace;
 - one direct-message thread per normalized User pair and Team;
@@ -213,15 +212,16 @@ replay batch, and live event resolves authorization from current server state.
 The endpoint- and channel-level rules are defined in the
 [Team Collaboration Action And Credential Matrix](team-collaboration-action-credential-matrix.md).
 
-| Operation family              | Personal owner                   | Scoped enrolled device                  | Remote browser session                      | Personal API Token |
-| ----------------------------- | -------------------------------- | --------------------------------------- | ------------------------------------------- | ------------------ |
-| Personal chat read/write      | local owner only                 | no remote authority                     | no local Personal authority                 | denied             |
-| Team catalog and roster read  | no implicit authority            | explicit scope plus Team authorization  | allowed after Team authorization            | denied             |
-| Team chat read                | no implicit authority            | explicit read scope plus authorization  | allowed after thread authorization          | denied             |
-| Team chat write               | no implicit authority            | explicit write scope plus authorization | allowed after thread authorization          | denied             |
-| Team-shared Memory read/live  | source ownership is insufficient | explicit scope plus grant authorization | allowed after grant/Workspace authorization | denied             |
-| Share creation or change      | initiates and consents locally   | explicit scoped operation               | allowed after source/Workspace checks       | denied             |
-| Team/Workspace administration | no implicit authority            | browser-confirmed action grant          | allowed after role and action checks        | denied             |
+| Operation family                                   | Personal owner                   | Scoped enrolled device                  | Remote browser session                      | Personal API Token          |
+| -------------------------------------------------- | -------------------------------- | --------------------------------------- | ------------------------------------------- | --------------------------- |
+| Personal chat read/write                           | local owner only                 | no remote authority                     | no local Personal authority                 | denied                      |
+| Personal Note metadata/event read and title rename | local owner only                 | explicit Personal collaboration scope   | allowed for the owning User                 | allowed for the owning User |
+| Team catalog and roster read                       | no implicit authority            | explicit scope plus Team authorization  | allowed after Team authorization            | denied                      |
+| Team chat read                                     | no implicit authority            | explicit read scope plus authorization  | allowed after thread authorization          | denied                      |
+| Team chat write                                    | no implicit authority            | explicit write scope plus authorization | allowed after thread authorization          | denied                      |
+| Team-shared Memory read/live                       | source ownership is insufficient | explicit scope plus grant authorization | allowed after grant/Workspace authorization | denied                      |
+| Share creation or change                           | initiates and consents locally   | explicit scoped operation               | allowed after source/Workspace checks       | denied                      |
+| Team/Workspace administration                      | no implicit authority            | browser-confirmed action grant          | allowed after role and action checks        | denied                      |
 
 ### Scope Predicates
 
@@ -300,6 +300,14 @@ Team-shared Memory remains owned by its originating User. Sharing changes
 authorization and does not transfer ownership, copy the logical memory
 lifespan, or turn a Captured Session into Team Chat.
 
+A Share Grant has an explicit source binding. A Captured Session follows the
+Cross-Identity Sync flow below. A Personal Note follows a one-event-per-revision
+flow: authenticated source upload, standalone encrypted artifact, one Team
+`memory_events` representation, and the standard companion discussion. It may
+be an immutable Snapshot or a Continuous Share over strictly newer revisions of
+the same Note. The Personal Note flow has no replica, sync relationship,
+alternate representation, or Conversation Source Access.
+
 ### Cross-Deployment Flow
 
 ```text
@@ -338,6 +346,13 @@ Workspace shared-source view and companion discussion
   Team representation becomes visible only after encrypted materialization
   commits; clients receive the normal Shared Memory realtime update rather than
   polling the source.
+- A Continuous Personal Note Share uses a durable local advancement queue after
+  Projection. It coalesces rapid edits per Share, uploads only the exact newest
+  eligible revision through the enrolled device credential, and runs privacy
+  classification before Team publication. The prior ready revision remains
+  readable until grant and representation switch atomically. Pause preserves
+  that revision and stops advancement; resume queues the latest revision;
+  revocation stops the flow.
 - `hasSynchronizedRevision` records whether at least one target revision has
   completed successfully; it is not a synonym for current sync readiness. It
   remains true while a later revision is processing and after sync revocation,
@@ -361,21 +376,20 @@ Grant is eligible only when its complete direct-source provenance is confined to
 the granted Captured Session; mixed-session or incomplete provenance fails
 closed.
 
-- A Share Grant stores immutable logical source identity, the source owner's
-  allowed representation set, one selected active representation, policy
-  revisions, lifecycle identity, and creating authority.
-- Team and Workspace policies each provide an allowed representation set. The
-  active representation must be in the intersection of all three sets.
+- A Share Grant stores immutable typed source identity, source capabilities,
+  maximum fidelity, the Curated Memory choice, one activation representation,
+  policy revisions, lifecycle identity, and creating authority.
+- Effective layers are the intersection of source capabilities, owner consent,
+  and current Team and Workspace policies.
 - No representation is assumed less sensitive than another. There is no
   inferred permission or fallback to whatever source rows exist.
-- Only the source owner selects the initial or replacement representation.
-  Higher fidelity or expansion of the owner's allowed set requires a new exact
-  preview and explicit consent.
+- Only the source owner selects the initial or replacement fidelity. Higher
+  fidelity requires a new exact preview and explicit consent.
 - Team and Workspace managers may reduce their policy sets or revoke the Share
   Grant. They cannot select a replacement, expand owner consent, or share
   another User's source.
-- A policy change that excludes the active representation makes the source view
-  unavailable until the owner explicitly selects an allowed replacement.
+- A policy change that excludes the active representation makes the source
+  view unavailable until an authorized replacement is published.
 - Derived leaves and rollups have complete provenance inside the one shared
   logical source. Cross-session summaries are not eligible.
 - Share-bound summaries are produced locally by the LCM Summary Service through
@@ -514,8 +528,8 @@ durable, push-based updates without polling application data.
 
 Realtime event families cover Team and Workspace lifecycle or access changes,
 thread creation and archive, Team Chat Message creation, current-User read
-state, Share Grant and representation changes, newly permitted Memory Events or
-LCM summaries, companion activity, and access revocation.
+state, Share Grant and fidelity changes, newly permitted Memory Events or LCM
+summaries, companion activity, and access revocation.
 
 ## Projection Boundary
 
@@ -636,7 +650,7 @@ dashboard.
 - Selecting a Team opens one sidebar with Team people, Team-scoped direct
   messages, collapsible Workspaces, Workspace channels, and Team-shared Memory.
   The hierarchy does not add a third permanent navigation rail.
-- The main content shows Personal Memory, notes-to-self, a Personal channel, a
+- The main content shows Personal Memory, Personal Notes, a Personal channel, a
   Team channel or direct message, Team people, Workspace Team-shared Memory, or
   a shared-session split view.
 - Shared source content is visually distinct from Team Chat. LCM leaves and

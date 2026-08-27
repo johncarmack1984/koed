@@ -5,6 +5,7 @@ import {
   MEMORY_RETRIEVAL_HINT_MAX_COUNT,
   MEMORY_RETRIEVAL_HINT_MAX_LENGTH,
   MEMORY_RETRIEVAL_SEMANTIC_HINT_MAX_COUNT,
+  MEMORY_ANSWER_TIMEOUT_MAX_MS,
   EMBEDDING_RETRIEVAL_DOCUMENT_TRANSFORM,
   EMBEDDING_RETRIEVAL_QUERY_TRANSFORM,
   resolveSupportedEmbeddingModelConfig
@@ -101,6 +102,7 @@ export interface MemoryAnswerWorkerStatus {
   appServerExecutions?: MemoryAnswerAppServerExecution[];
   usedFallback: boolean;
   skippedReason?: string;
+  displayMessage?: string;
   errorMessage?: string;
 }
 
@@ -135,6 +137,11 @@ export interface MemoryAnswerRetrievalHints {
   semantic?: string[];
   entities?: string[];
   temporalIntent?: string;
+}
+
+export interface MemoryAnswerConversationTurn {
+  answer: string;
+  question: string;
 }
 
 /** Direct-call-only controls for isolated Retrieval Arena runs. */
@@ -201,6 +208,50 @@ export interface MemoryAnswerPayload {
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
+
+const workerFailureDisplayMessage = (
+  provider: string,
+  workerErrorMessage: string,
+  retrievalIncomplete: boolean,
+  exhaustedBudgets: readonly string[]
+): string => {
+  const worker = provider === "codex" ? "The Codex worker" : "The AI Client";
+  if (exhaustedBudgets.includes("wall_time")) {
+    return `${worker} did not finish the Personal Memory search in time. Try again.`;
+  }
+  if (exhaustedBudgets.length > 0) {
+    return `${worker} reached the Memory Answer resource limit before it could produce a reliable answer. Try a narrower question.`;
+  }
+  if (retrievalIncomplete) {
+    return `${worker} could not complete the Personal Memory search needed to answer reliably. Try again.`;
+  }
+  if (/cancelled/i.test(workerErrorMessage)) {
+    return "This Memory Answer was cancelled before it completed.";
+  }
+  if (/timed out|wall-time/i.test(workerErrorMessage)) {
+    return `${worker} did not finish this Memory Answer in time. Try again.`;
+  }
+  if (/empty output/i.test(workerErrorMessage)) {
+    return `${worker} completed without returning an answer. Try again.`;
+  }
+  if (
+    /resolvable supporting evidence|unsupported evidence|found without/i.test(
+      workerErrorMessage
+    )
+  ) {
+    return `${worker} could not verify its answer against enough supporting Personal Memory evidence.`;
+  }
+  if (/without using Koed RAG tools/i.test(workerErrorMessage)) {
+    return `${worker} could not complete the Personal Memory search needed to answer reliably. Try again.`;
+  }
+  if (/insufficient after complete retrieval/i.test(workerErrorMessage)) {
+    return `${worker} searched Personal Memory but could not determine a reliable answer from the available evidence.`;
+  }
+  if (/json|schema|validation|structured answer/i.test(workerErrorMessage)) {
+    return `${worker} returned an answer that Koed could not safely verify. Try again.`;
+  }
+  return `${worker} could not complete a reliable Memory Answer. Try again.`;
+};
 
 const CITATION_METADATA_KEYS = [
   "citations",
@@ -346,7 +397,8 @@ export const compactMemoryAnswerPayload = (
       model: payload.localMemoryWorker.model,
       memoryStatus: payload.localMemoryWorker.memoryStatus,
       usedFallback: payload.localMemoryWorker.usedFallback,
-      skippedReason: payload.localMemoryWorker.skippedReason
+      skippedReason: payload.localMemoryWorker.skippedReason,
+      displayMessage: payload.localMemoryWorker.displayMessage
     };
     return {
       markdown: payload.markdown,
@@ -513,7 +565,7 @@ export const resolveMemoryAnswerWorkerConfig = (
     timeoutMs: parsePositiveInteger(
       overrides.timeoutMs ?? resolveEnvValue(env, "MEMORY_ANSWER_TIMEOUT_MS"),
       DEFAULT_ANSWER_TIMEOUT_MS,
-      { min: 1000, max: 600000 }
+      { min: 1000, max: MEMORY_ANSWER_TIMEOUT_MAX_MS }
     ),
     maxAttempts: parsePositiveInteger(
       overrides.maxAttempts ??
@@ -654,6 +706,7 @@ interface MemoryAnswerToolState {
   servedCachedScan: boolean;
   ledger: MemoryAnswerBudgetLedger;
   evaluation: ResolvedMemoryAnswerEvaluationController;
+  conversationContext?: readonly MemoryAnswerConversationTurn[];
 }
 
 interface MemoryAnswerAttemptRun {
@@ -1652,6 +1705,7 @@ const uninspectedAvailableCandidateStages = (
   searches: ToolSearchRecord[]
 ): string[] => {
   const inspected = inspectedSearchStages(searches);
+  if (inspected.has("all_stages")) return [];
   return [...availableCandidateStages(retrievals)].filter(
     (stage) => !inspected.has(stage)
   );
@@ -2044,7 +2098,6 @@ const createMemoryAnswerDynamicToolHandler = (
               : undefined,
             retrieval_stage: stage,
             parent_node_ids: stringArrayArg(args, "parent_node_ids"),
-            strict_limit: true,
             limit
           })
         );
@@ -2272,6 +2325,7 @@ const buildDynamicMemoryAnswerPrompt = (
         citations: state.citations,
         retrievals: state.retrievals,
         retrievalHints: state.retrievalHints,
+        conversationContext: state.conversationContext,
         evaluationController: isDefaultMemoryAnswerEvaluation(state.evaluation)
           ? undefined
           : state.evaluation,
@@ -3152,6 +3206,87 @@ export const runScriptedMemoryAnswerFirstPass = async (options: {
     }
   };
   const queries = firstPassQueries(options.query, options.retrievalHints);
+  if (
+    options.searchDomain === "global" &&
+    options.retrievalScope === "personal" &&
+    queries.length === 1 &&
+    options.maxSearches > 1
+  ) {
+    const started = Date.now();
+    try {
+      const result = await beforeDeadline(() =>
+        options.client.search({
+          query: options.query,
+          ...common,
+          limit: options.limit
+        })
+      );
+      const hits = hitsFromSearch(result);
+      const retrieval = retrievalDiagnosticFromSearchResult(result);
+      const retrievalFailure = semanticRetrievalFailure(result);
+      const evidence = combineMemoryAnswerCandidateLists(
+        [],
+        [{ query: options.query, stage: "all_stages", hits }],
+        options.fusion !== false
+      );
+      return {
+        evidence,
+        citations: citationsFromHits(evidence),
+        retrievals: [sanitizeRetrievalDiagnostic(retrieval)],
+        searches: [
+          {
+            query: options.query,
+            retrievalScope: options.retrievalScope,
+            searchDomain: options.searchDomain,
+            retrievalStage: "all_stages",
+            sessionId: options.sessionId,
+            projectId: options.projectId,
+            teamWorkspaceId: options.teamWorkspaceId,
+            recentDays: options.recentDays,
+            sourceAfter: options.sourceAfter,
+            sourceBefore: options.sourceBefore,
+            limit: options.limit,
+            hitCount: hits.length,
+            phase: "first_pass",
+            durationMs: Date.now() - started
+          }
+        ],
+        errors: retrievalFailure
+          ? [
+              `First-pass semantic retrieval incomplete for query: ${retrievalFailure}`
+            ]
+          : [],
+        skippedQueries: []
+      };
+    } catch (error) {
+      return {
+        evidence: [],
+        citations: [],
+        retrievals: [],
+        searches: [
+          {
+            query: options.query,
+            retrievalScope: options.retrievalScope,
+            searchDomain: options.searchDomain,
+            retrievalStage: "all_stages",
+            sessionId: options.sessionId,
+            projectId: options.projectId,
+            teamWorkspaceId: options.teamWorkspaceId,
+            recentDays: options.recentDays,
+            sourceAfter: options.sourceAfter,
+            sourceBefore: options.sourceBefore,
+            limit: options.limit,
+            hitCount: 0,
+            phase: "first_pass",
+            durationMs: Date.now() - started,
+            errorClass: error instanceof Error ? error.name : "Error"
+          }
+        ],
+        errors: [`First-pass search failed for query: ${errorMessage(error)}`],
+        skippedQueries: []
+      };
+    }
+  }
   const followUpReserve = options.maxSearches > 1 ? 1 : 0;
   const firstPassCallBudget = Math.max(
     1,
@@ -3444,6 +3579,8 @@ const runDynamicToolMemoryAnswer = async (
     promptTemplate: LoadedPrompt;
     signal?: AbortSignal;
     captureProcessMetrics?: boolean;
+    /** Trusted local conversation context. This value never changes retrieval authorization. */
+    conversationContext?: readonly MemoryAnswerConversationTurn[];
   }
 ): Promise<{
   markdown: string;
@@ -3558,7 +3695,8 @@ const runDynamicToolMemoryAnswer = async (
     retrievalHints: options.retrievalHints,
     servedCachedScan: false,
     ledger,
-    evaluation: options.evaluation
+    evaluation: options.evaluation,
+    conversationContext: options.conversationContext
   };
   let promptTokens = countTokensForModel("", { model: options.config.model });
   const appServerExecutions: MemoryAnswerAppServerExecution[] = [];
@@ -3894,6 +4032,8 @@ export const answerWithMemoryWorker = async (
     evaluationController?: MemoryAnswerEvaluationController;
     /** Direct-call Retrieval Arena telemetry; never exposed through API/MCP input. */
     captureProcessMetrics?: boolean;
+    /** Trusted local conversation context. This value never changes retrieval authorization. */
+    conversationContext?: readonly MemoryAnswerConversationTurn[];
   } = {}
 ): Promise<MemoryAnswerWorkerResponse> => {
   const config = options.config ?? resolveMemoryAnswerWorkerConfig();
@@ -3962,6 +4102,7 @@ export const answerWithMemoryWorker = async (
       evaluation,
       promptTemplate,
       captureProcessMetrics: options.captureProcessMetrics,
+      conversationContext: options.conversationContext,
       signal: options.signal
     });
     return compactMemoryAnswerPayload(
@@ -4096,14 +4237,19 @@ export const answerWithMemoryWorker = async (
     const exhaustedBudgets = failureState?.ledger.budgetExhaustions ?? [];
     const retrievalIncomplete =
       (failureState?.errors.length ?? 0) > 0 || exhaustedBudgets.length > 0;
+    const displayMessage = workerFailureDisplayMessage(
+      config.provider,
+      workerErrorMessage,
+      retrievalIncomplete,
+      exhaustedBudgets
+    );
     const incompleteAnswer: StructuredMemoryAnswer | undefined =
       retrievalIncomplete
         ? {
             schema_version: MEMORY_ANSWER_STRUCTURED_SCHEMA_VERSION,
             memory_status: "insufficient",
             relevant_memory_found: false,
-            answer_markdown:
-              "Memory retrieval was incomplete, so there is not enough evidence to answer reliably.",
+            answer_markdown: displayMessage,
             relevance_explanation:
               exhaustedBudgets.length > 0
                 ? `Memory Answer exhausted bounded resources (${exhaustedBudgets.slice(0, 8).join(", ")}) before the available memory could be judged completely.`
@@ -4122,9 +4268,7 @@ export const answerWithMemoryWorker = async (
     return compactMemoryAnswerPayload(
       {
         ...payload,
-        markdown:
-          incompleteAnswer?.answer_markdown ??
-          "Memory answer worker failed before judging retrieved evidence.",
+        markdown: displayMessage,
         ...(incompleteAnswer ? { structuredAnswer: incompleteAnswer } : {}),
         evidenceBundle: {
           ...payload.evidenceBundle,
@@ -4199,6 +4343,7 @@ export const answerWithMemoryWorker = async (
           evidenceTokenEstimate: failureState?.ledger.evidenceTokenEstimate,
           memoryStatus: incompleteAnswer?.memory_status,
           appServerExecutions,
+          displayMessage,
           errorMessage: workerErrorMessage,
           usedFallback: true,
           skippedReason: `${config.provider}_failed`

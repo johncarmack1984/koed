@@ -6450,6 +6450,7 @@ export const createMemorySourceRepository = (
             from memory_events me
             where me.visibility = 'personal'
               and me.owner_user_id = $1
+              and coalesce(me.payload #>> '{metadata,semanticUnitType}', '') <> 'personal_note'
           )
           select
             (select count(*) from visible_events where invalidated_at is null)::text as captured_events,
@@ -6489,6 +6490,7 @@ export const createMemorySourceRepository = (
               or exists (
                 select 1 from memory_events ev
                 where ev.id = me.memory_event_id
+                  and coalesce(ev.payload #>> '{metadata,semanticUnitType}', '') <> 'personal_note'
                   and (
                     ev.visibility = 'personal' and ev.owner_user_id = $1
                   )
@@ -6909,9 +6911,11 @@ export const createMemorySourceRepository = (
           cross join cursor_order co
           left join sessions s on s.id = me.session_id
           where ($2::boolean = true or me.invalidated_at is null)
+            and coalesce(me.payload #>> '{metadata,semanticUnitType}', '') <> 'personal_note'
             and (
               $6::uuid is not null
               or me.session_id is null
+              or $12::boolean = true
             )
             and ($3::visibility_scope is null or me.visibility = $3::visibility_scope)
             and (
@@ -7036,6 +7040,7 @@ export const createMemorySourceRepository = (
           cross join cursor_order co
           join sessions s on s.id = msg.session_id
           where ($2::boolean = true or msg.invalidated_at is null)
+            and $12::boolean = false
             and msg.role <> 'tool'
             and ($3::visibility_scope is null or msg.visibility = $3::visibility_scope)
             and (
@@ -7171,6 +7176,7 @@ export const createMemorySourceRepository = (
           cross join cursor_order co
           join sessions s on s.id = te.session_id
           where ($2::boolean = true or te.invalidated_at is null)
+            and $12::boolean = false
             and ($3::visibility_scope is null or te.visibility = $3::visibility_scope)
             and (
               $4::text is null
@@ -7315,6 +7321,7 @@ export const createMemorySourceRepository = (
           cross join cursor_order co
           join sessions s on s.id = ci.session_id
           where ci.visibility = 'personal'
+            and $12::boolean = false
             and ci.owner_user_id = $1
             and ci.personal_deleted_at is null
             and ${approvalConversationItemSql("ci")}
@@ -7366,7 +7373,8 @@ export const createMemorySourceRepository = (
           input.cursorTimestamp ?? null,
           input.cursorSourceSequence ?? null,
           input.cursorId ?? null,
-          limit
+          limit,
+          input.canonicalCapturedSessionEventsOnly ?? false
         ]
       );
       const hydratedRows = await Promise.all(
@@ -7598,6 +7606,7 @@ export const createMemorySourceRepository = (
           from memory_events me
           left join sessions s on s.id = me.session_id
           where ($2::boolean = true or me.invalidated_at is null)
+            and coalesce(me.payload #>> '{metadata,semanticUnitType}', '') <> 'personal_note'
             and ($3::visibility_scope is null or me.visibility = $3::visibility_scope)
             and (
               $4::text is null
@@ -9012,7 +9021,9 @@ export const createMemorySourceRepository = (
           and not exists (
             select 1
             from memory_replicas target_replica
-            where target_replica.local_session_id = mn.session_id
+            join local_captured_session_logical_memories target_source
+              on target_source.logical_memory_id=target_replica.logical_memory_id
+            where target_source.local_session_id = mn.session_id
               and target_replica.replica_role = 'target'
           )
           and (
@@ -9416,7 +9427,9 @@ export const createMemorySourceRepository = (
             and not exists (
               select 1
               from memory_replicas target_replica
-              where target_replica.local_session_id = memory_nodes.session_id
+              join local_captured_session_logical_memories target_source
+                on target_source.logical_memory_id=target_replica.logical_memory_id
+              where target_source.local_session_id = memory_nodes.session_id
                 and target_replica.replica_role = 'target'
             )
           for update
@@ -9745,7 +9758,10 @@ export const createMemorySourceRepository = (
                from cross_identity_sync_relationships relationship
                join memory_replicas replica
                  on replica.id=relationship.local_replica_id
-                and replica.local_session_id=$2
+               join local_captured_session_logical_memories local_memory
+                 on local_memory.logical_memory_id=relationship.logical_memory_id
+                and local_memory.local_session_id=$2
+                and local_memory.owner_user_id=$1
               where relationship.side='source'
                 and relationship.local_user_id=$1
                 and relationship.revoked_at is null
@@ -10242,6 +10258,167 @@ export const createMemorySourceRepository = (
       }
     },
 
+    async getPersonalNoteMemoryEvent(actor, noteId) {
+      if (!uuidPattern.test(noteId)) {
+        throw new TypeError("noteId must be a UUID");
+      }
+      const result = await pool.query<{
+        id: string;
+        owner_user_id: string;
+        visibility: Visibility;
+        event_type: string;
+        source_runtime: SourceRuntime | null;
+        capture_method: CaptureMethod;
+        source_event_time: Date | null;
+        source_sequence: number | string | null;
+        captured_at: Date;
+        created_at: Date;
+        invalidated_at: Date | null;
+        invalidation_reason: string | null;
+      }>(
+        `select memory_events.id,memory_events.owner_user_id,
+                memory_events.visibility,memory_events.event_type,
+                memory_events.source_runtime,
+                memory_events.capture_method,
+                memory_events.source_event_time,
+                memory_events.source_sequence,
+                memory_events.captured_at,
+                memory_events.created_at,
+                memory_events.invalidated_at,
+                memory_events.invalidation_reason
+           from personal_notes note
+           join personal_note_revisions revision
+             on revision.note_id=note.id
+            and revision.owner_user_id=note.owner_user_id
+            and revision.revision=note.current_revision
+           join memory_events on memory_events.id=revision.memory_event_id
+          where note.id=$2
+            and note.owner_user_id=$1
+            and note.lifecycle='active'
+            and revision.projection_state='available'
+            and memory_events.owner_user_id=$1
+            and memory_events.visibility='personal'
+            and memory_events.session_id is null
+            and memory_events.invalidated_at is null
+          limit 1`,
+        [actor.userId, noteId]
+      );
+      const row = result.rows[0];
+      if (!row) return null;
+      const payload = await decryptAuthorizedMemoryEventPayload(
+        pool,
+        await resolveMemoryEventEncryptionProvider(row.id),
+        { ownerUserId: actor.userId, memoryEventId: row.id }
+      );
+      if (
+        !payload ||
+        payload.rawEventType !== "personal_note_revision" ||
+        payload.metadata?.semanticUnitType !== "personal_note" ||
+        payload.metadata?.personalNoteId !== noteId
+      ) {
+        return null;
+      }
+      return mapLcmGraphEvent({
+        ...row,
+        actor: payload.actor ?? null,
+        event_type: payload.rawEventType,
+        model: null,
+        project_id: null,
+        project_name: null,
+        project_path: null,
+        session_id: null,
+        thread_id: null,
+        thread_name: null,
+        content: payload.content ?? null,
+        metadata: payload.metadata,
+        linked_node_ids: [],
+        includeContent: true,
+        includeRaw: false
+      });
+    },
+
+    async getPersonalNoteRevisionMemoryEvent(actor, input) {
+      if (!uuidPattern.test(input.noteId)) {
+        throw new TypeError("noteId must be a UUID");
+      }
+      if (!Number.isSafeInteger(input.revision) || input.revision < 1) {
+        throw new TypeError("revision must be a positive safe integer");
+      }
+      const result = await pool.query<{
+        id: string;
+        owner_user_id: string;
+        visibility: Visibility;
+        event_type: string;
+        source_runtime: SourceRuntime | null;
+        capture_method: CaptureMethod;
+        source_event_time: Date | null;
+        source_sequence: number | string | null;
+        captured_at: Date;
+        created_at: Date;
+        invalidated_at: Date | null;
+        invalidation_reason: string | null;
+      }>(
+        `select memory_events.id,memory_events.owner_user_id,
+                memory_events.visibility,memory_events.event_type,
+                memory_events.source_runtime,
+                memory_events.capture_method,
+                memory_events.source_event_time,
+                memory_events.source_sequence,
+                memory_events.captured_at,
+                memory_events.created_at,
+                memory_events.invalidated_at,
+                memory_events.invalidation_reason
+           from personal_notes note
+           join personal_note_revisions revision
+             on revision.note_id=note.id
+            and revision.owner_user_id=note.owner_user_id
+            and revision.revision=$3
+           join memory_events on memory_events.id=revision.memory_event_id
+          where note.id=$2
+            and note.owner_user_id=$1
+            and note.lifecycle='active'
+            and revision.projection_state in ('available','superseded')
+            and memory_events.owner_user_id=$1
+            and memory_events.visibility='personal'
+            and memory_events.session_id is null
+          limit 1`,
+        [actor.userId, input.noteId, input.revision]
+      );
+      const row = result.rows[0];
+      if (!row) return null;
+      const payload = await decryptAuthorizedMemoryEventPayload(
+        pool,
+        await resolveMemoryEventEncryptionProvider(row.id),
+        { ownerUserId: actor.userId, memoryEventId: row.id }
+      );
+      if (
+        !payload ||
+        payload.rawEventType !== "personal_note_revision" ||
+        payload.metadata?.semanticUnitType !== "personal_note" ||
+        payload.metadata?.personalNoteId !== input.noteId ||
+        payload.metadata?.personalNoteRevision !== input.revision
+      ) {
+        return null;
+      }
+      return mapLcmGraphEvent({
+        ...row,
+        actor: payload.actor ?? null,
+        event_type: payload.rawEventType,
+        model: null,
+        project_id: null,
+        project_name: null,
+        project_path: null,
+        session_id: null,
+        thread_id: null,
+        thread_name: null,
+        content: payload.content ?? null,
+        metadata: payload.metadata,
+        linked_node_ids: [],
+        includeContent: true,
+        includeRaw: false
+      });
+    },
+
     async createMemoryEvent(actor, input) {
       if (input.sessionId) {
         const visibleSession = await pool.query<{ id: string }>(
@@ -10274,7 +10451,8 @@ export const createMemorySourceRepository = (
         projectId: input.projectId
       };
       const suppressPlaintextPayload =
-        managedCloudPlaintextMemoryPayloadsDisabled();
+        managedCloudPlaintextMemoryPayloadsDisabled() ||
+        input.rawEventType === "personal_note_revision";
       if (suppressPlaintextPayload && !options.envelopeEncryptionProvider) {
         throw new Error(
           "Envelope encryption provider is required when plaintext Memory Event payload storage is disabled"
@@ -12109,7 +12287,9 @@ export const createMemorySourceRepository = (
             and not exists (
               select 1
               from memory_replicas target_replica
-              where target_replica.local_session_id = me.session_id
+              join local_captured_session_logical_memories target_source
+                on target_source.logical_memory_id=target_replica.logical_memory_id
+              where target_source.local_session_id = me.session_id
                 and target_replica.replica_role = 'target'
             )
             and not exists (
@@ -12408,7 +12588,9 @@ export const createMemorySourceRepository = (
             and not exists (
               select 1
               from memory_replicas target_replica
-              where target_replica.local_session_id = mn.session_id
+              join local_captured_session_logical_memories target_source
+                on target_source.logical_memory_id=target_replica.logical_memory_id
+              where target_source.local_session_id = mn.session_id
                 and target_replica.replica_role = 'target'
             )
           order by mn.created_at asc, mn.id asc
@@ -12953,6 +13135,18 @@ export const createMemorySourceRepository = (
               : filteredNodeSourceItems,
         sources: hydratedSources.map(mapMemoryEvent)
       } satisfies ExpandedMemoryNode;
+    },
+    async notifyPersonalNoteChanged(actor, messageId, operation) {
+      await pool.query(`select pg_notify('koed_graph_updates',$1)`, [
+        JSON.stringify({
+          table: "personal_notes",
+          operation,
+          id: messageId,
+          ownerUserId: actor.userId,
+          visibility: "personal",
+          changedAt: new Date().toISOString()
+        })
+      ]);
     }
   };
   return repository;

@@ -1,8 +1,11 @@
 import {
   COLLABORATION_SOURCE_PAGE_MAX_ITEMS,
+  personalNoteSourceSelectionIssues,
+  sharedMemoryCandidatePreviewSchema,
   sharedMemoryCeilingAuthorizes,
   sharedMemoryFidelityCeilings,
-  collaborationNameSchema
+  sharedMemorySourceCapabilitiesSchema,
+  sharedMemorySourceRefSchema
 } from "@koed/shared";
 import { z } from "zod";
 import { SHARED_MEMORY_AUTHORITY } from "@koed/db";
@@ -15,6 +18,58 @@ const uuidSchema = z.uuid();
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const nonNegativeVersionSchema = z.number().int().safe().min(0);
 const positiveVersionSchema = z.number().int().safe().positive();
+
+export const personalNoteSourceArtifactUploadSchema = z
+  .object({
+    pendingShareId: uuidSchema,
+    sourceDeploymentProtocolId: uuidSchema,
+    sourceOwnerPrincipalId: uuidSchema,
+    candidate: sharedMemoryCandidatePreviewSchema
+  })
+  .strict()
+  .superRefine((input, context) => {
+    if (
+      input.candidate.source.kind !== "personal_note" ||
+      input.candidate.activationRepresentation !== "memory_events" ||
+      input.candidate.sourceRevision !== input.candidate.source.noteRevision ||
+      input.candidate.itemCount !== 1 ||
+      input.candidate.items.length !== 1 ||
+      input.candidate.manifest.length !== 1
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["candidate"],
+        message: "A source upload must contain one Personal Note Memory Event"
+      });
+    }
+  });
+
+export const advanceContinuousPersonalNoteRevisionSchema = z
+  .object({
+    mutationId: uuidSchema,
+    sourceDeploymentProtocolId: uuidSchema,
+    sourceOwnerPrincipalId: uuidSchema,
+    afterShareGrantId: uuidSchema.optional(),
+    candidate: sharedMemoryCandidatePreviewSchema
+  })
+  .strict()
+  .superRefine((input, context) => {
+    if (
+      input.candidate.source.kind !== "personal_note" ||
+      input.candidate.mode !== "continuous" ||
+      input.candidate.sourceRevision !== input.candidate.source.noteRevision ||
+      input.candidate.itemCount !== 1 ||
+      input.candidate.items.length !== 1 ||
+      input.candidate.manifest.length !== 1
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["candidate"],
+        message:
+          "Continuous Personal Note advancement requires one exact selected revision"
+      });
+    }
+  });
 
 export const sharedMemoryRepresentationSchema = z.enum([
   ...sharedMemoryFidelityCeilings,
@@ -30,20 +85,116 @@ const fidelityConsentShape = {
   includeCuratedMemory: z.boolean()
 };
 
+const validateSourceLogicalMemory = (
+  input: { logicalMemoryId: string; source?: { logicalMemoryId: string } },
+  context: z.RefinementCtx
+) => {
+  if (input.source && input.source.logicalMemoryId !== input.logicalMemoryId) {
+    context.addIssue({
+      code: "custom",
+      path: ["source", "logicalMemoryId"],
+      message: "Shared Memory source must match the logical Memory"
+    });
+  }
+};
+
+const validatePersonalNoteSelection = (
+  input: {
+    logicalMemoryId: string;
+    source: z.infer<typeof sharedMemorySourceRefSchema>;
+    mode: "snapshot" | "continuous";
+    activationRepresentation: z.infer<typeof sharedMemoryRepresentationSchema>;
+    sourceCapabilities: Array<z.infer<typeof sharedMemoryRepresentationSchema>>;
+    maximumFidelity: z.infer<typeof sharedMemoryFidelityCeilingSchema>;
+    includeCuratedMemory: boolean;
+    sourceRevision: number;
+    manifest: Array<{ sourceId: string; revisionHash: string }>;
+  },
+  context: z.RefinementCtx
+) => {
+  validateSourceLogicalMemory(input, context);
+  for (const message of personalNoteSourceSelectionIssues({
+    ...input,
+    source: input.source
+  })) {
+    context.addIssue({ code: "custom", path: ["source"], message });
+  }
+};
+
+const validatePersonalNoteConsent = (
+  input: {
+    logicalMemoryId: string;
+    source: z.infer<typeof sharedMemorySourceRefSchema>;
+    mode: "snapshot" | "continuous";
+    activationRepresentation: z.infer<typeof sharedMemoryRepresentationSchema>;
+    sourceCapabilities: Array<z.infer<typeof sharedMemoryRepresentationSchema>>;
+    maximumFidelity: z.infer<typeof sharedMemoryFidelityCeilingSchema>;
+    includeCuratedMemory: boolean;
+  },
+  context: z.RefinementCtx
+) => {
+  validateSourceLogicalMemory(input, context);
+  if (input.source.kind !== "personal_note") return;
+  if (
+    input.activationRepresentation !== "memory_events" ||
+    input.sourceCapabilities.length !== 1 ||
+    input.sourceCapabilities[0] !== "memory_events" ||
+    input.maximumFidelity !== "memory_events" ||
+    input.includeCuratedMemory
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["sourceCapabilities"],
+      message:
+        "Personal Note sharing requires Memory Event source capability, activation, and consent"
+    });
+  }
+};
+
+const validateEffectiveSelection = (
+  input: {
+    sourceCapabilities: Array<z.infer<typeof sharedMemoryRepresentationSchema>>;
+    activationRepresentation: z.infer<typeof sharedMemoryRepresentationSchema>;
+    maximumFidelity: z.infer<typeof sharedMemoryFidelityCeilingSchema>;
+    includeCuratedMemory: boolean;
+  },
+  context: z.RefinementCtx
+) => {
+  if (
+    !input.sourceCapabilities.includes(input.activationRepresentation) ||
+    !sharedMemoryCeilingAuthorizes(
+      input.maximumFidelity,
+      input.activationRepresentation,
+      input.includeCuratedMemory
+    )
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["activationRepresentation"],
+      message:
+        "Activation representation must be supported by the source and consent"
+    });
+  }
+};
+
+const browserSharedMemoryAuthoritySchema = z
+  .object({
+    action: z.literal(SHARED_MEMORY_AUTHORITY),
+    source: z.literal("browser_session")
+  })
+  .strict();
+
+const deviceSharedMemoryAuthoritySchema = z
+  .object({
+    action: z.literal(SHARED_MEMORY_AUTHORITY),
+    source: z.literal("device_action_grant"),
+    referenceId: uuidSchema
+  })
+  .strict();
+
 export const sharedMemoryAuthoritySchema = z.discriminatedUnion("source", [
-  z
-    .object({
-      action: z.literal(SHARED_MEMORY_AUTHORITY),
-      source: z.literal("browser_session")
-    })
-    .strict(),
-  z
-    .object({
-      action: z.literal(SHARED_MEMORY_AUTHORITY),
-      source: z.literal("device_action_grant"),
-      referenceId: uuidSchema
-    })
-    .strict()
+  browserSharedMemoryAuthoritySchema,
+  deviceSharedMemoryAuthoritySchema
 ]);
 
 export const sourceOwnerPolicyParamsSchema = z
@@ -116,10 +267,6 @@ export const ownedShareParamsSchema = z
   .object({ kind: z.enum(["pending", "grant"]), id: uuidSchema })
   .strict();
 
-export const renameOwnedShareSchema = z
-  .object({ title: collaborationNameSchema })
-  .strict();
-
 export const controlPendingShareSchema = z
   .object({
     mutationId: uuidSchema,
@@ -139,27 +286,30 @@ export const putSharedMemoryPolicySchema = z
 
 export const createSharedMemoryPreviewSchema = z
   .object({
+    source: sharedMemorySourceRefSchema,
+    sourceCapabilities: sharedMemorySourceCapabilitiesSchema,
     logicalMemoryId: uuidSchema,
     remoteReplicaId: uuidSchema,
     teamId: uuidSchema,
     teamWorkspaceId: uuidSchema,
-    representation: sharedMemoryRepresentationSchema,
+    activationRepresentation: sharedMemoryRepresentationSchema,
     ...fidelityConsentShape,
+    mode: z.enum(["snapshot", "continuous"]),
     authority: sharedMemoryAuthoritySchema
   })
   .strict()
-  .refine(
-    (input) =>
-      sharedMemoryCeilingAuthorizes(
-        input.maximumFidelity,
-        input.representation,
-        input.includeCuratedMemory
-      ),
-    { message: "Preview representation is outside the approved fidelity" }
-  );
+  .superRefine((input, context) => {
+    validateSourceLogicalMemory(input, context);
+    validateEffectiveSelection(input, context);
+    validatePersonalNoteConsent(input, context);
+  });
 
 export const createSharedMemoryCandidatePreviewSchema = z
   .object({
+    source: sharedMemorySourceRefSchema,
+    sourceDeploymentProtocolId: uuidSchema,
+    sourceOwnerPrincipalId: uuidSchema,
+    sourceCapabilities: sharedMemorySourceCapabilitiesSchema,
     logicalMemoryId: uuidSchema,
     candidateHash: sha256Schema,
     sourceRevision: nonNegativeVersionSchema,
@@ -179,22 +329,17 @@ export const createSharedMemoryCandidatePreviewSchema = z
       .max(256 * 1_024),
     teamId: uuidSchema,
     teamWorkspaceId: uuidSchema,
-    representation: sharedMemoryRepresentationSchema,
+    activationRepresentation: sharedMemoryRepresentationSchema,
     ...fidelityConsentShape,
     mode: z.enum(["snapshot", "continuous"]),
     expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
-    authority: sharedMemoryAuthoritySchema
+    authority: deviceSharedMemoryAuthoritySchema
   })
   .strict()
-  .refine(
-    (input) =>
-      sharedMemoryCeilingAuthorizes(
-        input.maximumFidelity,
-        input.representation,
-        input.includeCuratedMemory
-      ),
-    { message: "Preview representation is outside the approved fidelity" }
-  );
+  .superRefine((input, context) => {
+    validateEffectiveSelection(input, context);
+    validatePersonalNoteSelection(input, context);
+  });
 
 export const sharedSourcePreviewReferenceSchema = z
   .object({
@@ -203,33 +348,11 @@ export const sharedSourcePreviewReferenceSchema = z
   })
   .strict();
 
-export const createSourceOwnerConsentSchema = z
+export const createPendingShareSchema = z
   .object({
-    consentId: uuidSchema,
-    logicalMemoryId: uuidSchema,
-    preview: sharedSourcePreviewReferenceSchema,
-    previewRevision: positiveVersionSchema,
-    mode: z.enum(["snapshot", "continuous"]),
-    ...fidelityConsentShape,
-    expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
-    authority: sharedMemoryAuthoritySchema
-  })
-  .strict();
-
-export const createShareGrantSchema = z
-  .object({
-    mutationId: uuidSchema,
-    logicalGrantId: uuidSchema,
-    logicalMemoryId: uuidSchema,
-    teamId: uuidSchema,
-    teamWorkspaceId: uuidSchema,
-    consentId: uuidSchema,
-    authority: sharedMemoryAuthoritySchema
-  })
-  .strict();
-
-export const createSharedMemoryShareBundleSchema = z
-  .object({
+    source: sharedMemorySourceRefSchema,
+    sourceCapabilities: sharedMemorySourceCapabilitiesSchema,
+    activationRepresentation: sharedMemoryRepresentationSchema,
     mutationId: uuidSchema,
     logicalGrantId: uuidSchema,
     consentId: uuidSchema,
@@ -241,15 +364,19 @@ export const createSharedMemoryShareBundleSchema = z
     mode: z.enum(["snapshot", "continuous"]),
     ...fidelityConsentShape,
     expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
-    title: collaborationNameSchema.optional(),
     authority: sharedMemoryAuthoritySchema
   })
-  .strict();
-
-export const createPendingShareSchema = createSharedMemoryShareBundleSchema;
+  .strict()
+  .superRefine((input, context) => {
+    validateEffectiveSelection(input, context);
+    validatePersonalNoteConsent(input, context);
+  });
 
 export const changeSharedMemoryFidelityBundleSchema = z
   .object({
+    source: sharedMemorySourceRefSchema,
+    sourceCapabilities: sharedMemorySourceCapabilitiesSchema,
+    activationRepresentation: sharedMemoryRepresentationSchema,
     mutationId: uuidSchema,
     consentId: uuidSchema,
     logicalMemoryId: uuidSchema,
@@ -263,7 +390,11 @@ export const changeSharedMemoryFidelityBundleSchema = z
     expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
     authority: sharedMemoryAuthoritySchema
   })
-  .strict();
+  .strict()
+  .superRefine((input, context) => {
+    validateEffectiveSelection(input, context);
+    validatePersonalNoteConsent(input, context);
+  });
 
 export const shareGrantParamsSchema = z
   .object({ shareGrantId: uuidSchema })
@@ -302,32 +433,6 @@ export const scopedShareGrantParamsSchema = z
 
 export const sharedMemoryItemDetailParamsSchema = scopedShareGrantParamsSchema
   .extend({ sourceId: uuidSchema })
-  .strict();
-
-export const selectGrantFidelitySchema = z
-  .object({
-    mutationId: uuidSchema,
-    teamId: uuidSchema,
-    teamWorkspaceId: uuidSchema,
-    consentId: uuidSchema,
-    ...fidelityConsentShape,
-    expectedGrantVersion: positiveVersionSchema,
-    authority: sharedMemoryAuthoritySchema
-  })
-  .strict();
-
-export const representationParamsSchema = shareGrantParamsSchema
-  .extend({ representation: sharedMemoryRepresentationSchema })
-  .strict();
-
-export const materializeGrantRepresentationSchema = z
-  .object({
-    mutationId: uuidSchema,
-    consentId: uuidSchema,
-    expectedGrantVersion: positiveVersionSchema,
-    expectedRepresentationVersion: positiveVersionSchema.optional(),
-    preview: sharedSourcePreviewReferenceSchema
-  })
   .strict();
 
 export const readGrantRepresentationQuerySchema = z

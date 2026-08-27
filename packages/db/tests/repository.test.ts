@@ -553,11 +553,18 @@ describeDb("memory repository visibility", () => {
           owner_principal_id: string;
           origin_deployment_identity_id: string;
           source_revision: string;
+          source_session_id: string;
         }>(
-          `select id, owner_principal_id, origin_deployment_identity_id,
-                  greatest(latest_source_revision, 0)::text as source_revision
-             from logical_memories
-            where owner_user_id = $1 and local_session_id = $2
+          `select memory.id, memory.owner_principal_id,
+                  memory.origin_deployment_identity_id,
+                  greatest(latest_source_revision, 0)::text as source_revision,
+                  source.source_session_id
+             from local_captured_session_logical_memories local_memory
+             join logical_memories memory on memory.id=local_memory.logical_memory_id
+             join captured_session_logical_memories source
+               on source.logical_memory_id=memory.id
+            where local_memory.owner_user_id = $1
+              and local_memory.local_session_id = $2
             for update`,
           [input.ownerUserId, input.sessionId]
         )
@@ -576,17 +583,29 @@ describeDb("memory repository visibility", () => {
             owner_principal_id: string;
             origin_deployment_identity_id: string;
             source_revision: string;
+            source_session_id: string;
           }>(
-            `insert into logical_memories (
-               owner_user_id, owner_principal_id,
-               origin_deployment_identity_id, source_boundary,
-               origin_source_id, local_session_id, logical_key,
-               latest_source_revision
-             ) values (
-               $1, $1, $2, 'captured_session', $3::uuid::text, $3::uuid, $4, 1
+            `with logical_memory as (
+               insert into logical_memories (
+                 owner_user_id, owner_principal_id,
+                 origin_deployment_identity_id, source_kind, logical_key,
+                 latest_source_revision
+               ) values ($1,$1,$2,'captured_session',$4,1)
+               returning id,owner_principal_id,origin_deployment_identity_id,
+                         latest_source_revision
+             ), protocol_binding as (
+               insert into captured_session_logical_memories (
+                 logical_memory_id,source_session_id,owner_principal_id
+               ) select id,$3,$1 from logical_memory
+             ), local_binding as (
+               insert into local_captured_session_logical_memories (
+                 logical_memory_id,local_session_id,owner_user_id
+               ) select id,$3,$1 from logical_memory
              )
-             returning id, owner_principal_id, origin_deployment_identity_id,
-                       latest_source_revision::text as source_revision`,
+             select id,owner_principal_id,origin_deployment_identity_id,
+                    latest_source_revision::text as source_revision,
+                    $3::uuid as source_session_id
+               from logical_memory`,
             [
               input.ownerUserId,
               sourceDeployment.rows[0]!.id,
@@ -596,6 +615,61 @@ describeDb("memory repository visibility", () => {
           )
         ).rows[0]!;
       }
+
+      const sourceCursor = Number(logicalMemory.source_revision);
+      const sourceRevisionId = randomUUID();
+      const genericRevision = sourceCursor + 1;
+      await client.query(
+        `insert into logical_memory_source_revisions (
+           id, logical_memory_id, owner_principal_id, source_kind,
+           revision, binding_hash
+         ) values ($1, $2, $3, 'captured_session', $4, $5)
+         on conflict (logical_memory_id, revision) do nothing`,
+        [
+          sourceRevisionId,
+          logicalMemory.id,
+          logicalMemory.owner_principal_id,
+          genericRevision,
+          hash()
+        ]
+      );
+      const exactSourceRevision = await client.query<{ id: string }>(
+        `select revision.id
+           from logical_memory_source_revisions revision
+           join captured_session_source_revisions binding
+             on binding.source_revision_id = revision.id
+          where revision.logical_memory_id = $1
+            and revision.owner_principal_id = $2
+            and revision.source_kind = 'captured_session'
+            and revision.revision = $3
+            and binding.source_session_id = $4
+            and binding.source_cursor = $5`,
+        [
+          logicalMemory.id,
+          logicalMemory.owner_principal_id,
+          genericRevision,
+          logicalMemory.source_session_id,
+          sourceCursor
+        ]
+      );
+      if (!exactSourceRevision.rows[0]) {
+        await client.query(
+          `insert into captured_session_source_revisions (
+             source_revision_id, logical_memory_id, owner_principal_id,
+             source_kind, revision, source_session_id, source_cursor
+           ) values ($1, $2, $3, 'captured_session', $4, $5, $6)`,
+          [
+            sourceRevisionId,
+            logicalMemory.id,
+            logicalMemory.owner_principal_id,
+            genericRevision,
+            logicalMemory.source_session_id,
+            sourceCursor
+          ]
+        );
+      }
+      const boundSourceRevisionId =
+        exactSourceRevision.rows[0]?.id ?? sourceRevisionId;
 
       let replica = (
         await client.query<{ id: string }>(
@@ -626,11 +700,11 @@ describeDb("memory repository visibility", () => {
             `insert into memory_replicas (
                logical_memory_id, deployment_identity_id, owner_user_id,
                owner_principal_id, replica_role, source_boundary,
-               local_session_id, latest_revision, lifecycle, encryption_scope,
+               latest_revision, lifecycle, encryption_scope,
                freshness_status, representation_policy_revision,
                content_policy_version
              ) values (
-               $1, $2, $3, $4, 'target', 'captured_session', $5, $6,
+               $1, $2, $3, $4, 'target', 'captured_session', $5,
                'active', 'owner_private_replica', 'fresh', 1, 1
              ) returning id`,
             [
@@ -638,7 +712,6 @@ describeDb("memory repository visibility", () => {
               targetDeployment.rows[0]!.id,
               input.ownerUserId,
               logicalMemory.owner_principal_id,
-              input.sessionId,
               logicalMemory.source_revision
             ]
           )
@@ -842,7 +915,7 @@ describeDb("memory repository visibility", () => {
       const sourceArtifactId = randomUUID();
       await client.query(
         `insert into shared_source_artifacts (
-           id, logical_memory_id, remote_replica_id, sync_relationship_id,
+           id, logical_memory_id, source_revision_id, remote_replica_id, sync_relationship_id,
            owner_user_id, owner_principal_id, team_id, team_workspace_id,
            representation, source_revision, source_cursor, package_sequence,
            source_hash, manifest_hash, artifact_hash, source_content_hash,
@@ -853,16 +926,20 @@ describeDb("memory repository visibility", () => {
            representation_policy_hash, content_policy_version,
            content_policy_hash, classifier_version, classifier_hash,
            source_deployment_identity_id, remote_user_identity_id,
-           device_credential_id, device_provenance_hash
+           device_credential_id, device_provenance_hash,
+           source_capabilities, activation_representation
          ) values (
-           $1, $2, $3, $4, $5, $6, $7, $8, 'memory_events',
-           $9, $9, 0, $10, $11, $12, $13, 'memory_events', false,
-           $14, $15, $16, $17,
-           $18, $19, 1, $20, 1, $21, 1, $22, $23, $24, $25, $26
+           $1, $2, $3, $4, $5, $6, $7, $8, $9, 'memory_events',
+           $10, $10, 0, $11, $12, $13, $14, 'memory_events', false,
+           $15, $16, $17, $18,
+           $19, $20, 1, $21, 1, $22, 1, $23, $24, $25, $26, $27,
+           array['lcm_rollups','lcm_leaves','memory_events']::shared_memory_representation[],
+           'memory_events'
          )`,
         [
           sourceArtifactId,
           logicalMemory.id,
+          boundSourceRevisionId,
           replica.id,
           provenance.sync_relationship_id,
           input.ownerUserId,
@@ -893,18 +970,22 @@ describeDb("memory repository visibility", () => {
       const previewHash = hash();
       await client.query(
         `insert into shared_source_previews (
-           id, source_artifact_id, logical_memory_id, remote_replica_id,
+           id, source_artifact_id, logical_memory_id, source_revision_id, remote_replica_id,
            owner_user_id, owner_principal_id, team_id, team_workspace_id,
            representation, preview_revision, preview_hash, source_revision,
-           source_hash, source_content_hash
+           source_hash, source_content_hash,
+           source_capabilities, activation_representation, mode
          ) values (
-           $1, $2, $3, $4, $5, $6, $7, $8, 'memory_events', 1,
-           $9, $10, $11, $12
+           $1, $2, $3, $4, $5, $6, $7, $8, $9, 'memory_events', 1,
+           $10, $11, $12, $13,
+           array['lcm_rollups','lcm_leaves','memory_events']::shared_memory_representation[],
+           'memory_events', 'continuous'
          )`,
         [
           previewId,
           sourceArtifactId,
           logicalMemory.id,
+          boundSourceRevisionId,
           replica.id,
           input.ownerUserId,
           logicalMemory.owner_principal_id,
@@ -920,7 +1001,7 @@ describeDb("memory repository visibility", () => {
       const consentId = randomUUID();
       await client.query(
         `insert into source_owner_representation_consents (
-           id, logical_memory_id, remote_replica_id,
+           id, logical_memory_id, source_revision_id, remote_replica_id,
            source_owner_principal_id, team_id, team_workspace_id,
            source_owner_policy_id, source_owner_policy_version,
            team_policy_id, team_policy_version, workspace_policy_id,
@@ -931,16 +1012,20 @@ describeDb("memory repository visibility", () => {
            source_hash, fidelity_policy_revision,
            fidelity_policy_hash, content_policy_version,
            content_policy_hash, classifier_version, classifier_hash,
-           source_content_hash, activated_at
+           source_content_hash, activated_at,
+           source_capabilities, activation_representation
          ) values (
-           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
            'continuous', 'active', 1, 'memory_events', false,
-           $13, 1, $14, $15, null, $16, 1, $17, 1,
-           $18, 1, $19, $20, now()
+           $14, 1, $15, $16, null, $17, 1, $18, 1,
+           $19, 1, $20, $21, now(),
+           array['lcm_rollups','lcm_leaves','memory_events']::shared_memory_representation[],
+           'memory_events'
          )`,
         [
           consentId,
           logicalMemory.id,
+          boundSourceRevisionId,
           replica.id,
           logicalMemory.owner_principal_id,
           input.teamId,
@@ -963,9 +1048,9 @@ describeDb("memory repository visibility", () => {
       );
 
       const grant = await client.query<{ id: string }>(
-        `insert into team_session_share_grants (
-           logical_grant_id, logical_memory_id, remote_replica_id,
-           owner_user_id, owner_principal_id, session_id, team_id,
+        `insert into team_memory_share_grants (
+           logical_grant_id, logical_memory_id, source_revision_id, remote_replica_id,
+           owner_user_id, owner_principal_id, team_id,
            team_workspace_id, consent_id, source_owner_policy_id,
            source_owner_policy_version, team_policy_id, team_policy_version,
            workspace_policy_id, workspace_policy_version,
@@ -973,22 +1058,25 @@ describeDb("memory repository visibility", () => {
            fidelity_policy_revision, content_policy_version,
            classifier_version, source_revision, grant_version, lifecycle,
            creator_authority, granted_by_user_id, revoked_at,
-           revoked_by_user_id, revocation_reason
+           revoked_by_user_id, revocation_reason, source_capabilities,
+           activation_representation, mode
          ) values (
            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
            $14, $15, 'memory_events', false, 1, 1, 1, $16, 1, $17,
-           'repository_test_fixture', $4,
+           'repository_test_fixture', $5,
            case when $18::boolean then now() else null end,
-           case when $18::boolean then $4::uuid else null end,
-           case when $18::boolean then $19::text else null end
+           case when $18::boolean then $5::uuid else null end,
+           case when $18::boolean then $19::text else null end,
+           array['lcm_rollups','lcm_leaves','memory_events']::shared_memory_representation[],
+           'memory_events', 'continuous'
          ) returning id`,
         [
           randomUUID(),
           logicalMemory.id,
+          boundSourceRevisionId,
           replica.id,
           input.ownerUserId,
           logicalMemory.owner_principal_id,
-          input.sessionId,
           input.teamId,
           input.teamWorkspaceId,
           consentId,
@@ -1088,7 +1176,96 @@ describeDb("memory repository visibility", () => {
     ).resolves.toEqual(expect.any(Array));
   });
 
+  it("always stores Personal Note Memory Events through encrypted companions", async () => {
+    const owner = await repo.createUser({
+      email: `personal-note-memory-${randomUUID()}@example.com`
+    });
+    const encryptedRepo = createMemorySourceRepository(pool, {
+      envelopeEncryptionProvider: createLocalTestKeyEnvelopeEncryptionProvider(
+        Buffer.alloc(32, 32).toString("base64")
+      )
+    });
+    const content = `private-note-${randomUUID()}`;
+    const event = await encryptedRepo.createMemoryEvent(
+      { userId: owner.id },
+      {
+        projectId: "unassigned",
+        actor: "user",
+        eventType: "captured",
+        rawEventType: "personal_note_revision",
+        content,
+        metadata: {
+          semanticUnitType: "personal_note",
+          personalNoteId: randomUUID(),
+          personalNoteRevision: 1,
+          includeInEmbedding: true,
+          includeInLcm: false
+        },
+        visibility: "personal",
+        captureMethod: "api",
+        idempotencyKey: `personal-note-test:${randomUUID()}`
+      }
+    );
+
+    expect(event.content).toBe(content);
+    const stored = await pool.query<{
+      payload: Record<string, unknown>;
+      encrypted_payloads: string;
+    }>(
+      `select event.payload,
+              count(encrypted.id)::text as encrypted_payloads
+         from memory_events event
+         left join encrypted_field_payloads encrypted
+           on encrypted.source_table='memory_events'
+          and encrypted.source_id=event.id
+          and encrypted.source_column='payload'
+          and encrypted.invalidated_at is null
+        where event.id=$1
+        group by event.id`,
+      [event.id]
+    );
+    expect(stored.rows[0]).toMatchObject({ encrypted_payloads: "1" });
+    expect(stored.rows[0]?.payload).toMatchObject({
+      contentEncrypted: true,
+      rawEventType: "personal_note_revision"
+    });
+    expect(JSON.stringify(stored.rows[0]?.payload)).not.toContain(content);
+  });
+
+  it("fails closed when Personal Note Projection has no encryption provider", async () => {
+    const owner = await repo.createUser({
+      email: `personal-note-no-provider-${randomUUID()}@example.com`
+    });
+
+    await expect(
+      repo.createMemoryEvent(
+        { userId: owner.id },
+        {
+          projectId: "unassigned",
+          actor: "user",
+          eventType: "captured",
+          rawEventType: "personal_note_revision",
+          content: "must not be stored",
+          metadata: {
+            semanticUnitType: "personal_note",
+            includeInEmbedding: true,
+            includeInLcm: false
+          },
+          visibility: "personal",
+          captureMethod: "api",
+          idempotencyKey: `personal-note-no-provider:${randomUUID()}`
+        }
+      )
+    ).rejects.toThrow(
+      "Envelope encryption provider is required when plaintext Memory Event payload storage is disabled"
+    );
+  });
+
   it("queues registration before ordinary captured source replication", async () => {
+    await repo.ensureLocalSyncDeployment({
+      profile: "local_personal",
+      protocolDeploymentId: randomUUID()
+    });
     const owner = await repo.createUser({
       email: `source-registration-${randomUUID()}@example.com`
     });
@@ -1111,6 +1288,16 @@ describeDb("memory repository visibility", () => {
         captureMethod: "transcript"
       }
     );
+    const summary = await repo.getCapturedSessionSummary(
+      { userId: owner.id },
+      session.id
+    );
+    expect(summary).toMatchObject({
+      sessionId: session.id,
+      syncState: "not_started"
+    });
+    expect(typeof summary?.logicalMemoryId).toBe("string");
+    expect(summary?.logicalMemoryId).toHaveLength(36);
     const sourceGenerationId = randomUUID();
     const artifact = await repo.ensureConversationSourceArtifact(
       { userId: owner.id },
@@ -2524,7 +2711,7 @@ describeDb("memory repository visibility", () => {
           logical_memories,
           deployment_identities,
           team_billing_seat_states,
-          team_session_share_grants,
+          team_memory_share_grants,
           team_workspace_access_grants,
           team_invites,
           team_workspaces,
@@ -5920,6 +6107,100 @@ describeDb("memory repository visibility", () => {
     expect(counts.rows[0]).toEqual({ active: "1", total: "1" });
   });
 
+  it("binds an enrolled Personal source identity before its first sync or share", async () => {
+    const user = await repo.createUser({
+      email: `device-source-binding-${randomUUID()}@example.com`,
+      displayName: "Device Source Binding User"
+    });
+    const protocolDeploymentId = randomUUID();
+    const sourceOwnerPrincipalId = randomUUID();
+    const challenge = await repo.createDeviceEnrollmentChallenge({
+      challengeHash: `challenge-${randomUUID()}-${randomUUID()}`,
+      upstreamBackendId: "team-vps",
+      deviceInstanceId: `desktop-${randomUUID()}`,
+      requestedOperationFamilies: ["share_grant_management", "sync"],
+      metadata: { protocolDeploymentId, sourceOwnerPrincipalId },
+      expiresAt: new Date(Date.now() + 60_000)
+    });
+
+    const credential = await repo.approveDeviceEnrollmentChallenge(
+      { userId: user.id },
+      challenge.id,
+      {
+        credentialKeyId: `device-key-${randomUUID()}`,
+        verifierKind: "secret_hash",
+        verifierHash: `verifier-${randomUUID()}-${randomUUID()}`
+      }
+    );
+
+    expect(credential).not.toBeNull();
+    const binding = await pool.query<{
+      locality: string;
+      profile: string;
+      external_subject_id: string;
+      local_user_id: string;
+      proof_kind: string;
+      proof_reference: string;
+      revoked_at: Date | null;
+    }>(
+      `select deployment.locality,
+              deployment.profile,
+              external_identity.external_subject_id,
+              principal_link.local_user_id,
+              principal_link.proof_kind,
+              principal_link.proof_reference,
+              principal_link.revoked_at
+         from deployment_identities deployment
+         join sync_external_user_identities external_identity
+           on external_identity.deployment_identity_id=deployment.id
+         join sync_principal_links principal_link
+           on principal_link.external_user_identity_id=external_identity.id
+        where deployment.protocol_deployment_id=$1
+          and external_identity.external_subject_id=$2`,
+      [protocolDeploymentId, sourceOwnerPrincipalId]
+    );
+    expect(binding.rows).toEqual([
+      {
+        locality: "remote",
+        profile: "local_personal",
+        external_subject_id: sourceOwnerPrincipalId,
+        local_user_id: user.id,
+        proof_kind: "device_credential_lineage",
+        proof_reference: credential!.lineageId,
+        revoked_at: null
+      }
+    ]);
+
+    const otherUser = await repo.createUser({
+      email: `device-source-binding-conflict-${randomUUID()}@example.com`
+    });
+    const conflictingChallenge = await repo.createDeviceEnrollmentChallenge({
+      challengeHash: `challenge-${randomUUID()}-${randomUUID()}`,
+      upstreamBackendId: "team-vps",
+      deviceInstanceId: `desktop-${randomUUID()}`,
+      requestedOperationFamilies: ["share_grant_management"],
+      metadata: { protocolDeploymentId, sourceOwnerPrincipalId },
+      expiresAt: new Date(Date.now() + 60_000)
+    });
+    await expect(
+      repo.approveDeviceEnrollmentChallenge(
+        { userId: otherUser.id },
+        conflictingChallenge.id,
+        {
+          credentialKeyId: `device-key-${randomUUID()}`,
+          verifierKind: "secret_hash",
+          verifierHash: `verifier-${randomUUID()}-${randomUUID()}`
+        }
+      )
+    ).rejects.toMatchObject({ statusCode: 409 });
+    await expect(
+      repo.listDeviceCredentials(
+        { userId: otherUser.id },
+        { upstreamBackendId: "team-vps" }
+      )
+    ).resolves.toEqual([]);
+  });
+
   it("rejects ambiguous device credential key ids", async () => {
     const user = await repo.createUser({
       email: `invalid-device-key-${randomUUID()}@example.com`
@@ -6848,7 +7129,10 @@ describeDb("memory repository visibility", () => {
         { userId: owner.id },
         {
           relationshipId,
-          logicalMemoryId: randomUUID(),
+          logicalMemoryId: (await encryptedRepo.getCapturedSessionSummary(
+            { userId: owner.id },
+            session.id
+          ))!.logicalMemoryId!,
           localReplicaId: randomUUID(),
           sessionId: session.id,
           localDeploymentIdentityId: localDeployment.id,
@@ -6952,6 +7236,10 @@ describeDb("memory repository visibility", () => {
     const owner = await encryptedRepo.createUser({
       email: `sync-source-${randomUUID()}@example.com`
     });
+    const localDeployment = await encryptedRepo.ensureLocalSyncDeployment({
+      profile: "local_personal",
+      protocolDeploymentId: randomUUID()
+    });
     const session = await encryptedRepo.createCapturedSession(
       { userId: owner.id },
       {
@@ -6974,10 +7262,6 @@ describeDb("memory repository visibility", () => {
         idempotencyKey: `event-${randomUUID()}`
       }
     );
-    const localDeployment = await encryptedRepo.ensureLocalSyncDeployment({
-      profile: "local_personal",
-      protocolDeploymentId: randomUUID()
-    });
     const remoteDeployment = await encryptedRepo.upsertRemoteSyncDeployment({
       protocolDeploymentId: randomUUID(),
       profile: "team_self_hosted",
@@ -7033,7 +7317,10 @@ describeDb("memory repository visibility", () => {
     );
     const ids = {
       relationshipId: randomUUID(),
-      logicalMemoryId: randomUUID(),
+      logicalMemoryId: (await encryptedRepo.getCapturedSessionSummary(
+        { userId: owner.id },
+        session.id
+      ))!.logicalMemoryId!,
       localReplicaId: randomUUID(),
       remoteReplicaId: randomUUID()
     };
@@ -7852,6 +8139,10 @@ describeDb("memory repository visibility", () => {
     const owner = await encryptedRepo.createUser({
       email: `sync-lcm-source-${randomUUID()}@example.com`
     });
+    const localDeployment = await encryptedRepo.ensureLocalSyncDeployment({
+      profile: "local_personal",
+      protocolDeploymentId: randomUUID()
+    });
     const session = await encryptedRepo.createCapturedSession(
       { userId: owner.id },
       {
@@ -7896,10 +8187,6 @@ describeDb("memory repository visibility", () => {
         idempotencyKey: `sync-lcm-unrelated-event-${randomUUID()}`
       }
     );
-    const localDeployment = await encryptedRepo.ensureLocalSyncDeployment({
-      profile: "local_personal",
-      protocolDeploymentId: randomUUID()
-    });
     const remoteDeployment = await encryptedRepo.upsertRemoteSyncDeployment({
       protocolDeploymentId: randomUUID(),
       profile: "team_self_hosted",
@@ -7923,7 +8210,10 @@ describeDb("memory repository visibility", () => {
       { userId: owner.id },
       {
         relationshipId,
-        logicalMemoryId: randomUUID(),
+        logicalMemoryId: (await encryptedRepo.getCapturedSessionSummary(
+          { userId: owner.id },
+          session.id
+        ))!.logicalMemoryId!,
         localReplicaId: randomUUID(),
         remoteReplicaId: randomUUID(),
         sessionId: session.id,
@@ -8070,6 +8360,61 @@ describeDb("memory repository visibility", () => {
       })
     ).resolves.toBe("ready");
 
+    const excludedEvent = await encryptedRepo.createMemoryEvent(
+      { userId: owner.id },
+      {
+        eventType: "captured",
+        actor: "system",
+        rawEventType: "approval_activity",
+        visibility: "personal",
+        content: "Excluded approval activity",
+        projectId: "sync-lcm-project",
+        sessionId: session.id,
+        idempotencyKey: `sync-lcm-excluded-${randomUUID()}`
+      }
+    );
+    await pool.query(
+      "delete from sync_semantic_changes where origin_event_id=$1",
+      [excludedEvent.id]
+    );
+    const excludedCompaction = await encryptedRepo.createLcmNodes(
+      { userId: owner.id },
+      {
+        visibility: "personal",
+        sessionId: session.id,
+        force: true,
+        requestedRepresentation: "lcm_leaves"
+      }
+    );
+    const excludedLeafNodeId = excludedCompaction.leafNodeIds[0]!;
+    await encryptedRepo.updateLcmNodeSummary({
+      nodeId: excludedLeafNodeId,
+      summaryText: "This leaf must remain outside semantic synchronization.",
+      summaryModel: "codex:test",
+      summaryPromptVersion: "lcm-semantic-summary-v1",
+      summaryTokenEstimate: 8,
+      summaryStructuredJson: {
+        schema_version: "lcm-semantic-summary-v1",
+        title: "Excluded activity",
+        summary_text: "This leaf must remain outside semantic synchronization.",
+        lexical_anchors: ["semantic synchronization"]
+      },
+      summaryStructuredSchemaVersion: "lcm-semantic-summary-v1"
+    });
+    await expect(
+      encryptedRepo.listCapturedSessionSyncEligibleLcmNodeIds(
+        { userId: owner.id },
+        session.id
+      )
+    ).resolves.not.toContain(excludedLeafNodeId);
+    await expect(
+      encryptedRepo.readCapturedSessionSyncDelta({ relationshipId })
+    ).resolves.toMatchObject({
+      changes: [],
+      summaryNodes: [],
+      summarySnapshotIncluded: false
+    });
+
     await pool.query(
       `update memory_nodes
           set invalidated_at=now(),
@@ -8106,6 +8451,165 @@ describeDb("memory repository visibility", () => {
     ).resolves.toBe("pending");
   });
 
+  it("uses the enrolled source identity for fail-closed target sync intake", async () => {
+    const encryptedRepo = createMemorySourceRepository(pool, {
+      envelopeEncryptionProvider: createLocalTestKeyEnvelopeEncryptionProvider(
+        randomBytes(32).toString("base64")
+      ),
+      ownerPrivateReplicaEnvelopeEncryptionProvider:
+        createLocalTestKeyEnvelopeEncryptionProvider(
+          randomBytes(32).toString("base64")
+        )
+    });
+    const owner = await encryptedRepo.createUser({
+      email: `sync-intake-owner-${randomUUID()}@example.com`
+    });
+    const sourceDeploymentProtocolId = randomUUID();
+    const sourceUserId = randomUUID();
+    const challengeHash = randomBytes(32).toString("hex");
+    await encryptedRepo.createDeviceEnrollmentChallenge({
+      challengeHash,
+      upstreamBackendId: `sync-source-${randomUUID()}`,
+      deviceInstanceId: `sync-source-device-${randomUUID()}`,
+      requestedOperationFamilies: ["sync"],
+      metadata: {
+        protocolDeploymentId: sourceDeploymentProtocolId,
+        sourceOwnerPrincipalId: sourceUserId
+      },
+      expiresAt: new Date(Date.now() + 60_000)
+    });
+    const credential = await encryptedRepo.redeemDeviceEnrollmentChallenge(
+      { userId: owner.id },
+      {
+        challengeHash,
+        credentialKeyId: `sync-intake-${randomUUID()}`,
+        verifierKind: "secret_hash",
+        verifierHash: randomBytes(32).toString("hex"),
+        operationFamilies: ["sync"]
+      }
+    );
+    const localDeployment = await encryptedRepo.ensureLocalSyncDeployment({
+      profile: "team_self_hosted",
+      protocolDeploymentId: randomUUID()
+    });
+    const relationshipInput = (overrides: Record<string, unknown> = {}) => {
+      const originSessionId = randomUUID();
+      return {
+        relationshipId: randomUUID(),
+        logicalMemoryId: randomUUID(),
+        originSessionId,
+        localDeploymentIdentityId: localDeployment.id,
+        sourceDeploymentProtocolId,
+        sourceUserId,
+        remoteReplicaId: randomUUID(),
+        localReplicaId: randomUUID(),
+        idempotencyKey: `sync-intake-${randomUUID()}`,
+        creationRequestHash: randomBytes(32).toString("hex"),
+        policyManifest: { sourceBoundary: "captured_session" },
+        consentManifest: { consented: true },
+        session: {
+          originSessionId,
+          externalSessionId: `source-session-${randomUUID()}`,
+          sourceRuntime: "codex",
+          captureMethod: "transcript" as const,
+          capturedAt: "2026-07-12T00:00:00.000Z",
+          title: "Atomic sync intake",
+          sourceAdapterVersion: "1"
+        },
+        ...overrides
+      };
+    };
+
+    await expect(
+      encryptedRepo.createTargetSyncRelationship(
+        { userId: owner.id, deviceCredentialId: credential!.id },
+        relationshipInput({ localDeploymentIdentityId: randomUUID() })
+      )
+    ).rejects.toThrow();
+    await expect(
+      pool.query<{ count: string }>(
+        `select count(*)::text as count
+           from deployment_identities
+          where protocol_deployment_id=$1`,
+        [sourceDeploymentProtocolId]
+      )
+    ).resolves.toMatchObject({ rows: [{ count: "1" }] });
+    await expect(
+      pool.query<{ count: string }>(
+        `select count(*)::text as count
+           from sync_principal_links
+          where proof_kind='device_credential_lineage'
+            and proof_reference=$1`,
+        [credential!.lineageId]
+      )
+    ).resolves.toMatchObject({ rows: [{ count: "1" }] });
+
+    await expect(
+      encryptedRepo.createTargetSyncRelationship(
+        { userId: owner.id, deviceCredentialId: credential!.id },
+        relationshipInput()
+      )
+    ).resolves.toMatchObject({ relationship: { side: "target" } });
+    const sourceIdentity = await pool.query<{ id: string }>(
+      `select identity.id
+         from sync_external_user_identities identity
+         join deployment_identities deployment
+           on deployment.id=identity.deployment_identity_id
+        where deployment.protocol_deployment_id=$1
+          and identity.external_subject_id=$2`,
+      [sourceDeploymentProtocolId, sourceUserId]
+    );
+    await pool.query(
+      `update sync_principal_links
+          set revoked_at=now()
+        where external_user_identity_id=$1`,
+      [sourceIdentity.rows[0]!.id]
+    );
+    await expect(
+      encryptedRepo.linkExternalSyncUser(
+        { userId: owner.id },
+        {
+          externalUserIdentityId: sourceIdentity.rows[0]!.id,
+          proofKind: "device_credential_lineage",
+          proofReference: credential!.lineageId
+        }
+      )
+    ).rejects.toThrow("Cross-Identity Sync idempotency conflict");
+    await expect(
+      encryptedRepo.createTargetSyncRelationship(
+        { userId: owner.id, deviceCredentialId: credential!.id },
+        relationshipInput()
+      )
+    ).rejects.toThrow("Sync source principal binding is unavailable");
+    await expect(
+      pool.query<{ active: string; revoked: string }>(
+        `select count(*) filter (where revoked_at is null)::text as active,
+                count(*) filter (where revoked_at is not null)::text as revoked
+           from sync_principal_links
+          where external_user_identity_id=$1`,
+        [sourceIdentity.rows[0]!.id]
+      )
+    ).resolves.toMatchObject({ rows: [{ active: "0", revoked: "1" }] });
+    await pool.query(
+      `update sync_external_user_identities
+          set status='revoked',revoked_at=now()
+        where id=$1`,
+      [sourceIdentity.rows[0]!.id]
+    );
+    await expect(
+      encryptedRepo.upsertExternalSyncUserIdentity({
+        deploymentIdentityId: (
+          await pool.query<{ id: string }>(
+            `select id from deployment_identities
+              where protocol_deployment_id=$1`,
+            [sourceDeploymentProtocolId]
+          )
+        ).rows[0]!.id,
+        externalSubjectId: sourceUserId
+      })
+    ).rejects.toThrow("External sync identity is revoked");
+  });
+
   it("applies target packages once and keeps the synchronized session read-only until ready", async () => {
     const deploymentEncryptionProvider =
       createLocalTestKeyEnvelopeEncryptionProvider(
@@ -8131,11 +8635,17 @@ describeDb("memory repository visibility", () => {
     });
     const credentialChallengeHash = randomBytes(32).toString("hex");
     const sourceDeviceInstanceId = `source-device-${randomUUID()}`;
+    const sourceDeploymentProtocolId = randomUUID();
+    const sourceUserId = randomUUID();
     await encryptedRepo.createDeviceEnrollmentChallenge({
       challengeHash: credentialChallengeHash,
       upstreamBackendId: "sync-source",
       deviceInstanceId: sourceDeviceInstanceId,
       requestedOperationFamilies: ["sync"],
+      metadata: {
+        protocolDeploymentId: sourceDeploymentProtocolId,
+        sourceOwnerPrincipalId: sourceUserId
+      },
       expiresAt: new Date(Date.now() + 60_000)
     });
     const syncCredential = await encryptedRepo.redeemDeviceEnrollmentChallenge(
@@ -8153,12 +8663,12 @@ describeDb("memory repository visibility", () => {
       protocolDeploymentId: randomUUID()
     });
     const sourceDeployment = await encryptedRepo.upsertRemoteSyncDeployment({
-      protocolDeploymentId: randomUUID(),
+      protocolDeploymentId: sourceDeploymentProtocolId,
       profile: "local_personal"
     });
     const sourceUser = await encryptedRepo.upsertExternalSyncUserIdentity({
       deploymentIdentityId: sourceDeployment.id,
-      externalSubjectId: "source-user"
+      externalSubjectId: sourceUserId
     });
     await encryptedRepo.linkExternalSyncUser(
       { userId: owner.id },
@@ -8178,8 +8688,8 @@ describeDb("memory repository visibility", () => {
       logicalMemoryId,
       originSessionId,
       localDeploymentIdentityId: localDeployment.id,
-      remoteDeploymentIdentityId: sourceDeployment.id,
-      remoteUserIdentityId: sourceUser.id,
+      sourceDeploymentProtocolId,
+      sourceUserId,
       remoteReplicaId: sourceReplicaId,
       localReplicaId: targetReplicaId,
       idempotencyKey: "sync-target-idempotency",
@@ -8204,6 +8714,30 @@ describeDb("memory repository visibility", () => {
       targetRelationshipInput
     );
     expect(created?.relationship.side).toBe("target");
+    const targetPrincipalBindings = await pool.query<{
+      logical_owner_principal_id: string;
+      replica_owner_principal_id: string;
+      source_binding_owner_principal_id: string;
+    }>(
+      `select logical.owner_principal_id as logical_owner_principal_id,
+              replica.owner_principal_id as replica_owner_principal_id,
+              source.owner_principal_id as source_binding_owner_principal_id
+         from logical_memories logical
+         join memory_replicas replica
+           on replica.logical_memory_id=logical.id and replica.id=$2
+         join captured_session_logical_memories source
+           on source.logical_memory_id=logical.id
+        where logical.id=$1`,
+      [logicalMemoryId, targetReplicaId]
+    );
+    expect(targetPrincipalBindings.rows).toEqual([
+      {
+        logical_owner_principal_id: sourceUserId,
+        replica_owner_principal_id: sourceUserId,
+        source_binding_owner_principal_id: sourceUserId
+      }
+    ]);
+    expect(sourceUser.id).not.toBe(sourceUserId);
     const targetSessionStorage = await pool.query<{
       external_session_id: string | null;
       metadata: Record<string, unknown>;
@@ -8298,6 +8832,33 @@ describeDb("memory repository visibility", () => {
       )
     ).rejects.toThrow("requires authenticated rotation");
     const provenRotationHash = randomBytes(32).toString("hex");
+    const changedIdentityRotationHash = randomBytes(32).toString("hex");
+    await encryptedRepo.createDeviceEnrollmentChallenge({
+      challengeHash: changedIdentityRotationHash,
+      upstreamBackendId: "sync-source",
+      deviceInstanceId: sourceDeviceInstanceId,
+      rotationLineageId: syncCredential!.lineageId,
+      rotationOwnerUserId: owner.id,
+      rotationCredentialId: syncCredential!.id,
+      requestedOperationFamilies: ["sync"],
+      metadata: {
+        protocolDeploymentId: randomUUID(),
+        sourceOwnerPrincipalId: sourceUserId
+      },
+      expiresAt: new Date(Date.now() + 60_000)
+    });
+    await expect(
+      encryptedRepo.redeemDeviceEnrollmentChallenge(
+        { userId: owner.id },
+        {
+          challengeHash: changedIdentityRotationHash,
+          credentialKeyId: `sync-credential-${randomUUID()}`,
+          verifierKind: "secret_hash",
+          verifierHash: randomBytes(32).toString("hex"),
+          operationFamilies: ["sync"]
+        }
+      )
+    ).rejects.toThrow("cannot change source identity");
     await encryptedRepo.createDeviceEnrollmentChallenge({
       challengeHash: provenRotationHash,
       upstreamBackendId: "sync-source",
@@ -8306,6 +8867,10 @@ describeDb("memory repository visibility", () => {
       rotationOwnerUserId: owner.id,
       rotationCredentialId: syncCredential!.id,
       requestedOperationFamilies: ["sync"],
+      metadata: {
+        protocolDeploymentId: sourceDeploymentProtocolId,
+        sourceOwnerPrincipalId: sourceUserId
+      },
       expiresAt: new Date(Date.now() + 60_000)
     });
     const rotatedCredential =
@@ -8326,10 +8891,11 @@ describeDb("memory repository visibility", () => {
         relationshipId
       )
     ).resolves.toMatchObject({ id: relationshipId });
+    const switchedSourceUserId = randomUUID();
     const switchedSourceUser =
       await encryptedRepo.upsertExternalSyncUserIdentity({
         deploymentIdentityId: sourceDeployment.id,
-        externalSubjectId: "different-source-user"
+        externalSubjectId: switchedSourceUserId
       });
     await expect(
       encryptedRepo.linkExternalSyncUser(
@@ -8355,8 +8921,8 @@ describeDb("memory repository visibility", () => {
           logicalMemoryId: randomUUID(),
           originSessionId: switchedOriginSessionId,
           localDeploymentIdentityId: localDeployment.id,
-          remoteDeploymentIdentityId: sourceDeployment.id,
-          remoteUserIdentityId: switchedSourceUser.id,
+          sourceDeploymentProtocolId,
+          sourceUserId: switchedSourceUserId,
           remoteReplicaId: randomUUID(),
           localReplicaId: randomUUID(),
           idempotencyKey: "switched-source-principal",
@@ -8374,7 +8940,9 @@ describeDb("memory repository visibility", () => {
           }
         }
       )
-    ).rejects.toThrow("already bound to another source principal");
+    ).rejects.toThrow(
+      "Sync source identity does not match the approved device credential"
+    );
     const secondChallengeHash = randomBytes(32).toString("hex");
     await encryptedRepo.createDeviceEnrollmentChallenge({
       challengeHash: secondChallengeHash,
@@ -8425,9 +8993,9 @@ describeDb("memory repository visibility", () => {
         protocolDeploymentId: randomUUID(),
         profile: "local_personal"
       });
-    const otherSourceUser = await encryptedRepo.upsertExternalSyncUserIdentity({
+    await encryptedRepo.upsertExternalSyncUserIdentity({
       deploymentIdentityId: otherSourceDeployment.id,
-      externalSubjectId: "source-user"
+      externalSubjectId: sourceUserId
     });
     const spoofedOriginSessionId = randomUUID();
     await expect(
@@ -8441,8 +9009,9 @@ describeDb("memory repository visibility", () => {
           logicalMemoryId: randomUUID(),
           originSessionId: spoofedOriginSessionId,
           localDeploymentIdentityId: localDeployment.id,
-          remoteDeploymentIdentityId: otherSourceDeployment.id,
-          remoteUserIdentityId: otherSourceUser.id,
+          sourceDeploymentProtocolId:
+            otherSourceDeployment.protocolDeploymentId,
+          sourceUserId,
           remoteReplicaId: randomUUID(),
           localReplicaId: randomUUID(),
           idempotencyKey: "spoofed-source-deployment",
@@ -8460,7 +9029,9 @@ describeDb("memory repository visibility", () => {
           }
         }
       )
-    ).rejects.toThrow("already bound to another source deployment");
+    ).rejects.toThrow(
+      "Sync source identity does not match the approved device credential"
+    );
     const targetSessionId = created!.localReplica.localSessionId!;
     await expect(
       encryptedRepo.createSyncPackageUploadSession(
@@ -8814,6 +9385,14 @@ describeDb("memory repository visibility", () => {
       summaryNodeIds: applied.summaryNodeIds,
       invalidatedSummaryNodeIds: []
     });
+    await expect(
+      pool.query(
+        `select source_cursor
+           from captured_session_source_revisions
+          where logical_memory_id=$1 and source_cursor=$2`,
+        [logicalMemoryId, syncPackage.toCursor]
+      )
+    ).resolves.toMatchObject({ rowCount: 1 });
     await encryptedRepo.markTargetSyncReady({
       relationshipId,
       sourceCursor: 1,
@@ -9436,6 +10015,10 @@ describeDb("memory repository visibility", () => {
       rotationOwnerUserId: owner.id,
       rotationCredentialId: rotatedCredential!.id,
       requestedOperationFamilies: ["sync"],
+      metadata: {
+        protocolDeploymentId: sourceDeploymentProtocolId,
+        sourceOwnerPrincipalId: sourceUserId
+      },
       expiresAt: new Date(Date.now() + 60_000)
     });
     const replacementCredential =
@@ -9515,7 +10098,7 @@ describeDb("memory repository visibility", () => {
           team_workspace_id: workspace!.id,
           share_grant_id: synchronizedGrant.id,
           logical_memory_id: synchronizedGrant.logicalMemoryId,
-          resource_type: "team_session_share_grant",
+          resource_type: "team_memory_share_grant",
           resource_id: synchronizedGrant.id
         }
       ]
@@ -9540,9 +10123,12 @@ describeDb("memory repository visibility", () => {
     ).toMatchObject({ rows: [{ ready: true }] });
     await expect(
       pool.query(
-        `select session_id, revoked_at
-           from team_session_share_grants
-          where id = $1`,
+        `select local_memory.local_session_id as session_id,
+                grant_row.revoked_at
+           from team_memory_share_grants grant_row
+           join local_captured_session_logical_memories local_memory
+             on local_memory.logical_memory_id=grant_row.logical_memory_id
+          where grant_row.id = $1`,
         [synchronizedGrant.id]
       )
     ).resolves.toMatchObject({
@@ -10028,7 +10614,7 @@ describeDb("memory repository visibility", () => {
     });
 
     await pool.query(
-      `update team_session_share_grants
+      `update team_memory_share_grants
           set personal_deleted_at=now(), personal_deleted_by_user_id=$2,
               personal_deletion_reason='owner_deleted'
         where id=$1`,
@@ -10041,7 +10627,7 @@ describeDb("memory repository visibility", () => {
       )
     ).resolves.toBeNull();
     await pool.query(
-      `update team_session_share_grants
+      `update team_memory_share_grants
           set personal_deleted_at=null, personal_deleted_by_user_id=null,
               personal_deletion_reason=null
         where id=$1`,
@@ -10160,7 +10746,7 @@ describeDb("memory repository visibility", () => {
       resolveOwnerPrivateReplicaEncryptionProvider: () => sharedMemoryProvider
     });
     const parentGrant = await pool.query<{ grant_version: number }>(
-      `select grant_version from team_session_share_grants where id=$1`,
+      `select grant_version from team_memory_share_grants where id=$1`,
       [shareGrant.id]
     );
     const parentMutationId = randomUUID();
@@ -10320,7 +10906,7 @@ describeDb("memory repository visibility", () => {
     );
     await pool.query(
       `
-        update team_session_share_grants
+        update team_memory_share_grants
         set
           personal_deleted_at = now(),
           personal_deleted_by_user_id = $1,
@@ -10391,14 +10977,16 @@ describeDb("memory repository visibility", () => {
     }>(
       `
         select
-          id,
-          session_id,
-          owner_user_id,
-          personal_deleted_at,
-          revoked_at,
-          retention_reason
-        from team_session_share_grants
-        where id = $1
+          grant_row.id,
+          binding.source_session_id as session_id,
+          grant_row.owner_user_id,
+          grant_row.personal_deleted_at,
+          grant_row.revoked_at,
+          grant_row.retention_reason
+        from team_memory_share_grants grant_row
+        join captured_session_source_revisions binding
+          on binding.source_revision_id=grant_row.source_revision_id
+        where grant_row.id = $1
       `,
       [grantId]
     );
@@ -11015,15 +11603,6 @@ describeDb("memory repository visibility", () => {
       await protectedRepo.createThread(
         { userId: owner.id },
         {
-          kind: "notes_to_self",
-          idempotencyKey: `notes-${randomUUID()}`
-        }
-      )
-    );
-    threads.push(
-      await protectedRepo.createThread(
-        { userId: owner.id },
-        {
           kind: "personal_channel",
           idempotencyKey: `personal-channel-${randomUUID()}`,
           name: "Personal planning",
@@ -11093,23 +11672,10 @@ describeDb("memory repository visibility", () => {
       );
     }
     const personalThreads: unknown[] = personalThreadsValue;
-    const personalNotesThreadId = threads[0]?.id as unknown;
-    const personalChannelThreadId = threads[1]?.id as unknown;
-    if (
-      typeof personalNotesThreadId !== "string" ||
-      typeof personalChannelThreadId !== "string"
-    ) {
+    const personalChannelThreadId = threads[0]?.id as unknown;
+    if (typeof personalChannelThreadId !== "string") {
       throw new TypeError("Created collaboration threads must have string IDs");
     }
-    const personalNotesThread = personalThreads.find(
-      (thread): thread is Record<string, unknown> =>
-        typeof thread === "object" &&
-        thread !== null &&
-        "id" in thread &&
-        thread.id === personalNotesThreadId
-    );
-    expect(personalNotesThread?.["kind"]).toBe("notes_to_self");
-    expect(personalNotesThread?.["latestSequence"]).toBe(1);
     const personalChannelThread = personalThreads.find(
       (thread): thread is Record<string, unknown> =>
         typeof thread === "object" &&
@@ -11128,7 +11694,7 @@ describeDb("memory repository visibility", () => {
     if (!teamSnapshot) {
       throw new Error("Expected an authorized Team collaboration snapshot");
     }
-    for (const thread of threads.slice(2)) {
+    for (const thread of threads.slice(1)) {
       expect(
         teamSnapshot.threads.some(
           (candidate) =>
@@ -11147,7 +11713,7 @@ describeDb("memory repository visibility", () => {
           (select count(*) from collaboration_outbox)::text as events
       `);
     expect(collaborationCounts.rows).toHaveLength(1);
-    expect(collaborationCounts.rows[0]?.messages).toBe("5");
+    expect(collaborationCounts.rows[0]?.messages).toBe("4");
     expect(collaborationCounts.rows[0]?.events).toMatch(/^[1-9][0-9]*$/);
   });
 
@@ -15900,6 +16466,197 @@ describeDb("memory repository visibility", () => {
     expect(hidden).toBeNull();
   });
 
+  it("creates, orders, owns, and completes Desktop Ask turns", async () => {
+    const questionRepo = createMemorySourceRepository(pool, {
+      envelopeEncryptionProvider: createLocalTestKeyEnvelopeEncryptionProvider(
+        Buffer.alloc(32, 63).toString("base64")
+      )
+    });
+    const alice = await repo.createUser({
+      email: `alice-desktop-ask-${randomUUID()}@example.com`
+    });
+    const bob = await repo.createUser({
+      email: `bob-desktop-ask-${randomUUID()}@example.com`
+    });
+    const idempotencyKey = `desktop-ask-${randomUUID()}`;
+    const initial = await questionRepo.createPendingDesktopAsk(
+      { userId: alice.id },
+      { idempotencyKey, query: "What did I decide about Desktop Ask?" }
+    );
+    const retry = await questionRepo.createPendingDesktopAsk(
+      { userId: alice.id },
+      { idempotencyKey, query: "A retry must keep the first question." }
+    );
+    const followUps = await Promise.all([
+      questionRepo.createPendingDesktopAsk(
+        { userId: alice.id },
+        {
+          askThreadId: initial.askThreadId!,
+          idempotencyKey: `desktop-ask-follow-up-${randomUUID()}`,
+          query: "What came next?"
+        }
+      ),
+      questionRepo.createPendingDesktopAsk(
+        { userId: alice.id },
+        {
+          askThreadId: initial.askThreadId!,
+          idempotencyKey: `desktop-ask-follow-up-${randomUUID()}`,
+          query: "And after that?"
+        }
+      )
+    ]);
+    const answered = await questionRepo.completePendingDesktopAsk(
+      { userId: alice.id },
+      {
+        questionId: initial.id,
+        status: "answered",
+        answerMarkdown: "You approved an Ask-focused Personal welcome page.",
+        evidence: [{ id: "source-1" }]
+      }
+    );
+    const finalRetry = await questionRepo.completePendingDesktopAsk(
+      { userId: alice.id },
+      {
+        questionId: initial.id,
+        status: "error",
+        errorMessage: "This must not replace the final answer."
+      }
+    );
+    const secondThread = await questionRepo.createPendingDesktopAsk(
+      { userId: alice.id },
+      {
+        idempotencyKey: `desktop-ask-second-${randomUUID()}`,
+        query: "What is the next thread?"
+      }
+    );
+    const firstPage = await questionRepo.listDesktopAskThreads(
+      { userId: alice.id },
+      { limit: 1 }
+    );
+    const secondPage = await questionRepo.listDesktopAskThreads(
+      { userId: alice.id },
+      { cursor: firstPage.nextCursor!, limit: 1 }
+    );
+    const loadedThread = await questionRepo.getDesktopAskThread(
+      { userId: alice.id },
+      initial.askThreadId!
+    );
+    const recovered = await questionRepo.recoverPendingDesktopAsks(
+      { userId: alice.id },
+      {
+        errorMessage:
+          "This Ask was interrupted when the Local AI Runtime stopped. Try again."
+      }
+    );
+    const recoveredThread = await questionRepo.getDesktopAskThread(
+      { userId: alice.id },
+      initial.askThreadId!
+    );
+
+    expect(initial).toMatchObject({
+      origin: "desktop_ask",
+      retrievalScope: "personal",
+      searchDomain: "global",
+      askTurnIndex: 0,
+      status: "pending"
+    });
+    expect(initial.askThreadId).toBeTruthy();
+    expect(retry.id).toBe(initial.id);
+    expect(followUps.map((turn) => turn.askTurnIndex).sort()).toEqual([1, 2]);
+    expect(answered).toMatchObject({
+      id: initial.id,
+      status: "answered",
+      answerMarkdown: "You approved an Ask-focused Personal welcome page.",
+      evidenceCount: 1
+    });
+    expect(finalRetry.status).toBe("answered");
+    expect(finalRetry.answerMarkdown).toBe(answered.answerMarkdown);
+    expect(firstPage.threads).toHaveLength(1);
+    expect(firstPage.nextCursor).not.toBeNull();
+    expect(secondPage.threads).toHaveLength(1);
+    expect(
+      new Set(
+        [...firstPage.threads, ...secondPage.threads].map(
+          (thread) => thread.askThreadId
+        )
+      )
+    ).toEqual(new Set([initial.askThreadId, secondThread.askThreadId]));
+    expect(loadedThread.map((turn) => turn.askTurnIndex)).toEqual([0, 1, 2]);
+    expect(recovered).toEqual({ recovered: 3 });
+    expect(recoveredThread.slice(1)).toEqual([
+      expect.objectContaining({ status: "error", attemptCount: 1 }),
+      expect.objectContaining({ status: "error", attemptCount: 1 })
+    ]);
+    await expect(
+      questionRepo.createPendingDesktopAsk(
+        { userId: bob.id },
+        {
+          askThreadId: initial.askThreadId!,
+          idempotencyKey: `desktop-ask-hidden-${randomUUID()}`,
+          query: "Can I append to Alice's thread?"
+        }
+      )
+    ).rejects.toThrow("Ask thread not found or not visible");
+    expect(
+      await questionRepo.getMemoryQuestion({ userId: bob.id }, initial.id)
+    ).toBeNull();
+    expect(
+      await questionRepo.getDesktopAskThread(
+        { userId: bob.id },
+        initial.askThreadId!
+      )
+    ).toEqual([]);
+  });
+
+  it("encrypts Desktop Ask pending and final text", async () => {
+    await withPaidManagedCloudProfile(async () => {
+      const provider = createLocalTestKeyEnvelopeEncryptionProvider(
+        Buffer.alloc(32, 64).toString("base64")
+      );
+      const questionRepo = createMemorySourceRepository(pool, {
+        envelopeEncryptionProvider: provider
+      });
+      const alice = await repo.createUser({
+        email: `alice-desktop-ask-encrypted-${randomUUID()}@example.com`
+      });
+      const query = "ORCHID_DESKTOP_ASK_PENDING_SECRET";
+      const answer = "ORCHID_DESKTOP_ASK_ANSWER_SECRET";
+      const pending = await questionRepo.createPendingDesktopAsk(
+        { userId: alice.id },
+        {
+          idempotencyKey: `desktop-ask-encrypted-${randomUUID()}`,
+          query
+        }
+      );
+      const rawPending = await pool.query<{
+        answer_markdown: string | null;
+        query: string;
+      }>("select query, answer_markdown from memory_questions where id = $1", [
+        pending.id
+      ]);
+      const completed = await questionRepo.completePendingDesktopAsk(
+        { userId: alice.id },
+        {
+          questionId: pending.id,
+          status: "answered",
+          answerMarkdown: answer
+        }
+      );
+      const rawCompleted = await pool.query<{
+        answer_markdown: string | null;
+        query: string;
+      }>("select query, answer_markdown from memory_questions where id = $1", [
+        pending.id
+      ]);
+
+      expect(pending.query).toBe(query);
+      expect(rawPending.rows[0]?.query).not.toContain(query);
+      expect(completed.answerMarkdown).toBe(answer);
+      expect(rawCompleted.rows[0]?.query).not.toContain(query);
+      expect(rawCompleted.rows[0]?.answer_markdown).not.toContain(answer);
+    });
+  });
+
   it("encrypts managed-cloud final Memory Question payloads", async () => {
     await withPaidManagedCloudProfile(async () => {
       const provider = createLocalTestKeyEnvelopeEncryptionProvider(
@@ -16410,7 +17167,6 @@ describeDb("memory repository visibility", () => {
         }
       }
     );
-
     const projects = await repo.listLcmGraphThreads(
       { userId: alice.id },
       { projectId: "workspace-standalone-thread", limit: 10 }
@@ -17740,6 +18496,15 @@ describeDb("memory repository visibility", () => {
         limit: 10
       }
     );
+    const canonicalEvents = await repo.listLcmGraphEvents(
+      { userId: alice.id },
+      {
+        projectId: workspaceId,
+        threadId: session.externalSessionId ?? undefined,
+        canonicalCapturedSessionEventsOnly: true,
+        limit: 10
+      }
+    );
     const rawRows = await pool.query<{
       source_record_type: string;
       source_event_type: string | null;
@@ -17780,6 +18545,11 @@ describeDb("memory repository visibility", () => {
         segments: [{ kind: "message", sequence: 1, actor: "user" }]
       }
     });
+    expect(canonicalEvents).toHaveLength(1);
+    expect(canonicalEvents[0]).toMatchObject({
+      metadata: { sourceTable: "memory_events" }
+    });
+    expect(canonicalEvents[0]?.id).not.toBe(events[0]?.id);
     expect(rawRows.rows).toHaveLength(1);
     const transcriptRawRow = rawRows.rows.find(
       (row) => row.source_record_type === "event_msg"

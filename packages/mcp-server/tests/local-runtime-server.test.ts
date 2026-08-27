@@ -50,10 +50,44 @@ const fixture = (
 
 const defaultExecutor = (): LocalAiRuntimeToolExecutor => ({
   capabilities: async () => ({ curatedMemoryIntakeAvailable: true }),
-  execute: async (name, input, caller) => ({ name, input, caller })
+  execute: async (name, input, caller) => ({ name, input, caller }),
+  executeDesktopAsk: async (input, caller) => ({ input, caller })
 });
 
 describe("Local AI Runtime", () => {
+  it("recovers durable Desktop Ask turns before starting runtime services", async () => {
+    const callOrder: string[] = [];
+    const recoverPendingDesktopAsks = vi.fn(async () => {
+      callOrder.push("recover");
+      return { recovered: 1 };
+    });
+    const dependencies = {
+      recoverPendingDesktopAsks,
+      startLcmSummaryService: vi.fn(() => {
+        callOrder.push("services");
+        return null;
+      }),
+      watchKoedLocalWork: vi.fn(),
+      startCuratedMemoryReviewService: vi.fn(() => ({ stop: vi.fn() })),
+      startCodexTranscriptWatcher: vi.fn(() => ({ stop: vi.fn() })),
+      startClaudeTranscriptWatcher: vi.fn(() => ({ stop: vi.fn() })),
+      createExecutor: vi.fn(() => defaultExecutor())
+    } as unknown as LocalAiRuntimeServiceDependencies;
+    const apiClient = new MemoryApiClient({
+      apiUrl: "http://127.0.0.1:3300",
+      apiToken: "test-token"
+    });
+
+    const services = await startDefaultLocalAiRuntimeServices(
+      { apiClient, environment: {}, koedHome: tempHome() },
+      dependencies
+    );
+
+    expect(recoverPendingDesktopAsks).toHaveBeenCalledWith(apiClient);
+    expect(callOrder).toEqual(["recover", "services"]);
+    await services.close();
+  });
+
   it("owns and stops both transcript watchers", async () => {
     const lcmStop = vi.fn();
     const lcmWorkStop = vi.fn();
@@ -279,9 +313,11 @@ describe("Local AI Runtime", () => {
     const koedHome = tempHome();
     const environment = { KOED_HOME: koedHome };
     const execute = vi.fn(defaultExecutor().execute);
+    const executeDesktopAsk = vi.fn(defaultExecutor().executeDesktopAsk);
     const services = fixture({
       capabilities: defaultExecutor().capabilities,
-      execute
+      execute,
+      executeDesktopAsk
     });
     const runtime = await startLocalAiRuntime({
       environment,
@@ -315,6 +351,23 @@ describe("Local AI Runtime", () => {
         input: { query: "Where is the launch plan?" },
         caller: { cwd: "/work/project", protocolVersion: "2026-07-28" }
       });
+      expect(execute).toHaveBeenCalledTimes(1);
+      await expect(
+        client.askDesktop(
+          {
+            idempotencyKey: "desktop-ask-request-1",
+            query: "What did I decide?"
+          },
+          { cwd: "/work/project" }
+        )
+      ).resolves.toMatchObject({
+        input: {
+          idempotencyKey: "desktop-ask-request-1",
+          query: "What did I decide?"
+        },
+        caller: { cwd: "/work/project" }
+      });
+      expect(executeDesktopAsk).toHaveBeenCalledTimes(1);
       expect(execute).toHaveBeenCalledTimes(1);
     } finally {
       await runtime.close();
@@ -409,7 +462,8 @@ describe("Local AI Runtime", () => {
       environment,
       serviceFactory: fixture({
         capabilities: defaultExecutor().capabilities,
-        execute
+        execute,
+        executeDesktopAsk: defaultExecutor().executeDesktopAsk
       }).serviceFactory
     });
     const registration = readLocalRuntimeRegistration(environment);
@@ -487,7 +541,8 @@ describe("Local AI Runtime", () => {
       environment,
       serviceFactory: fixture({
         capabilities: defaultExecutor().capabilities,
-        execute
+        execute,
+        executeDesktopAsk: defaultExecutor().executeDesktopAsk
       }).serviceFactory
     });
     const client = new LocalAiRuntimeClient(environment);
@@ -540,7 +595,8 @@ describe("Local AI Runtime", () => {
     const execute = vi.fn(defaultExecutor().execute);
     const services = fixture({
       capabilities: defaultExecutor().capabilities,
-      execute
+      execute,
+      executeDesktopAsk: defaultExecutor().executeDesktopAsk
     });
     const runtime = await startLocalAiRuntime({
       environment,
@@ -583,14 +639,16 @@ describe("Local AI Runtime", () => {
       environment: firstEnvironment,
       serviceFactory: fixture({
         capabilities: defaultExecutor().capabilities,
-        execute: async () => ({ instance: "first" })
+        execute: async () => ({ instance: "first" }),
+        executeDesktopAsk: defaultExecutor().executeDesktopAsk
       }).serviceFactory
     });
     const secondRuntime = await startLocalAiRuntime({
       environment: secondEnvironment,
       serviceFactory: fixture({
         capabilities: defaultExecutor().capabilities,
-        execute: async () => ({ instance: "second" })
+        execute: async () => ({ instance: "second" }),
+        executeDesktopAsk: defaultExecutor().executeDesktopAsk
       }).serviceFactory
     });
 

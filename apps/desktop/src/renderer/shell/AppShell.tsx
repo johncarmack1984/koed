@@ -12,7 +12,6 @@ import {
   Plus,
   Search,
   Settings,
-  UserRound,
   X
 } from "lucide-react";
 import {
@@ -127,7 +126,6 @@ function RailButton({
 
 function Rail({
   activeScope,
-  identityLabel,
   onActivateInbox,
   onActivatePersonal,
   onActivateTeam,
@@ -140,7 +138,6 @@ function Rail({
 }: Pick<
   AppShellProps,
   | "activeScope"
-  | "identityLabel"
   | "onActivateInbox"
   | "onActivatePersonal"
   | "onActivateTeam"
@@ -265,12 +262,12 @@ function Rail({
         <RailButton label="Preferences" onClick={onOpenPreferences}>
           <Settings aria-hidden="true" />
         </RailButton>
-        <RailButton
+        {/* <RailButton
           label={`Identity: ${identityLabel}`}
           onClick={onOpenPreferences}
         >
           <UserRound aria-hidden="true" />
-        </RailButton>
+        </RailButton> */}
       </div>
     </nav>
   );
@@ -285,7 +282,6 @@ export function AppShell({
   children,
   contextNavigation,
   health,
-  identityLabel,
   inspector,
   inspectorLabel = "Inspector",
   inspectorOpen,
@@ -394,7 +390,6 @@ export function AppShell({
     >
       <Rail
         activeScope={activeScope}
-        identityLabel={identityLabel}
         onActivateInbox={onActivateInbox}
         onActivatePersonal={onActivatePersonal}
         onActivateTeam={onActivateTeam}

@@ -73,7 +73,9 @@ function eventActorLabel(event: DesktopConversationEvent): string {
   if (event.activityDisplay) return event.activityDisplay.label;
   if (event.approvalDecisionDisplay) return "Auto approval";
   if (event.actor === "user") return "You";
-  if (event.actor === "assistant") return "AI Client";
+  if (event.actor === "assistant" || event.actor === "agent") {
+    return "AI Client";
+  }
   if (event.actor === "tool") {
     return conversationEventToolDisplay(event).toolName ?? "Tool";
   }

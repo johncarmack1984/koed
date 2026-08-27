@@ -98,7 +98,10 @@ test("Team SaaS fixture definition is deterministic and realistic", () => {
       .size,
     fixtureMemoryRows.length
   );
-  assert.equal(new Set(fixtureThreadRows.map((thread) => thread.id)).size, 6);
+  assert.equal(
+    new Set(fixtureThreadRows.map((thread) => thread.id)).size,
+    fixtureThreadRows.length
+  );
   for (const idField of [
     "logicalMemoryId",
     "ownerPrincipalId",
@@ -173,7 +176,6 @@ test("Team SaaS fixture covers required access states", () => {
     [
       "dm",
       "group_dm",
-      "notes_to_self",
       "personal_channel",
       "shared_session_discussion",
       "workspace_channel"
@@ -481,7 +483,7 @@ test("Team SaaS fixture can seed and validate a live database", async (t) => {
     const revocationScope = await client.query(
       `select grant_row.team_workspace_id, grant_row.logical_memory_id,
               policy.policy_id, policy.version, policy.effective_at
-         from team_session_share_grants grant_row
+         from team_memory_share_grants grant_row
          join retention_policies policy
            on policy.team_id = grant_row.team_id
           and policy.scope = 'team'
@@ -546,7 +548,7 @@ test("Team SaaS fixture can seed and validate a live database", async (t) => {
       [purgeEvidenceId, purgeJobId, purgeAttemptId, "1".repeat(64)]
     );
     await client.query(
-      `update team_session_share_grants
+      `update team_memory_share_grants
           set lifecycle = 'revoked', revoked_at = now(),
               revocation_epoch = 1,
               retention_policy_id = $2,
@@ -638,7 +640,7 @@ test("Team SaaS fixture can seed and validate a live database", async (t) => {
     });
     const omittedGrantAfterReseed = await client.query(
       `select lifecycle, active_retention_decision_id, active_purge_job_id
-       from team_session_share_grants
+       from team_memory_share_grants
        where id = $1`,
       [revokedMemory.shareGrantId]
     );

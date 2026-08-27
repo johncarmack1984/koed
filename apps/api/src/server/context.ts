@@ -1,5 +1,5 @@
 import type { Visibility } from "@koed/core";
-import type { MemorySourceRepository } from "@koed/db";
+import type { MemorySourceRepository, PersonalNoteRecord } from "@koed/db";
 import type {
   DeviceIdentityInspection,
   EnvelopeEncryptionProvider,
@@ -33,6 +33,10 @@ export interface ApiRouteContext {
   rateLimit: Record<RateLimitName, RateLimitHandler>;
   collaboration: {
     admission: CollaborationAdmissionController;
+    projectPersonalNote?(input: {
+      ownerUserId: string;
+      note: PersonalNoteRecord;
+    }): Promise<void>;
     actionGrantLifecycle?: CollaborationActionGrantLifecycle;
     actionGrantControl?: CollaborationActionGrantControl;
     sharedMemoryControl?: CollaborationSharedMemoryControl;

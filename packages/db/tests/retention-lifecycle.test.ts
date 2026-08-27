@@ -130,34 +130,44 @@ describeDb("retention lifecycle repository", () => {
       [randomUUID(), `Retention Remote ${randomUUID()}`]
     );
     const logicalMemory = await pool.query<{ id: string }>(
-      `insert into logical_memories (
-         owner_user_id, owner_principal_id, origin_deployment_identity_id,
-         source_boundary, origin_source_id, local_session_id, logical_key
-       ) values ($1, $2, $3, 'captured_session', $4, $5, $6) returning id`,
+      `with logical_memory as (
+         insert into logical_memories (
+           owner_user_id,owner_principal_id,origin_deployment_identity_id,
+           source_kind,logical_key
+         ) values ($1,$2,$3,'captured_session',$4)
+         returning id
+       ), protocol_binding as (
+         insert into captured_session_logical_memories (
+           logical_memory_id,source_session_id,owner_principal_id
+         ) select id,$5,$2 from logical_memory
+       ), local_binding as (
+         insert into local_captured_session_logical_memories (
+           logical_memory_id,local_session_id,owner_user_id
+         ) select id,$5,$1 from logical_memory
+       )
+       select id from logical_memory`,
       [
         fixture.userId,
         ownerPrincipalId,
         deployment.rows[0]!.id,
-        `retention-source-${randomUUID()}`,
-        session.rows[0]!.id,
-        `retention-logical-${randomUUID()}`
+        `retention-logical-${randomUUID()}`,
+        session.rows[0]!.id
       ]
     );
     const replica = await pool.query<{ id: string }>(
       `insert into memory_replicas (
          logical_memory_id, deployment_identity_id, owner_user_id,
-         owner_principal_id, replica_role, source_boundary, local_session_id,
+         owner_principal_id, replica_role, source_boundary,
          encryption_scope
        ) values (
-         $1, $2, $3, $4, 'target', 'captured_session', $5,
+         $1, $2, $3, $4, 'target', 'captured_session',
          'owner_private_replica'
        ) returning id`,
       [
         logicalMemory.rows[0]!.id,
         deployment.rows[0]!.id,
         fixture.userId,
-        ownerPrincipalId,
-        session.rows[0]!.id
+        ownerPrincipalId
       ]
     );
     const remoteIdentity = await pool.query<{ id: string }>(
@@ -290,11 +300,33 @@ describeDb("retention lifecycle repository", () => {
       ]
     );
     const classifierHash = classifierGeneration.rows[0]!.classifierHash;
+    const sourceRevisionId = randomUUID();
+    await pool.query(
+      `with source_revision as (
+         insert into logical_memory_source_revisions (
+           id,logical_memory_id,owner_principal_id,source_kind,revision,binding_hash
+         ) values ($1,$2,$3,'captured_session',8,$4)
+         returning id
+       )
+       insert into captured_session_source_revisions (
+         source_revision_id,logical_memory_id,owner_principal_id,source_kind,
+         revision,source_session_id,source_cursor
+       ) select id,$2,$3,'captured_session',8,$5,7 from source_revision`,
+      [
+        sourceRevisionId,
+        logicalMemory.rows[0]!.id,
+        ownerPrincipalId,
+        hash(`source-revision-binding:${logicalMemory.rows[0]!.id}:7`),
+        session.rows[0]!.id
+      ]
+    );
     const sourceArtifact = await pool.query<{ id: string }>(
       `insert into shared_source_artifacts (
-         logical_memory_id, remote_replica_id, sync_relationship_id,
+         logical_memory_id, source_revision_id, remote_replica_id,
+         sync_relationship_id,
          owner_user_id, owner_principal_id, team_id, team_workspace_id,
-         representation, maximum_fidelity, include_curated_memory,
+         source_capabilities, activation_representation, representation,
+         maximum_fidelity, include_curated_memory,
          source_revision, source_cursor, package_sequence,
          source_hash, manifest_hash, artifact_hash, source_content_hash,
          source_owner_policy_id, source_owner_policy_version,
@@ -305,8 +337,10 @@ describeDb("retention lifecycle repository", () => {
          source_deployment_identity_id, remote_user_identity_id,
          device_credential_id, device_provenance_hash
        ) values (
-         $1, $2, $3, $4, $5, $6, $7,
-         $22::shared_memory_representation, 'memory_events', false, 7, 7, 7,
+         $1, $23, $2, $3, $4, $5, $6, $7,
+         array['memory_events','lcm_leaves','lcm_rollups']::shared_memory_representation[],
+         $22::shared_memory_representation, $22::shared_memory_representation,
+         'memory_events', false, 7, 7, 7,
          $8, $9, $10, $11, $12, 1, $13, 1, $14, 1, 1, $15, 1,
          $16, 1, $17, $18, $19, $20, $21
        ) returning id`,
@@ -332,17 +366,22 @@ describeDb("retention lifecycle repository", () => {
         remoteIdentity.rows[0]!.id,
         deviceCredential.rows[0]!.id,
         hash("device-provenance"),
-        requestedRepresentation
+        requestedRepresentation,
+        sourceRevisionId
       ]
     );
     const sourcePreview = await pool.query<{ id: string }>(
       `insert into shared_source_previews (
-         source_artifact_id, logical_memory_id, remote_replica_id,
+         source_artifact_id, logical_memory_id, source_revision_id,
+         remote_replica_id,
          owner_user_id, owner_principal_id, team_id, team_workspace_id,
+         source_capabilities, activation_representation, mode,
          representation, preview_revision, preview_hash, source_revision,
          source_hash, source_content_hash
        ) values (
-         $1, $2, $3, $4, $5, $6, $7,
+         $1, $2, $12, $3, $4, $5, $6, $7,
+         array['memory_events','lcm_leaves','lcm_rollups']::shared_memory_representation[],
+         $11::shared_memory_representation, 'snapshot',
          $11::shared_memory_representation, 1, $8, 7, $9, $10
        ) returning id`,
       [
@@ -356,7 +395,8 @@ describeDb("retention lifecycle repository", () => {
         previewHash,
         sourceHash,
         sourceContentHash,
-        requestedRepresentation
+        requestedRepresentation,
+        sourceRevisionId
       ]
     );
     const semanticPreview = await pool.query<{ id: string }>(
@@ -392,11 +432,12 @@ describeDb("retention lifecycle repository", () => {
 
     const consent = await pool.query<{ id: string }>(
       `insert into source_owner_representation_consents (
-         logical_memory_id, remote_replica_id, preview_id,
+         logical_memory_id, source_revision_id, remote_replica_id, preview_id,
          source_owner_principal_id,
          team_id, team_workspace_id, source_owner_policy_id,
          source_owner_policy_version, team_policy_id, team_policy_version,
-         workspace_policy_id, workspace_policy_version, mode, state,
+         workspace_policy_id, workspace_policy_version,
+         source_capabilities, activation_representation, mode, state,
          maximum_fidelity, include_curated_memory, preview_revision,
          preview_hash, source_revision, maximum_authorized_source_revision,
          source_hash, fidelity_policy_revision,
@@ -404,7 +445,9 @@ describeDb("retention lifecycle repository", () => {
          content_policy_hash, classifier_version, classifier_hash,
          source_content_hash, activated_at
        ) values (
-         $1, $2, $3, $4, $5, $6, $7, 1, $8, 1, $9, 1, 'snapshot', 'active',
+         $1, $17, $2, $3, $4, $5, $6, $7, 1, $8, 1, $9, 1,
+         array['memory_events','lcm_leaves','lcm_rollups']::shared_memory_representation[],
+         $18::shared_memory_representation, 'snapshot', 'active',
          'memory_events', false, 1, $10, 7, 7, $11, 1, $12, 1, $13, 1,
          $14, $15, $16
        ) returning id`,
@@ -424,21 +467,27 @@ describeDb("retention lifecycle repository", () => {
         hash("content-policy"),
         hash("classifier"),
         hash("redacted-content"),
-        effectiveAt
+        effectiveAt,
+        sourceRevisionId,
+        requestedRepresentation
       ]
     );
     const shareGrant = await pool.query<{ id: string }>(
-      `insert into team_session_share_grants (
+      `insert into team_memory_share_grants (
          logical_memory_id, remote_replica_id, owner_user_id,
-         owner_principal_id, session_id, team_id, team_workspace_id,
+         owner_principal_id, source_revision_id, team_id, team_workspace_id,
          consent_id, source_owner_policy_id, source_owner_policy_version,
          team_policy_id, team_policy_version, workspace_policy_id,
-         workspace_policy_version, maximum_fidelity, include_curated_memory,
+         workspace_policy_version, source_capabilities,
+         activation_representation, mode, maximum_fidelity,
+         include_curated_memory,
          fidelity_policy_revision,
          content_policy_version, classifier_version, source_revision,
          creator_authority, granted_by_user_id
        ) values (
          $1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, 1, $11, 1,
+         array['memory_events','lcm_leaves','lcm_rollups']::shared_memory_representation[],
+         $12::shared_memory_representation, 'snapshot',
          'memory_events', false, 1, 1, 1, 7, 'fixture', $3
        ) returning id`,
       [
@@ -446,13 +495,14 @@ describeDb("retention lifecycle repository", () => {
         replica.rows[0]!.id,
         fixture.userId,
         ownerPrincipalId,
-        session.rows[0]!.id,
+        sourceRevisionId,
         fixture.teamId,
         fixture.teamWorkspaceId,
         consent.rows[0]!.id,
         sourceOwnerPolicyId,
         teamPolicyId,
-        workspacePolicyId
+        workspacePolicyId,
+        requestedRepresentation
       ]
     );
     const representation = await pool.query<{ id: string }>(
@@ -461,7 +511,7 @@ describeDb("retention lifecycle repository", () => {
          sanitized_source_preview_id, privacy_classifier_generation_id,
          privacy_classifier_hash, effective_privacy_policy_hash,
          source_manifest_hash, sanitized_content_hash, team_id, team_workspace_id,
-         logical_memory_id, representation, source_revision,
+         logical_memory_id, source_revision_id, representation, source_revision,
          source_revision_hash, provenance_hash, source_owner_policy_id,
          source_owner_policy_version, team_policy_id, team_policy_version,
          workspace_policy_id, workspace_policy_version,
@@ -469,7 +519,7 @@ describeDb("retention lifecycle repository", () => {
          classifier_version
        ) values (
          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-         $19::shared_memory_representation, 7, $14, $15, $16, 1, $17, 1,
+         $20, $19::shared_memory_representation, 7, $14, $15, $16, 1, $17, 1,
          $18, 1, 1, 1, 1
        ) returning id`,
       [
@@ -491,7 +541,8 @@ describeDb("retention lifecycle repository", () => {
         sourceOwnerPolicyId,
         teamPolicyId,
         workspacePolicyId,
-        requestedRepresentation
+        requestedRepresentation,
+        sourceRevisionId
       ]
     );
     await pool.query(
@@ -639,34 +690,44 @@ describeDb("retention lifecycle repository", () => {
       [randomUUID(), `Retention Remote ${randomUUID()}`]
     );
     const logicalMemory = await pool.query<{ id: string }>(
-      `insert into logical_memories (
-         owner_user_id, owner_principal_id, origin_deployment_identity_id,
-         source_boundary, origin_source_id, local_session_id, logical_key
-       ) values ($1, $2, $3, 'captured_session', $4, $5, $6) returning id`,
+      `with logical_memory as (
+         insert into logical_memories (
+           owner_user_id,owner_principal_id,origin_deployment_identity_id,
+           source_kind,logical_key
+         ) values ($1,$2,$3,'captured_session',$4)
+         returning id
+       ), protocol_binding as (
+         insert into captured_session_logical_memories (
+           logical_memory_id,source_session_id,owner_principal_id
+         ) select id,$5,$2 from logical_memory
+       ), local_binding as (
+         insert into local_captured_session_logical_memories (
+           logical_memory_id,local_session_id,owner_user_id
+         ) select id,$5,$1 from logical_memory
+       )
+       select id from logical_memory`,
       [
         fixture.userId,
         ownerPrincipalId,
         deployment.rows[0]!.id,
-        `retention-source-${randomUUID()}`,
-        session.rows[0]!.id,
-        `retention-logical-${randomUUID()}`
+        `retention-logical-${randomUUID()}`,
+        session.rows[0]!.id
       ]
     );
     const replica = await pool.query<{ id: string }>(
       `insert into memory_replicas (
          logical_memory_id, deployment_identity_id, owner_user_id,
-         owner_principal_id, replica_role, source_boundary, local_session_id,
+         owner_principal_id, replica_role, source_boundary,
          encryption_scope, freshness_status
        ) values (
-         $1, $2, $3, $4, 'target', 'captured_session', $5,
+         $1, $2, $3, $4, 'target', 'captured_session',
          'owner_private_replica', 'fresh'
        ) returning id`,
       [
         logicalMemory.rows[0]!.id,
         deployment.rows[0]!.id,
         fixture.userId,
-        ownerPrincipalId,
-        session.rows[0]!.id
+        ownerPrincipalId
       ]
     );
     const remoteIdentity = await pool.query<{ id: string }>(
@@ -2049,7 +2110,7 @@ describeDb("retention lifecycle repository", () => {
          (select count(*) from team_memberships
            where user_id=$1 and status='enabled') as memberships_enabled,
          (select lifecycle from memory_replicas where id=$2) as replica_lifecycle,
-         (select count(*) from team_session_share_grants where id=$3) as team_grants,
+         (select count(*) from team_memory_share_grants where id=$3) as team_grants,
          (select count(*) from team_memory_representation_chunks
            where share_grant_id=$3) as team_chunks
        from users user_row where user_row.id=$1`,
@@ -2085,7 +2146,7 @@ describeDb("retention lifecycle repository", () => {
       pool.query(
         `select
            (select lifecycle from memory_replicas where id=$1) as replica_lifecycle,
-           (select count(*) from team_session_share_grants where id=$2) as team_grants,
+           (select count(*) from team_memory_share_grants where id=$2) as team_grants,
            (select count(*) from team_memory_representation_chunks
              where share_grant_id=$2) as team_chunks,
            (select count(*) from audit_events
@@ -2204,7 +2265,7 @@ describeDb("retention lifecycle repository", () => {
          (select state from cross_identity_sync_relationships where id = $3) as target_relationship_state,
          (select lifecycle from memory_replicas where id = $4) as target_replica_lifecycle,
          (select lifecycle from logical_memories where id = $5) as target_logical_lifecycle,
-         (select count(*) from team_session_share_grants where id = $6) as team_grants,
+         (select count(*) from team_memory_share_grants where id = $6) as team_grants,
          (select count(*) from team_memory_representation_chunks where share_grant_id = $6) as team_chunks,
          (select count(*) from shared_source_artifacts where id = $9) as team_source_artifacts,
          (select count(*) from sync_recipient_keys where deployment_identity_id = $10) as recipient_keys,
@@ -2855,7 +2916,7 @@ describeDb("retention lifecycle repository", () => {
         )
       ).toBe(true);
       await client.query(
-        `update team_session_share_grants
+        `update team_memory_share_grants
             set lifecycle='revoked', revoked_at=$2, revocation_epoch=1
           where id=$1`,
         [sharedMemory.shareGrantId, now]

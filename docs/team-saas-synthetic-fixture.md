@@ -78,6 +78,36 @@ valid Argon2 password hash on a fixture User so a locally configured browser
 login continues to work across reseeds; otherwise password login fails with
 invalid credentials.
 
+For manual Desktop enrollment, provision a disposable fixture User password
+through the same production Argon2id hashing path used by `/auth/register` and
+`/auth/login`, then verify login before opening the enrollment URL. Do not add a
+fixed fixture password to this document, the seed, committed configuration, or
+test output.
+
+An isolated developer fixture API used as a Team backend must start with
+`KOED_DEVELOPER_TEAM_BACKEND_ENABLED=true` and advertise partial or available
+Team capabilities. Its browser public URL and CORS origin must exactly match
+the origin registered in Desktop. When starting `apps/api` directly, use the
+API process variables `BROWSER_PUBLIC_URL`, `CORS_ORIGINS`, and
+`COOKIE_SECURE`; `API_BROWSER_PUBLIC_URL`, `API_CORS_ORIGINS`, and
+`API_COOKIE_SECURE` are supervisor inputs. Keep the fixture backend on a
+dedicated initialized `KOED_HOME` so its verified deployment identity remains
+bound to the fixture database.
+
+For a disposable WSL fixture opened by a Windows browser, use the loopback
+hostname that the browser actually receives as `BROWSER_PUBLIC_URL` and allow
+both `http://localhost:<port>` and `http://127.0.0.1:<port>` in
+`CORS_ORIGINS`. Verify login with an `Origin` header matching the browser URL;
+a command-line login without `Origin` does not prove the browser-origin check.
+
+The fixture API and Worker must use the same `DATABASE_URL`, queue backend,
+application and Team encryption-provider lineage, and Privacy Filter Service.
+When starting `apps/worker` directly, set `PRIVACY_SERVICE_URL` and
+`PRIVACY_SERVICE_TOKEN`; `PRIVACY_SERVICE_HOST` and `PRIVACY_SERVICE_PORT`
+alone do not enable privacy materialization in the Worker. A Share accepted by
+the API can otherwise remain in `privacy_filtering` even though the standalone
+Privacy Filter Service is healthy.
+
 Do not publish or copy fixed fixture cookie values into documentation, issue
 comments, shared chat, or committed config. The command profile guard rejects
 shared deployment profiles; do not bypass it or seed the fixture into shared,
@@ -132,7 +162,7 @@ fallback.
 
 ## Collaboration Truth Sheet
 
-All six collaboration threads and their messages have deterministic physical
+All five collaboration threads and their messages have deterministic physical
 IDs derived from fixture idempotency keys. Thread names, topics, message bodies,
 metadata, and full provenance values are stored through the production
 encryption path. The collaboration tables retain only required markers,
@@ -140,7 +170,6 @@ authorization/routing IDs, an opaque provenance ID, and outbox routing fields.
 
 | Thread             | Scope                  | Kind                        | Participants/access                                      | Expected history                                          |
 | ------------------ | ---------------------- | --------------------------- | -------------------------------------------------------- | --------------------------------------------------------- |
-| Alice notes        | Personal               | `notes_to_self`             | Alice only                                               | One self message                                          |
 | Release notes      | Personal               | `personal_channel`          | Alice only                                               | One private channel message                               |
 | Product            | Electron Workspace     | `workspace_channel`         | Workspace readers can read; writers can post             | Two messages                                              |
 | Alice/Bob          | Team                   | `dm`                        | Alice and Bob                                            | Two messages                                              |

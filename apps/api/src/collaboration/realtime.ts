@@ -30,6 +30,8 @@ import {
   collaborationThreadSchema,
   COLLABORATION_NAME_MAX_CODE_POINTS,
   personalMemoryEntrySchema,
+  sharedMemoryGrantScopedPrincipalId,
+  sharedMemoryGrantScopedSourceId,
   sharedMemorySessionSchema,
   type CollaborationRendererEvent,
   type PersonalMemoryEntry
@@ -43,6 +45,7 @@ import {
   collaborationRealtimeStreamQuerySchema
 } from "./schemas.js";
 import { publicTeamRosterMember } from "../team/presence.js";
+import { publicCollaborationThread } from "./public-thread.js";
 
 const protocolVersion = collaborationRealtimeProtocolVersion;
 const cursorPrefix = "crt1.";
@@ -220,6 +223,7 @@ const requiredOperationFamiliesForEvent = (
     case "share_grant_lifecycle":
       return ["share_grant_management"];
     case "fidelity_changed":
+    case "source_revision_changed":
     case "memory_event_available":
     case "lcm_leaf_available":
     case "lcm_rollup_available":
@@ -358,9 +362,9 @@ const writeSerializedEvent = (
   serializedPayload: string,
   id?: string
 ) => {
-  if (id) reply.raw.write(`id: ${id}\n`);
-  reply.raw.write(`event: ${event}\n`);
-  reply.raw.write(`data: ${serializedPayload}\n\n`);
+  reply.raw.write(
+    `${id ? `id: ${id}\n` : ""}event: ${event}\ndata: ${serializedPayload}\n\n`
+  );
 };
 
 const writeEvent = (
@@ -588,57 +592,39 @@ const rendererThreadFromRecord = (
   thread: CollaborationThreadRecord,
   user: RealtimeAuth["user"]
 ): RendererUpdate | null => {
+  const publicThread = publicCollaborationThread(thread);
   const base = {
-    id: thread.id,
-    logicalId: thread.logicalId,
-    scope: thread.scope,
-    name: thread.name,
-    topic: thread.topic,
-    version: thread.version,
-    lifecycle: thread.lifecycle,
-    canPost: thread.lifecycle === "active",
-    latestSequence: thread.latestSequence,
-    unreadCount: thread.unreadCount,
-    lastReadMessageId: thread.lastReadMessageId,
-    lastReadSequence: thread.lastReadSequence,
-    createdAt: thread.createdAt,
-    updatedAt: thread.updatedAt,
-    lastActivityAt: thread.lastActivityAt,
-    archivedAt: thread.archivedAt
+    id: publicThread.id,
+    logicalId: publicThread.logicalId,
+    scope: publicThread.scope,
+    name: publicThread.name,
+    topic: publicThread.topic,
+    version: publicThread.version,
+    lifecycle: publicThread.lifecycle,
+    canPost: publicThread.lifecycle === "active",
+    latestSequence: publicThread.latestSequence,
+    unreadCount: publicThread.unreadCount,
+    lastReadMessageId: publicThread.lastReadMessageId,
+    lastReadSequence: publicThread.lastReadSequence,
+    createdAt: publicThread.createdAt,
+    updatedAt: publicThread.updatedAt,
+    lastActivityAt: publicThread.lastActivityAt,
+    archivedAt: publicThread.archivedAt
   };
   let candidate: unknown;
   if (
     thread.scope === "personal" &&
     thread.personalOwnerUserId === user.id &&
-    thread.teamId === null
+    thread.teamId === null &&
+    thread.kind === "personal_channel" &&
+    thread.name
   ) {
-    candidate =
-      thread.kind === "notes_to_self"
-        ? {
-            ...base,
-            kind: "notes_to_self",
-            ownerUserId: user.id,
-            name: null,
-            topic: null,
-            participants: [
-              {
-                id: user.id,
-                displayName: displayName(
-                  user.displayName,
-                  user.email.split("@", 1)[0] || "Koed User"
-                ),
-                membershipState: "enabled"
-              }
-            ]
-          }
-        : thread.kind === "personal_channel" && thread.name
-          ? {
-              ...base,
-              kind: "personal_channel",
-              ownerUserId: user.id,
-              name: thread.name
-            }
-          : null;
+    candidate = {
+      ...base,
+      kind: "personal_channel",
+      ownerUserId: user.id,
+      name: thread.name
+    };
   } else if (thread.scope === "team" && thread.teamId) {
     const teamBase = { ...base, teamId: thread.teamId };
     if (
@@ -662,7 +648,7 @@ const rendererThreadFromRecord = (
         ...teamBase,
         kind: thread.kind,
         workspaceId: thread.teamWorkspaceId,
-        sharedLogicalMemoryId: thread.sharedLogicalMemoryId,
+        sharedLogicalMemoryId: publicThread.sharedLogicalMemoryId,
         shareGrantId: thread.shareGrantId
       };
     } else if (thread.kind === "dm" || thread.kind === "group_dm") {
@@ -847,17 +833,22 @@ const rendererSharedSessionFrom = async (
   )?.find((participant) => participant.userId === ownerId);
   const parsed = sharedMemorySessionSchema.safeParse({
     id: grant.shareGrantId,
-    logicalMemoryId: grant.logicalMemoryId,
+    logicalMemoryId: sharedMemoryGrantScopedSourceId(
+      grant.shareGrantId,
+      grant.logicalMemoryId
+    ),
     shareGrantId: grant.shareGrantId,
     teamId: event.teamId,
     workspaceId: event.teamWorkspaceId,
     owner: {
-      id: ownerId,
+      id: sharedMemoryGrantScopedPrincipalId(grant.shareGrantId, ownerId),
       displayName: displayName(owner?.displayName, "Team member"),
       membershipState: "enabled"
     },
     title: grant.title,
     latestActivityAt: grant.representationUpdatedAt,
+    sourceCapabilities: grant.sourceCapabilities,
+    activationRepresentation: grant.activationRepresentation,
     maximumFidelity: grant.maximumFidelity,
     includeCuratedMemory: grant.includeCuratedMemory,
     liveState: "live",
@@ -1101,6 +1092,7 @@ const materializeEvent = async (
     }
     case "share_grant_lifecycle":
     case "fidelity_changed":
+    case "source_revision_changed":
     case "memory_event_available":
     case "lcm_leaf_available":
     case "lcm_rollup_available": {
@@ -1130,7 +1122,10 @@ const materializeEvent = async (
           return { action: "skip" };
         }
         update = sharedSession;
-      } else if (family === "fidelity_changed") {
+      } else if (
+        family === "fidelity_changed" ||
+        family === "source_revision_changed"
+      ) {
         const sharedSession = grant
           ? await rendererSharedSessionFrom(client, event, grant, repository)
           : null;
@@ -1222,28 +1217,51 @@ const eventEnvelope = (input: {
   cursor: string;
   subscriptionId: string;
   update: RendererUpdate;
-}) => ({
-  protocolVersion,
-  eventId: input.event.id,
-  cursor: input.cursor,
-  type: input.event.family,
-  occurredAt: input.event.occurredAt,
-  subscription: { id: input.subscriptionId },
-  resource: {
-    scope: input.event.scope,
-    type: input.event.resourceType,
-    id: input.event.resourceId,
-    teamId: input.event.teamId,
-    teamWorkspaceId: input.event.teamWorkspaceId,
-    threadId: input.event.threadId,
-    messageId: input.event.messageId,
-    sharedSessionId: input.event.shareGrantId,
-    shareGrantId: input.event.shareGrantId,
-    logicalMemoryId: input.event.logicalMemoryId
-  },
-  actor: { principalId: input.event.actorPrincipalId },
-  update: input.update
-});
+}) => {
+  const grantScopedLogicalMemoryId =
+    input.event.scope === "team" &&
+    input.event.shareGrantId &&
+    input.event.logicalMemoryId
+      ? sharedMemoryGrantScopedSourceId(
+          input.event.shareGrantId,
+          input.event.logicalMemoryId
+        )
+      : input.event.logicalMemoryId;
+  const grantScopedActorPrincipalId =
+    input.event.scope === "team" &&
+    input.event.shareGrantId &&
+    input.event.actorPrincipalId
+      ? sharedMemoryGrantScopedPrincipalId(
+          input.event.shareGrantId,
+          input.event.actorPrincipalId
+        )
+      : input.event.actorPrincipalId;
+  return {
+    protocolVersion,
+    eventId: input.event.id,
+    cursor: input.cursor,
+    type: input.event.family,
+    occurredAt: input.event.occurredAt,
+    subscription: { id: input.subscriptionId },
+    resource: {
+      scope: input.event.scope,
+      type: input.event.resourceType,
+      id:
+        input.event.resourceId === input.event.logicalMemoryId
+          ? grantScopedLogicalMemoryId
+          : input.event.resourceId,
+      teamId: input.event.teamId,
+      teamWorkspaceId: input.event.teamWorkspaceId,
+      threadId: input.event.threadId,
+      messageId: input.event.messageId,
+      sharedSessionId: input.event.shareGrantId,
+      shareGrantId: input.event.shareGrantId,
+      logicalMemoryId: grantScopedLogicalMemoryId
+    },
+    actor: { principalId: grantScopedActorPrincipalId },
+    update: input.update
+  };
+};
 
 const authenticateRealtime = async (
   request: FastifyRequest,
@@ -1824,7 +1842,7 @@ export const createCollaborationRealtimeService = async (
           personalOwnerUserId: snapshot.personalOwnerUserId,
           teamId: snapshot.teamId,
           highWaterCursor: cursor,
-          threads: snapshot.threads
+          threads: snapshot.threads.map(publicCollaborationThread)
         },
         cursor
       };

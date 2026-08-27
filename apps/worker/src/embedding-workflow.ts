@@ -5,7 +5,8 @@ import type {
 } from "@koed/db";
 import {
   fetchBoundedJsonObject,
-  teamSemanticEmbeddingGeneration
+  teamSemanticEmbeddingGeneration,
+  type KoedWorkClass
 } from "@koed/shared";
 import { Agent } from "undici";
 import type { WorkerEnvConfig } from "./env-config.js";
@@ -30,7 +31,8 @@ export interface EmbeddingResponse {
 export interface EmbeddingWorkflow {
   embedSource(
     sourceType: EmbeddableSourceType,
-    sourceId: string
+    sourceId: string,
+    workClass?: KoedWorkClass
   ): Promise<
     | { skipped: true; reason: string }
     | {
@@ -70,15 +72,15 @@ export type EmbeddingWorkflowEnv = Pick<
   | "managedConversationApiUrl"
   | "managedConversationApiToken"
 >;
-
 interface EmbeddingWorkflowConfig {
-  env: EmbeddingWorkflowEnv;
+  env: WorkerEnvConfig;
   fetchFn?: typeof fetch;
   repository: () => MemorySourceRepository;
 }
 
 const EMBEDDING_SOURCE_LOOKUP_CONCURRENCY = 32;
 const EMBEDDING_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
+const BACKGROUND_EMBEDDING_MAX_REQUEST_CHARACTERS = 4_096;
 
 interface EmbeddingTransportSegment {
   sourceIndex: number;
@@ -195,12 +197,13 @@ const parseEmbeddingResponse = (
 };
 
 const embeddingServiceHeaders = (
-  env: EmbeddingWorkflowEnv
+  env: WorkerEnvConfig,
+  priority: "interactive" | "background" = "background"
 ): Record<string, string> => ({
   ...(env.embeddingServiceToken
     ? { "x-koed-embedding-token": env.embeddingServiceToken }
     : {}),
-  "x-koed-embedding-priority": "background"
+  "x-koed-embedding-priority": priority
 });
 
 class EmbeddingTransportError extends Error {
@@ -275,9 +278,10 @@ const splitEmbeddingText = (
 export const embedTexts = async (
   texts: string[],
   config: {
-    env: EmbeddingWorkflowEnv;
+    env: WorkerEnvConfig;
     fetchFn: typeof fetch;
     dispatcher: Agent;
+    priority?: "interactive" | "background";
   }
 ): Promise<EmbeddingResponse> => {
   const preparedTexts = texts.map((text) => text.trim());
@@ -289,7 +293,7 @@ export const embedTexts = async (
     method: "POST",
     headers: {
       "content-type": "application/json",
-      ...embeddingServiceHeaders(config.env)
+      ...embeddingServiceHeaders(config.env, config.priority)
     },
     body: JSON.stringify({ texts: preparedTexts }),
     dispatcher: config.dispatcher
@@ -439,10 +443,20 @@ export const createEmbeddingWorkflow = (
     throw new Error("Personal semantic authority response is invalid");
   };
 
-  const storeEmbeddings = async (sources: EmbeddableSourceRecord[]) => {
+  const storeEmbeddings = async (
+    sources: EmbeddableSourceRecord[],
+    priority: "interactive" | "background" = "background"
+  ) => {
+    const maxRequestCharacters =
+      priority === "background"
+        ? Math.min(
+            config.env.embeddingMaxRequestChars,
+            BACKGROUND_EMBEDDING_MAX_REQUEST_CHARACTERS
+          )
+        : config.env.embeddingMaxRequestChars;
     const maxSegmentCharacters = Math.min(
       config.env.embeddingMaxTextChars,
-      config.env.embeddingMaxRequestChars
+      maxRequestCharacters
     );
     const transportSegments = sources.flatMap((source, sourceIndex) =>
       splitEmbeddingText(source.text, maxSegmentCharacters).map(
@@ -468,8 +482,7 @@ export const createEmbeddingWorkflow = (
         const candidate = transportSegments[offset]!;
         if (
           requestSegments.length > 0 &&
-          requestCharacters + candidate.characterCount >
-            config.env.embeddingMaxRequestChars
+          requestCharacters + candidate.characterCount > maxRequestCharacters
         ) {
           break;
         }
@@ -482,7 +495,8 @@ export const createEmbeddingWorkflow = (
         {
           env: config.env,
           fetchFn,
-          dispatcher
+          dispatcher,
+          priority
         }
       );
       const requestSourceIndexes = new Set(
@@ -570,8 +584,11 @@ export const createEmbeddingWorkflow = (
     return currentChunkCount === null ? source : null;
   };
 
-  const storeEmbedding = async (source: EmbeddableSourceRecord) => {
-    const [stored] = await storeEmbeddings([source]);
+  const storeEmbedding = async (
+    source: EmbeddableSourceRecord,
+    priority: "interactive" | "background"
+  ) => {
+    const [stored] = await storeEmbeddings([source], priority);
     if (!stored) {
       throw new Error("embedding service returned no chunks for source");
     }
@@ -807,7 +824,7 @@ export const createEmbeddingWorkflow = (
         offset += batch.length;
       }
     },
-    async embedSource(sourceType, sourceId) {
+    async embedSource(sourceType, sourceId, workClass) {
       const source = await config
         .repository()
         .getEmbeddableSource(sourceType, sourceId);
@@ -849,7 +866,12 @@ export const createEmbeddingWorkflow = (
           chunks: importedChunkCount
         };
       }
-      const stored = await storeEmbedding(source);
+      const stored = await storeEmbedding(
+        source,
+        workClass === "interactive_recall_question"
+          ? "interactive"
+          : "background"
+      );
       return {
         dimensions: config.env.embeddingDimensions,
         inserted: stored.inserted,

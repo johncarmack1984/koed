@@ -5,12 +5,18 @@ import type {
   CollaborationMessageRecord,
   CollaborationRepository,
   CollaborationThreadRecord,
-  CreateCollaborationThreadInput
+  CreateCollaborationThreadInput,
+  MemorySourceRepository,
+  PersonalNoteRecord
 } from "@koed/db";
 import {
   CollaborationIdempotencyConflictError,
   CollaborationVersionConflictError
 } from "@koed/db";
+import {
+  sharedMemoryGrantScopedPrincipalId,
+  sharedMemoryGrantScopedSourceId
+} from "@koed/shared";
 import Fastify, { type FastifyRequest } from "fastify";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -44,7 +50,10 @@ const createCollaborationFixture = () => {
     teamA: randomUUID(),
     teamB: randomUUID(),
     workspaceA: randomUUID(),
-    workspaceB: randomUUID()
+    workspaceB: randomUUID(),
+    deployment: randomUUID(),
+    logicalMemory: randomUUID(),
+    shareGrant: randomUUID()
   };
   const users = new Map<string, FixtureUser>([
     [
@@ -96,6 +105,9 @@ const createCollaborationFixture = () => {
   ]);
   const threads = new Map<string, CollaborationThreadRecord>();
   const messages = new Map<string, CollaborationMessageRecord[]>();
+  const notes = new Map<string, PersonalNoteRecord>();
+  const noteOwners = new Map<string, string>();
+  const noteRequests = new Map<string, { body: string; noteId: string }>();
   const threadRequests = new Map<
     string,
     { request: string; threadId: string }
@@ -106,6 +118,7 @@ const createCollaborationFixture = () => {
   >();
   let storedThreadCount = 0;
   let storedMessageCount = 0;
+  let storedNoteCount = 0;
 
   const participant = (userId: string) => ({
     userId,
@@ -167,6 +180,14 @@ const createCollaborationFixture = () => {
     teamId: ids.teamA,
     teamWorkspaceId: ids.workspaceA,
     name: "Workspace A"
+  });
+  const sharedSessionThread = newThread({
+    kind: "shared_session_discussion",
+    actorUserId: ids.alice,
+    teamId: ids.teamA,
+    teamWorkspaceId: ids.workspaceA,
+    sharedLogicalMemoryId: ids.logicalMemory,
+    shareGrantId: ids.shareGrant
   });
 
   const teamMember = (userId: string, teamId: string): boolean =>
@@ -236,14 +257,7 @@ const createCollaborationFixture = () => {
     }
 
     let thread: CollaborationThreadRecord;
-    if (input.kind === "notes_to_self") {
-      thread = newThread({
-        kind: input.kind,
-        actorUserId: actor.userId,
-        personalOwnerUserId: actor.userId,
-        participantUserIds: [actor.userId]
-      });
-    } else if (input.kind === "personal_channel") {
+    if (input.kind === "personal_channel") {
       thread = newThread({
         kind: input.kind,
         actorUserId: actor.userId,
@@ -293,7 +307,21 @@ const createCollaborationFixture = () => {
     return thread;
   };
 
-  const repository: CollaborationRepository = {
+  const repository: CollaborationRepository &
+    Pick<
+      MemorySourceRepository,
+      "getPersonalNoteMemoryEvent" | "getLocalSyncDeployment"
+    > = {
+    async getLocalSyncDeployment() {
+      return {
+        id: ids.deployment,
+        protocolDeploymentId: ids.deployment,
+        locality: "local",
+        profile: "local_personal",
+        baseUrl: null,
+        upstreamBackendId: null
+      };
+    },
     async listTeamParticipants(actor, teamId) {
       if (!teamMember(actor.userId, teamId)) return null;
       return [...users.values()]
@@ -451,6 +479,151 @@ const createCollaborationFixture = () => {
         nextAfterSequence: selected[selected.length - 1]?.threadSequence ?? null
       };
     },
+    async listPersonalNotes(actor, input = {}) {
+      const selected = [...notes.values()]
+        .filter((note) => noteOwners.get(note.noteId) === actor.userId)
+        .filter(
+          (note) =>
+            input.beforeSequence === undefined ||
+            note.sourceSequence < input.beforeSequence
+        )
+        .sort((left, right) => right.sourceSequence - left.sourceSequence)
+        .slice(0, input.limit ?? 50);
+      return {
+        notes: selected,
+        nextBeforeSequence: null
+      };
+    },
+    async getPersonalNote(actor, input) {
+      const note = notes.get(input.noteId);
+      return note && noteOwners.get(note.noteId) === actor.userId ? note : null;
+    },
+    async createPersonalNote(actor, input) {
+      const requestKey = `${actor.userId}:${input.idempotencyKey}`;
+      const existing = noteRequests.get(requestKey);
+      if (existing) {
+        if (existing.body !== input.body) {
+          throw new CollaborationIdempotencyConflictError();
+        }
+        return notes.get(existing.noteId)!;
+      }
+      storedNoteCount += 1;
+      const noteId = randomUUID();
+      const note: PersonalNoteRecord = {
+        noteId,
+        logicalMemoryId: randomUUID(),
+        title: input.body.split(/\r?\n/u)[0]!,
+        titleVersion: 1,
+        body: input.body,
+        revisionId: randomUUID(),
+        revision: 1,
+        contentHash: "a".repeat(64),
+        memoryEventId: null,
+        projectionState: "pending",
+        projectionFailureCode: null,
+        createdAt: iso,
+        updatedAt: iso,
+        sourceSequence: storedNoteCount
+      };
+      notes.set(noteId, note);
+      noteOwners.set(noteId, actor.userId);
+      noteRequests.set(requestKey, { body: input.body, noteId });
+      return note;
+    },
+    async renamePersonalNote(actor, input) {
+      const note = await this.getPersonalNote(actor, { noteId: input.noteId });
+      if (!note) return null;
+      if (note.titleVersion !== input.expectedTitleVersion) {
+        throw new CollaborationVersionConflictError();
+      }
+      const renamed = {
+        ...note,
+        title: input.title,
+        titleVersion: note.titleVersion + 1
+      };
+      notes.set(note.noteId, renamed);
+      return renamed;
+    },
+    async updatePersonalNoteBody(actor, input) {
+      const note = await this.getPersonalNote(actor, { noteId: input.noteId });
+      if (!note) return null;
+      if (note.revision !== input.expectedRevision) {
+        throw new CollaborationVersionConflictError();
+      }
+      const updated: PersonalNoteRecord = {
+        ...note,
+        body: input.body,
+        revisionId: randomUUID(),
+        revision: note.revision + 1,
+        contentHash: "b".repeat(64),
+        memoryEventId: null,
+        projectionState: "pending",
+        updatedAt: iso
+      };
+      notes.set(note.noteId, updated);
+      return updated;
+    },
+    async listPendingPersonalNoteRevisions() {
+      return [...notes.values()]
+        .filter((note) => note.projectionState !== "available")
+        .map((note) => ({
+          ownerUserId: noteOwners.get(note.noteId)!,
+          noteId: note.noteId,
+          revision: note.revision
+        }));
+    },
+    async markPersonalNoteProjectionAvailable(actor, input) {
+      const note = await this.getPersonalNote(actor, { noteId: input.noteId });
+      if (!note || note.revision !== input.revision) return null;
+      const projected: PersonalNoteRecord = {
+        ...note,
+        memoryEventId: input.memoryEventId,
+        projectionState: "available",
+        projectionFailureCode: null
+      };
+      notes.set(note.noteId, projected);
+      return projected;
+    },
+    async markPersonalNoteProjectionFailed(actor, input) {
+      const note = await this.getPersonalNote(actor, { noteId: input.noteId });
+      if (!note || note.revision !== input.revision) return;
+      notes.set(note.noteId, {
+        ...note,
+        projectionState: "failed",
+        projectionFailureCode: input.failureCode
+      });
+    },
+    async getPersonalNoteMemoryEvent(actor, noteId) {
+      const note = await this.getPersonalNote(actor, { noteId });
+      return note?.memoryEventId
+        ? {
+            id: note.memoryEventId,
+            actor: "user",
+            eventType: "personal_note_revision",
+            sourceRuntime: null,
+            captureMethod: "api",
+            model: null,
+            projectId: null,
+            projectName: null,
+            projectPath: null,
+            sessionId: null,
+            threadId: null,
+            threadName: null,
+            timestamp: note.createdAt,
+            sourceEventTime: note.createdAt,
+            sourceSequence: note.sourceSequence,
+            capturedAt: note.createdAt,
+            createdAt: note.createdAt,
+            visibility: "personal",
+            invalidatedAt: null,
+            invalidationReason: null,
+            contentPreview: note.body,
+            content: note.body,
+            metadata: {},
+            linkedNodeIds: []
+          }
+        : null;
+    },
     async advanceReadState(actor, input) {
       if (!authorizedThread(actor, input.threadId, "read", true)) return null;
       const message = messages
@@ -520,6 +693,7 @@ const createCollaborationFixture = () => {
     repository,
     personalThread,
     workspaceThread,
+    sharedSessionThread,
     stats: {
       get storedThreadCount() {
         return storedThreadCount;
@@ -533,7 +707,11 @@ const createCollaborationFixture = () => {
 
 const buildTestServer = async (
   fixture: ReturnType<typeof createCollaborationFixture>,
-  admission?: CollaborationAdmissionController
+  admission?: CollaborationAdmissionController,
+  projectPersonalNote: (input: {
+    ownerUserId: string;
+    note: PersonalNoteRecord;
+  }) => Promise<void> = async () => undefined
 ) => {
   const app = Fastify({ logger: false });
   await app.register(cookie);
@@ -570,6 +748,64 @@ const buildTestServer = async (
   };
   registerCollaborationRoutes(app, {
     requireCollaborationRepository: () => fixture.repository,
+    requireSharedMemoryRepository: () => ({
+      async listWorkspaceGrants(_actor, input) {
+        const available =
+          input.teamId === fixture.ids.teamA &&
+          input.teamWorkspaceId === fixture.ids.workspaceA &&
+          input.offset === 0;
+        return {
+          entries: available
+            ? [
+                {
+                  shareGrantId: fixture.ids.shareGrant,
+                  logicalMemoryId: fixture.ids.logicalMemory,
+                  ownerUserId: fixture.ids.alice,
+                  ownerDisplayName: "Alice",
+                  sourceCapabilities: ["memory_events" as const],
+                  activationRepresentation: "memory_events" as const,
+                  maximumFidelity: "memory_events" as const,
+                  includeCuratedMemory: false,
+                  title: "Shared session",
+                  activeRepresentation: "memory_events" as const,
+                  representationState: "available" as const,
+                  representationSourceRevision: 1,
+                  representationUpdatedAt: iso,
+                  freshness: "fresh" as const,
+                  lifecycle: "active" as const,
+                  createdAt: iso,
+                  updatedAt: iso,
+                  companionScope: {
+                    scope: "team" as const,
+                    kind: "shared_session_discussion" as const,
+                    teamId: fixture.ids.teamA,
+                    teamWorkspaceId: fixture.ids.workspaceA,
+                    logicalMemoryId: fixture.ids.logicalMemory,
+                    shareGrantId: fixture.ids.shareGrant
+                  }
+                }
+              ]
+            : [],
+          limit: input.limit,
+          offset: input.offset,
+          hasMore: false
+        };
+      }
+    }),
+    projectPersonalNote,
+    authenticateApiToken: async (request) => {
+      const authorization = request.headers.authorization?.trim() ?? "";
+      const user =
+        authorization === "Bearer personal-api-token"
+          ? fixture.users.get(fixture.ids.alice)
+          : null;
+      if (!user) {
+        throw Object.assign(new Error("Invalid API token"), {
+          statusCode: 401
+        });
+      }
+      return user;
+    },
     authenticateSessionOrDeviceCredential: async (
       request,
       operationFamily,
@@ -635,6 +871,167 @@ const deviceHeaders = (
 });
 
 describe("collaboration HTTP routes", () => {
+  it("projects committed Personal Notes without projecting channel messages", async () => {
+    const fixture = createCollaborationFixture();
+    const projected: Array<{
+      ownerUserId: string;
+      note: PersonalNoteRecord;
+    }> = [];
+    const app = await buildTestServer(fixture, undefined, async (input) => {
+      projected.push(input);
+    });
+    const noteResponse = await app.inject({
+      method: "POST",
+      url: "/v1/collaboration/personal/notes",
+      headers: sessionHeaders(fixture.ids.alice, {
+        "idempotency-key": "note-message"
+      }),
+      payload: { bodyText: "The launch date is September 14." }
+    });
+    expect(noteResponse.statusCode).toBe(201);
+    expect(projected).toEqual([
+      expect.objectContaining({
+        ownerUserId: fixture.ids.alice,
+        note: expect.objectContaining({
+          body: "The launch date is September 14.",
+          revision: 1,
+          projectionState: "pending"
+        })
+      })
+    ]);
+
+    const channelResponse = await app.inject({
+      method: "POST",
+      url: `/v1/collaboration/personal/threads/${fixture.personalThread.id}/messages`,
+      headers: sessionHeaders(fixture.ids.alice, {
+        "idempotency-key": "personal-channel-message"
+      }),
+      payload: {
+        bodyText: "This Personal channel message stays collaboration-only."
+      }
+    });
+    expect(channelResponse.statusCode).toBe(201);
+    expect(projected).toHaveLength(1);
+
+    await app.close();
+  });
+
+  it("lists, loads, and renames only the owner's bound Personal Notes", async () => {
+    const fixture = createCollaborationFixture();
+    const projectPersonalNote = vi.fn(async () => undefined);
+    const app = await buildTestServer(fixture, undefined, projectPersonalNote);
+    const note = await fixture.repository.createPersonalNote(
+      { userId: fixture.ids.alice },
+      {
+        idempotencyKey: "fixed-note-message",
+        body: "Launch decision\nShip on Friday."
+      }
+    );
+
+    const list = await app.inject({
+      method: "GET",
+      url: "/v1/collaboration/personal/notes?limit=50",
+      headers: { authorization: "Bearer personal-api-token" }
+    });
+    expect(list.statusCode).toBe(200);
+    expect(projectPersonalNote).not.toHaveBeenCalled();
+    expect(
+      jsonBody<{ notes: Array<Record<string, unknown>> }>(list).notes[0]
+    ).toMatchObject({
+      noteId: note.noteId,
+      title: "Launch decision",
+      titleVersion: 1,
+      revision: 1,
+      memoryEventId: null,
+      projectionState: "pending"
+    });
+    expect(
+      jsonBody<{ notes: Array<Record<string, unknown>> }>(list).notes[0]
+    ).not.toHaveProperty("logicalMemoryId");
+
+    const exact = await app.inject({
+      method: "GET",
+      url: `/v1/collaboration/personal/notes/${note.noteId}`,
+      headers: { authorization: "Bearer personal-api-token" }
+    });
+    expect(exact.statusCode).toBe(200);
+    expect(
+      jsonBody<{ note: { body: string; event: null } }>(exact).note.body
+    ).toBe("Launch decision\nShip on Friday.");
+    expect(jsonBody<{ note: { event: null } }>(exact).note.event).toBeNull();
+
+    const renamed = await app.inject({
+      method: "PATCH",
+      url: `/v1/collaboration/personal/notes/${note.noteId}/title`,
+      headers: { authorization: "Bearer personal-api-token" },
+      payload: { expectedTitleVersion: 1, title: "Friday launch" }
+    });
+    expect(renamed.statusCode).toBe(200);
+    expect(
+      jsonBody<{ note: Record<string, unknown> }>(renamed).note
+    ).toMatchObject({ title: "Friday launch", titleVersion: 2 });
+
+    const outsider = await app.inject({
+      method: "GET",
+      url: `/v1/collaboration/personal/notes/${note.noteId}`,
+      headers: sessionHeaders(fixture.ids.bob)
+    });
+    expect(outsider.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("creates a Personal Note through the owner-scoped Notes route", async () => {
+    const fixture = createCollaborationFixture();
+    const projected: Array<{
+      ownerUserId: string;
+      note: PersonalNoteRecord;
+    }> = [];
+    const app = await buildTestServer(fixture, undefined, async (input) => {
+      projected.push(input);
+    });
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/collaboration/personal/notes",
+      headers: {
+        authorization: "Bearer personal-api-token",
+        "idempotency-key": "desktop-note-create"
+      },
+      payload: { bodyText: "Local note\nSaved in Personal Memory." }
+    });
+
+    expect(created.statusCode, created.body).toBe(201);
+    expect(
+      jsonBody<{ note: Record<string, unknown> }>(created).note
+    ).toMatchObject({
+      title: "Local note",
+      titleVersion: 1,
+      revision: 1,
+      memoryEventId: null,
+      projectionState: "pending",
+      body: "Local note\nSaved in Personal Memory.",
+      event: null
+    });
+    expect(projected).toEqual([
+      expect.objectContaining({
+        ownerUserId: fixture.ids.alice,
+        note: expect.objectContaining({
+          body: "Local note\nSaved in Personal Memory.",
+          revision: 1
+        })
+      })
+    ]);
+
+    const listed = await app.inject({
+      method: "GET",
+      url: "/v1/collaboration/personal/notes?limit=50",
+      headers: { authorization: "Bearer personal-api-token" }
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(jsonBody<{ notes: unknown[] }>(listed).notes).toHaveLength(1);
+    await app.close();
+  });
+
   it("requires a session and fails closed for API Tokens", async () => {
     const fixture = createCollaborationFixture();
     const app = await buildTestServer(fixture);
@@ -735,6 +1132,69 @@ describe("collaboration HTTP routes", () => {
         })
       ).statusCode
     ).toBe(403);
+
+    await app.close();
+  });
+
+  it("uses grant-scoped Shared Session identifiers at the Team collaboration boundary", async () => {
+    const fixture = createCollaborationFixture();
+    const app = await buildTestServer(fixture);
+    const publicLogicalMemoryId = sharedMemoryGrantScopedSourceId(
+      fixture.ids.shareGrant,
+      fixture.ids.logicalMemory
+    );
+
+    const listed = await app.inject({
+      method: "GET",
+      url: `/v1/collaboration/teams/${fixture.ids.teamA}/threads`,
+      headers: sessionHeaders(fixture.ids.alice)
+    });
+    expect(listed.statusCode, listed.body).toBe(200);
+    const listedThread = jsonBody<{ threads: CollaborationThreadRecord[] }>(
+      listed
+    ).threads.find((thread) => thread.id === fixture.sharedSessionThread.id);
+    expect(listedThread?.sharedLogicalMemoryId).toBe(publicLogicalMemoryId);
+    expect(listedThread?.createdByUserId).toBe(
+      sharedMemoryGrantScopedPrincipalId(
+        fixture.ids.shareGrant,
+        fixture.ids.alice
+      )
+    );
+    expect(listed.body).not.toContain(fixture.ids.logicalMemory);
+
+    const detail = await app.inject({
+      method: "GET",
+      url: `/v1/collaboration/teams/${fixture.ids.teamA}/threads/${fixture.sharedSessionThread.id}`,
+      headers: sessionHeaders(fixture.ids.alice)
+    });
+    expect(detail.statusCode, detail.body).toBe(200);
+    expect(detail.body).not.toContain(fixture.ids.alice);
+
+    const created = await app.inject({
+      method: "POST",
+      url: `/v1/collaboration/teams/${fixture.ids.teamA}/workspaces/${fixture.ids.workspaceA}/shared-sessions/${publicLogicalMemoryId}/discussion`,
+      headers: sessionHeaders(fixture.ids.alice, {
+        "idempotency-key": "scoped-shared-session-discussion"
+      }),
+      payload: { shareGrantId: fixture.ids.shareGrant }
+    });
+    expect(created.statusCode, created.body).toBe(201);
+    expect(
+      jsonBody<{ thread: CollaborationThreadRecord }>(created).thread
+        .sharedLogicalMemoryId
+    ).toBe(publicLogicalMemoryId);
+    expect(created.body).not.toContain(fixture.ids.logicalMemory);
+    expect(created.body).not.toContain(fixture.ids.alice);
+
+    const wrongGrant = await app.inject({
+      method: "POST",
+      url: `/v1/collaboration/teams/${fixture.ids.teamA}/workspaces/${fixture.ids.workspaceA}/shared-sessions/${publicLogicalMemoryId}/discussion`,
+      headers: sessionHeaders(fixture.ids.alice, {
+        "idempotency-key": "wrong-scoped-shared-session-discussion"
+      }),
+      payload: { shareGrantId: randomUUID() }
+    });
+    expect(wrongGrant.statusCode).toBe(403);
 
     await app.close();
   });

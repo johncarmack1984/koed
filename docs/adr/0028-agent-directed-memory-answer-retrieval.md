@@ -76,12 +76,14 @@ regrant. The frozen set is capped at 128 Share Grants; larger runs must narrow
 their scope rather than silently truncating authority.
 
 Before starting the local Memory Answer worker, the MCP Server runs a bounded
-scripted first pass through the existing authorized retrieval path. Independent
-semantic queries run concurrently, share one budget, preserve individual
-failures, and produce deterministic candidate ordering. The first-pass result
-and a compact retrieval summary are supplied to the worker, which may answer
-immediately, run more semantic searches, inspect exact terms within already
-authorized candidates, or expand selected evidence.
+scripted first pass through the existing authorized retrieval path. A global
+Personal question without retrieval hints uses one hydrated search across all
+stages. This path creates one query embedding. When the caller supplies hints,
+independent semantic queries run concurrently. They share one budget, preserve
+individual failures, and produce deterministic candidate ordering. The
+first-pass result and a compact retrieval summary are supplied to the worker.
+The worker may answer, run more searches, inspect exact terms in authorized
+candidates, or expand selected evidence.
 
 Production candidate generation remains semantic. Koed does not add a BM25,
 per-row keyword, keyed lexical, or other lexical database index, and Memory
@@ -123,6 +125,14 @@ effective-boundary metadata, searches, candidate and selection identities,
 budgets, failures, timings, and model metadata. The trace is deterministically
 truncated to at most 32,768 UTF-8 bytes. Ordinary logs and diagnostics retain
 only redacted identifiers, counts, durations, statuses, and error classes.
+
+When the AI Client worker cannot produce a reliable Memory Answer, it returns
+a display-safe explanation for the applicable failure class, such as an
+exhausted budget, incomplete retrieval, unverifiable evidence, timeout, or
+invalid output. Desktop Ask persists and renders that explanation instead of
+the internal provider failure code. Raw worker and process diagnostics remain
+inside the bounded internal trace and do not cross the public response-detail
+boundary.
 
 The same controller and worker flow serves Personal and Team recall. Team
 Membership, Workspace Access, Share Grants, the maximum-fidelity ceiling and

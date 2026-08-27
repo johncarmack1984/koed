@@ -2,8 +2,7 @@ import type {
   MemorySourceRepository,
   SharedMemoryFidelityChangeReviewRecord,
   SharedMemoryPendingShareReviewRecord,
-  SharedMemoryRevokeReviewRecord,
-  SharedMemoryShareReviewRecord
+  SharedMemoryRevokeReviewRecord
 } from "@koed/db";
 import {
   sharedMemoryFidelityBundleActionGrantBinding,
@@ -11,7 +10,6 @@ import {
   sharedMemoryCandidatePreviewActionGrantBinding,
   sharedMemoryPendingShareActionGrantBinding,
   sharedMemoryRevokeActionGrantBinding,
-  sharedMemoryShareBundleActionGrantBinding,
   sharedMemoryTranscriptAccessActionGrantBinding,
   sharedMemoryTranscriptRevokeActionGrantBinding,
   type SharedMemoryRepresentation,
@@ -33,7 +31,6 @@ type SharedMemoryAction =
   | "shared_memory.candidate_preview"
   | "shared_memory.pending_share"
   | "shared_memory.preview"
-  | "shared_memory.share"
   | "shared_memory.revoke"
   | "shared_memory.conversation_source_grant"
   | "shared_memory.conversation_source_revoke"
@@ -49,7 +46,6 @@ type SharedMemoryActionRepository = Pick<
   | "getSharedMemoryPreviewAdmission"
   | "getSharedMemoryCandidatePreviewAdmission"
   | "getSharedMemoryPendingShareReview"
-  | "getSharedMemoryShareReview"
   | "getSharedMemoryRevokeReview"
   | "getSharedMemoryFidelityChangeReview"
   | "getTeamConversationSourceGrantReview"
@@ -113,13 +109,16 @@ export const bindSharedMemoryPreviewOperation = (
 ): HighRiskResolvedActionGrantOperation =>
   sharedMemoryPreviewActionGrantBinding({
     referenceId,
+    source: intent.source,
+    sourceCapabilities: intent.sourceCapabilities,
     logicalMemoryId: intent.logicalMemoryId,
     remoteReplicaId: intent.remoteReplicaId,
     teamId: intent.teamId,
     teamWorkspaceId: intent.teamWorkspaceId,
-    representation: intent.representation,
+    activationRepresentation: intent.activationRepresentation,
     maximumFidelity: intent.maximumFidelity,
-    includeCuratedMemory: intent.includeCuratedMemory
+    includeCuratedMemory: intent.includeCuratedMemory,
+    mode: intent.mode
   });
 
 export const bindSharedMemoryCandidatePreviewOperation = (
@@ -131,6 +130,10 @@ export const bindSharedMemoryCandidatePreviewOperation = (
 ): HighRiskResolvedActionGrantOperation =>
   sharedMemoryCandidatePreviewActionGrantBinding({
     referenceId,
+    source: intent.source,
+    sourceDeploymentProtocolId: intent.sourceDeploymentProtocolId,
+    sourceOwnerPrincipalId: intent.sourceOwnerPrincipalId,
+    sourceCapabilities: intent.sourceCapabilities,
     logicalMemoryId: intent.logicalMemoryId,
     candidateHash: intent.candidateHash,
     sourceRevision: intent.sourceRevision,
@@ -140,33 +143,11 @@ export const bindSharedMemoryCandidatePreviewOperation = (
     byteCount: intent.byteCount,
     teamId: intent.teamId,
     teamWorkspaceId: intent.teamWorkspaceId,
-    representation: intent.representation,
+    activationRepresentation: intent.activationRepresentation,
     maximumFidelity: intent.maximumFidelity,
     includeCuratedMemory: intent.includeCuratedMemory,
     mode: intent.mode,
     expiresAt: intent.expiresAt
-  });
-
-export const bindSharedMemoryShareOperation = (
-  intent: Extract<SharedMemoryActionIntent, { action: "shared_memory.share" }>,
-  referenceId: string
-): HighRiskResolvedActionGrantOperation =>
-  sharedMemoryShareBundleActionGrantBinding({
-    referenceId,
-    mutationId: intent.mutationId,
-    logicalGrantId: intent.logicalGrantId,
-    logicalMemoryId: intent.logicalMemoryId,
-    teamId: intent.teamId,
-    teamWorkspaceId: intent.teamWorkspaceId,
-    consentId: intent.consentId,
-    previewId: intent.previewId,
-    mode: intent.mode,
-    maximumFidelity: intent.maximumFidelity,
-    includeCuratedMemory: intent.includeCuratedMemory,
-    previewRevision: intent.previewRevision,
-    previewHash: intent.previewHash,
-    expiresAt: intent.expiresAt,
-    title: intent.title
   });
 
 export const bindSharedMemoryPendingShareOperation = (
@@ -178,6 +159,9 @@ export const bindSharedMemoryPendingShareOperation = (
 ): HighRiskResolvedActionGrantOperation =>
   sharedMemoryPendingShareActionGrantBinding({
     referenceId,
+    source: intent.source,
+    sourceCapabilities: intent.sourceCapabilities,
+    activationRepresentation: intent.activationRepresentation,
     mutationId: intent.mutationId,
     logicalGrantId: intent.logicalGrantId,
     logicalMemoryId: intent.logicalMemoryId,
@@ -190,8 +174,7 @@ export const bindSharedMemoryPendingShareOperation = (
     includeCuratedMemory: intent.includeCuratedMemory,
     previewRevision: intent.previewRevision,
     previewHash: intent.previewHash,
-    expiresAt: intent.expiresAt,
-    title: intent.title
+    expiresAt: intent.expiresAt
   });
 
 export const bindSharedMemoryRevokeOperation = (
@@ -217,6 +200,9 @@ export const bindSharedMemoryFidelityChangeOperation = (
 ): HighRiskResolvedActionGrantOperation =>
   sharedMemoryFidelityBundleActionGrantBinding({
     referenceId,
+    source: intent.source,
+    sourceCapabilities: intent.sourceCapabilities,
+    activationRepresentation: intent.activationRepresentation,
     mutationId: intent.mutationId,
     logicalMemoryId: intent.logicalMemoryId,
     teamId: intent.teamId,
@@ -266,10 +252,10 @@ export const bindConversationSourceRevokeOperation = (
   });
 
 const shareReview = (
-  review: SharedMemoryShareReviewRecord | SharedMemoryPendingShareReviewRecord,
+  review: SharedMemoryPendingShareReviewRecord,
   intent: Extract<
     SharedMemoryActionIntent,
-    { action: "shared_memory.share" | "shared_memory.pending_share" }
+    { action: "shared_memory.pending_share" }
   >
 ): ActionApprovalPolicy =>
   reviewed(
@@ -356,23 +342,35 @@ const fidelityChangeReview = (
     fidelityRank[intent.maximumFidelity] >
       fidelityRank[review.grant.maximumFidelity] ||
     (!review.grant.includeCuratedMemory && intent.includeCuratedMemory);
+  const changesFidelity =
+    review.grant.maximumFidelity !== intent.maximumFidelity ||
+    review.grant.includeCuratedMemory !== intent.includeCuratedMemory;
+  const updatesSourceOnly = review.sourceRevisionChanged && !changesFidelity;
   return reviewed(increases ? "step_up" : "native_review", {
     title: review.willReactivate
       ? "Reactivate Shared Memory with this fidelity?"
-      : "Change the Shared Memory fidelity?",
+      : updatesSourceOnly
+        ? "Share this newer Memory revision?"
+        : "Change the Shared Memory fidelity?",
     description: review.sourceOwnerPolicyWillActivate
       ? "Compare the current and proposed detail. This decision also activates the reviewed source policy."
-      : "Compare the current and proposed level of Memory detail.",
+      : updatesSourceOnly
+        ? "Replace the Workspace copy with the reviewed newer source revision."
+        : "Compare the current and proposed level of Memory detail.",
     consequence: review.sourceOwnerPolicyWillReplace
       ? "The new source policy pauses existing consent and invalidates other affected Share Grants while this Share Grant changes fidelity."
       : review.willReactivate
         ? "This reactivates the Share Grant and restores the approved cumulative Memory layers."
-        : increases
-          ? "This makes more detailed Memory or Curated Memory available to the Workspace."
-          : "This reduces the detail available and purges unauthorized higher-fidelity cached content.",
+        : updatesSourceOnly
+          ? "The existing Share Grant keeps its identity while the Workspace copy advances to this revision."
+          : increases
+            ? "This makes more detailed Memory or Curated Memory available to the Workspace."
+            : "This reduces the detail available and purges unauthorized higher-fidelity cached content.",
     confirmLabel: review.willReactivate
       ? "Reactivate Share Grant"
-      : "Change fidelity",
+      : updatesSourceOnly
+        ? "Share newer revision"
+        : "Change fidelity",
     details: [
       { label: "Personal Memory", value: sourceName(review) },
       { label: "Logical Memory", value: review.source.logicalMemoryId },
@@ -394,6 +392,18 @@ const fidelityChangeReview = (
         label: "New Curated Memory",
         value: curatedMemoryLabel(intent.includeCuratedMemory)
       },
+      ...(review.sourceRevisionChanged
+        ? [
+            {
+              label: "Current source revision",
+              value: String(review.grant.sourceRevision)
+            },
+            {
+              label: "New source revision",
+              value: String(review.preview.sourceRevision)
+            }
+          ]
+        : []),
       { label: "Mode", value: intent.mode },
       { label: "Expiry", value: intent.expiresAt ?? "No expiry" }
     ]
@@ -412,7 +422,7 @@ const previewDefinition = {
           remoteReplicaId: input.intent.remoteReplicaId,
           teamId: input.intent.teamId,
           teamWorkspaceId: input.intent.teamWorkspaceId,
-          representation: input.intent.representation,
+          representation: input.intent.activationRepresentation,
           maximumFidelity: input.intent.maximumFidelity,
           includeCuratedMemory: input.intent.includeCuratedMemory
         }
@@ -439,7 +449,7 @@ const candidatePreviewDefinition = {
         {
           teamId: input.intent.teamId,
           teamWorkspaceId: input.intent.teamWorkspaceId,
-          representation: input.intent.representation,
+          representation: input.intent.activationRepresentation,
           maximumFidelity: input.intent.maximumFidelity,
           includeCuratedMemory: input.intent.includeCuratedMemory
         }
@@ -451,41 +461,6 @@ const candidatePreviewDefinition = {
         input.clientRequestId
       ),
       policy: previewPolicy()
-    };
-  }
-};
-
-const shareDefinition = {
-  operationFamily: "share_grant_management" as const,
-  async admit(input: SharedMemoryAdmissionInput) {
-    if (input.intent.action !== "shared_memory.share") return null;
-    const review = requireReview(
-      await input.repository.getSharedMemoryShareReview(
-        { userId: input.userId },
-        {
-          logicalMemoryId: input.intent.logicalMemoryId,
-          logicalGrantId: input.intent.logicalGrantId,
-          teamId: input.intent.teamId,
-          teamWorkspaceId: input.intent.teamWorkspaceId,
-          consentId: input.intent.consentId,
-          preview: {
-            previewId: input.intent.previewId,
-            previewHash: input.intent.previewHash
-          },
-          previewRevision: input.intent.previewRevision,
-          maximumFidelity: input.intent.maximumFidelity,
-          includeCuratedMemory: input.intent.includeCuratedMemory,
-          expiresAt: input.intent.expiresAt
-        }
-      ),
-      "Shared Memory sharing"
-    );
-    return {
-      operation: bindSharedMemoryShareOperation(
-        input.intent,
-        input.clientRequestId
-      ),
-      policy: shareReview(review, input.intent)
     };
   }
 };
@@ -671,7 +646,6 @@ export const sharedMemoryActionDefinitions = {
   "shared_memory.candidate_preview": candidatePreviewDefinition,
   "shared_memory.pending_share": pendingShareDefinition,
   "shared_memory.preview": previewDefinition,
-  "shared_memory.share": shareDefinition,
   "shared_memory.revoke": revokeDefinition,
   "shared_memory.conversation_source_grant": conversationSourceGrantDefinition,
   "shared_memory.conversation_source_revoke":

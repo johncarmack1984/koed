@@ -106,6 +106,8 @@ export type {
 
 // Internal bootstrap identity shared by local capture and Desktop credentials.
 export const LOCAL_PERSONAL_USER_EMAIL = "local@koed.ai";
+export const MEMORY_ANSWER_TIMEOUT_MAX_MS = 600_000;
+export const MEMORY_ANSWER_TRANSPORT_OVERHEAD_MS = 30_000;
 
 export {
   decideHistoricalAdmission,
@@ -340,6 +342,14 @@ export {
   PERSONAL_DESKTOP_CONTRACT_VERSION,
   PERSONAL_DESKTOP_INITIAL_EVENT_LIMIT,
   PERSONAL_DESKTOP_OLDER_EVENT_LIMIT,
+  personalDesktopAskListInputSchema,
+  personalDesktopAskSubmitDataSchema,
+  personalDesktopAskSubmitInputSchema,
+  personalDesktopAskThreadDataSchema,
+  personalDesktopAskThreadInputSchema,
+  personalDesktopAskThreadSchema,
+  personalDesktopAskThreadsDataSchema,
+  personalDesktopAskTurnSchema,
   personalDesktopConversationCursorSchema,
   personalDesktopConversationEventSchema,
   personalDesktopChangeEventRefSchema,
@@ -347,6 +357,14 @@ export {
   personalDesktopErrorSchema,
   personalDesktopEventPageInputSchema,
   personalDesktopEventsDataSchema,
+  personalDesktopNoteDataSchema,
+  personalDesktopNoteListInputSchema,
+  personalDesktopNoteLoadInputSchema,
+  personalDesktopNoteRenameDataSchema,
+  personalDesktopNoteRenameInputSchema,
+  personalDesktopNoteSchema,
+  personalDesktopNoteSummarySchema,
+  personalDesktopNotesDataSchema,
   personalDesktopProjectMetadataDataSchema,
   personalDesktopProjectMetadataSchema,
   personalDesktopProjectSchema,
@@ -379,10 +397,20 @@ export type {
   ApprovalReviewTranscriptDisplay,
   ApprovalReviewTranscriptSegment,
   PersonalDesktopApi,
+  PersonalDesktopAskListInput,
+  PersonalDesktopAskSubmitInput,
+  PersonalDesktopAskThread,
+  PersonalDesktopAskThreadInput,
+  PersonalDesktopAskTurn,
   PersonalDesktopConversationCursor,
   PersonalDesktopConversationEvent,
   PersonalDesktopChange,
   PersonalDesktopEventPageInput,
+  PersonalDesktopNote,
+  PersonalDesktopNoteListInput,
+  PersonalDesktopNoteLoadInput,
+  PersonalDesktopNoteRenameInput,
+  PersonalDesktopNoteSummary,
   PersonalDesktopProjectMetadata,
   PersonalDesktopProject,
   PersonalDesktopProjectThread,
@@ -482,7 +510,9 @@ export {
   sharedMemoryConsentSchema,
   sharedMemoryEventSourceKindSchema,
   sharedMemoryRepresentationSchema,
+  sharedMemorySourceCapabilitiesSchema,
   sharedMemoryGrantSchema,
+  ownedSharedMemoryGrantSchema,
   pendingShareSchema,
   ownedShareSummarySchema,
   ownedShareItemSchema,
@@ -530,11 +560,13 @@ export type {
   CollaborationWorkspaceAccess,
   SharedMemoryConsent,
   SharedMemoryGrant,
+  OwnedSharedMemoryGrant,
   PendingShare,
   ConversationSourceAccess,
   SharedMemoryPreview,
   SharedMemoryCandidatePreview,
   SharedMemoryRepresentation,
+  SharedMemorySourceCapabilities,
   SharedMemorySession,
   SharedMemorySessionReference,
   SharedMemorySourceItem,
@@ -691,17 +723,13 @@ export {
 } from "./upstream-desktop-credential-custody.js";
 export {
   SHARED_MEMORY_AUTHORITY_ACTION,
-  sharedMemoryConsentActionGrantBinding,
   sharedMemoryGrantManagementRequestHash,
   sharedMemoryGrantManagementScopeHash,
   sharedMemoryPreviewActionGrantBinding,
   sharedMemoryFidelityBundleActionGrantBinding,
-  sharedMemoryFidelityActionGrantBinding,
   sharedMemoryCandidatePreviewActionGrantBinding,
   sharedMemoryPendingShareActionGrantBinding,
   sharedMemoryRevokeActionGrantBinding,
-  sharedMemoryShareBundleActionGrantBinding,
-  sharedMemoryShareActionGrantBinding,
   sharedMemoryTranscriptAccessActionGrantBinding,
   sharedMemoryTranscriptRevokeActionGrantBinding
 } from "./shared-memory-action-grant.js";
@@ -709,6 +737,22 @@ export type {
   SharedMemoryActionGrantBinding,
   SharedMemoryRepresentation as SharedMemoryActionGrantRepresentation
 } from "./shared-memory-action-grant.js";
+export {
+  assertPersonalNoteSourceSelection,
+  personalNoteSourceRevisionHash,
+  capturedSessionSourceFrontierHash,
+  logicalMemorySourceRevisionIdentity,
+  personalNoteSourceSelectionIssues,
+  sharedMemorySourceCanReplace,
+  sharedMemorySourceKinds,
+  sharedMemorySourceRefSchema
+} from "./shared-memory-source.js";
+export type {
+  SharedMemoryRepresentationCapability,
+  LogicalMemorySourceRevisionIdentity,
+  SharedMemorySourceRef,
+  SharedMemorySourceSelection
+} from "./shared-memory-source.js";
 export type {
   CollaborationActionGrantAccessInput,
   CollaborationActionGrantCustodyInput,
@@ -961,6 +1005,7 @@ export {
   SHARED_SOURCE_ARTIFACT_SCHEMA_VERSION,
   SHARED_SOURCE_PREVIEW_SCHEMA_VERSION,
   sharedMemoryGrantScopedSourceId,
+  sharedMemoryGrantScopedPrincipalId,
   sharedSourceArtifactHash,
   sharedSourceArtifactId,
   sharedSourcePreviewHash,

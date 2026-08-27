@@ -93,17 +93,8 @@ const teamHit = (
     sourceRevision: candidate.sourceRevision,
     visibilityProvenance: {
       shareGrantId: candidate.shareGrantId,
-      representationId: candidate.representationId,
       representation: candidate.representation,
-      provenanceHash: candidate.provenanceHash
-    },
-    generation: {
-      representationPolicyRevision: candidate.representationPolicyRevision,
-      contentPolicyVersion: candidate.contentPolicyVersion,
-      classifierVersion: candidate.classifierVersion,
-      embeddingModel: candidate.embeddingModel,
-      embeddingDimensions: candidate.embeddingDimensions,
-      embeddingVersion: candidate.embeddingVersion
+      sourceRevision: candidate.sourceRevision
     },
     citation: {
       nodeId: candidate.candidateId,

@@ -41,13 +41,24 @@ import {
   type RateLimitStore
 } from "../infra/index.js";
 import { registerLocalEdgeRoutes } from "../local-edge/routes.js";
-import { readLocalEdgeUpstreamRegistry } from "../local-edge/upstream-routing.js";
+import {
+  readLocalEdgeUpstreamRegistry,
+  safeUpstreamProxyUrl,
+  upstreamBackendById
+} from "../local-edge/upstream-routing.js";
 import {
   createCollaborationActionGrantControl,
   type CollaborationActionGrantControl
 } from "../local-edge/collaboration-action-grant-control.js";
+import {
+  createPersonalNoteMemoryRepairService,
+  projectPersonalNoteToMemory
+} from "../collaboration/personal-note-memory.js";
 import { createCollaborationActionGrantLifecycle } from "../local-edge/collaboration-action-grant-lifecycle.js";
-import { createLocalSharedMemoryCandidatePreparation } from "../local-edge/shared-memory-candidate-preparation.js";
+import {
+  createLocalSharedMemoryCandidatePreparation,
+  PersonalNoteCandidatePreparationError
+} from "../local-edge/shared-memory-candidate-preparation.js";
 import {
   createPostgresCollaborationSharedMemoryAuthorityStore,
   type PostgresCollaborationSharedMemoryAuthorityStore
@@ -81,6 +92,7 @@ import {
   crossIdentitySyncDeterministicUuid,
   createOwnerPrivateReplicaEnvelopeEncryptionProviderFromEnvironment,
   createTeamMemoryEnvelopeEncryptionProviderFromEnvironment,
+  fetchBoundedJsonObject,
   derivePrivacyFingerprintKey,
   inspectDeviceIdentityAtKoedHome,
   reconcileDeviceIdentityDeployment,
@@ -93,8 +105,9 @@ import {
   memoryEmbedQueueName,
   requestKoedLocalWork,
   readLocalEdgeUpstreamEnrollmentBinding,
+  resolveSupportedEmbeddingModelConfig,
   resolveApiDataEncryptionKeyFromEnv,
-  resolveSupportedEmbeddingModelConfig
+  type SharedMemorySourceRef
 } from "@koed/shared";
 import { createHistoricalRawAdmission } from "../memory/historical-raw-admission.js";
 import {
@@ -462,6 +475,12 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     typeof createSecureUpstreamFetch
   > | null = null;
   let pendingShareSourceWorkerTimer: NodeJS.Timeout | null = null;
+  let continuousNoteAdvancementWorkerTimer: NodeJS.Timeout | null = null;
+  let requestPendingShareSourceWork: (() => void) | null = null;
+  let requestContinuousNoteAdvancementWork: (() => void) | null = null;
+  let personalNoteMemoryRepairService: ReturnType<
+    typeof createPersonalNoteMemoryRepairService
+  > | null = null;
   const relayCleanup = (
     repository as
       | (MemorySourceRepository & {
@@ -545,7 +564,18 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     pendingShareWorkerRunning = true;
     void pendingShareWorker({
       limit: 10,
-      ensureCompanion: ensurePendingShareCompanion
+      ensureCompanion: ensurePendingShareCompanion,
+      reportActivationFailure: (failure) =>
+        app.log.warn(
+          {
+            event: { name: "pending_share.activation.failed" },
+            pendingShareId: failure.pendingShareId,
+            failureStage: failure.failureStage,
+            errorClass: failure.errorClass,
+            errorCode: failure.errorCode
+          },
+          "Pending Share activation failed"
+        )
     })
       .catch((error: unknown) => {
         app.log.error(
@@ -573,6 +603,10 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     if (pendingShareSourceWorkerTimer) {
       clearInterval(pendingShareSourceWorkerTimer);
     }
+    if (continuousNoteAdvancementWorkerTimer) {
+      clearInterval(continuousNoteAdvancementWorkerTimer);
+    }
+    await personalNoteMemoryRepairService?.close();
     await Promise.all([
       embeddingQueue?.close(),
       compactionQueue?.close(),
@@ -779,35 +813,6 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
       ? identity.deploymentId
       : null;
   };
-  const preparePendingShareSource = async (input: {
-    backendId: string;
-    localOwnerUserId: string;
-    sessionId: string;
-    mutationId: string;
-  }): Promise<void> => {
-    if (!repository) return;
-    const deploymentId = resolveVerifiedDeploymentId();
-    if (!deploymentId) {
-      throw new Error("Verified deployment identity unavailable");
-    }
-    await prepareSourceSyncRelationship(
-      {
-        deploymentProfile: config.deploymentProfile,
-        resolveVerifiedLocalDeploymentId: () => deploymentId,
-        upstreamBackendsPath: localEdgeUpstreamBackendsPath,
-        fetch: localEdgeFetch,
-        resolveUpstreamAuthorization: localEdgeResolveUpstreamAuthorization,
-        requireRepository: () => repository
-      },
-      {
-        localUserId: input.localOwnerUserId,
-        sessionId: input.sessionId,
-        upstreamBackendId: input.backendId,
-        idempotencyKey: input.mutationId,
-        consentedAt: new Date().toISOString()
-      }
-    );
-  };
   const localSharedMemoryCandidatePreparation = repository
     ? createLocalSharedMemoryCandidatePreparation({
         repository,
@@ -816,6 +821,145 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
           requestKoedLocalWork(config.koedHome, "lcm-summary")
       })
     : null;
+  type PendingShareSourcePreparationStage =
+    | "deployment_identity"
+    | "personal_note_candidate"
+    | "upstream_authorization"
+    | "source_upload"
+    | "source_upload_response"
+    | "captured_session_sync";
+  class PendingShareSourcePreparationError extends Error {
+    readonly failureStage: PendingShareSourcePreparationStage;
+    readonly statusCode?: number;
+
+    constructor(
+      failureStage: PendingShareSourcePreparationStage,
+      cause: unknown
+    ) {
+      super("Pending Share source preparation failed", { cause });
+      this.name = "PendingShareSourcePreparationError";
+      this.failureStage = failureStage;
+      if (
+        typeof cause === "object" &&
+        cause !== null &&
+        "statusCode" in cause &&
+        typeof cause.statusCode === "number"
+      ) {
+        this.statusCode = cause.statusCode;
+      }
+    }
+  }
+  const preparePendingShareSource = async (input: {
+    backendId: string;
+    localOwnerUserId: string;
+    source?: SharedMemorySourceRef;
+    sessionId?: string;
+    pendingShareId: string;
+    mutationId: string;
+    mode: "snapshot" | "continuous";
+  }): Promise<void> => {
+    if (!repository) return;
+    let failureStage: PendingShareSourcePreparationStage =
+      "deployment_identity";
+    try {
+      const deploymentId = resolveVerifiedDeploymentId();
+      if (!deploymentId) {
+        throw new Error("Verified deployment identity unavailable");
+      }
+      if (input.source?.kind === "personal_note") {
+        failureStage = "personal_note_candidate";
+        if (!localSharedMemoryCandidatePreparation) {
+          throw new Error("Personal Note candidate preparation is unavailable");
+        }
+        const candidate =
+          await localSharedMemoryCandidatePreparation.loadPersonalNoteCandidatePreview(
+            {
+              localOwnerUserId: input.localOwnerUserId,
+              noteId: input.source.noteId,
+              noteRevision: input.source.noteRevision,
+              mode: input.mode
+            }
+          );
+        if (
+          !candidate ||
+          candidate.source?.kind !== "personal_note" ||
+          candidate.source.memoryEventId !== input.source.memoryEventId ||
+          candidate.logicalMemoryId !== input.source.logicalMemoryId
+        ) {
+          throw new Error("Personal Note source changed before upload");
+        }
+        failureStage = "upstream_authorization";
+        const backend = upstreamBackendById(
+          readLocalEdgeUpstreamRegistry(localEdgeUpstreamBackendsPath),
+          input.backendId
+        );
+        const authorization = backend
+          ? localEdgeResolveUpstreamAuthorization(backend)
+          : null;
+        if (!backend || !authorization) {
+          throw new Error(
+            "Personal Note upstream authorization is unavailable"
+          );
+        }
+        failureStage = "source_upload";
+        const { response } = await fetchBoundedJsonObject(
+          localEdgeFetch,
+          safeUpstreamProxyUrl(
+            backend,
+            `/v1/shared-memory/pending-shares/${input.pendingShareId}/personal-note-source`
+          ),
+          {
+            method: "PUT",
+            redirect: "error",
+            headers: {
+              accept: "application/json",
+              authorization,
+              "content-type": "application/json",
+              "idempotency-key": input.mutationId
+            },
+            body: JSON.stringify({
+              sourceDeploymentProtocolId: deploymentId,
+              sourceOwnerPrincipalId: input.localOwnerUserId,
+              candidate
+            })
+          },
+          { timeoutMs: 30_000, maxBytes: 64 * 1_024 }
+        );
+        failureStage = "source_upload_response";
+        if (!response.ok) {
+          throw Object.assign(
+            new Error("Personal Note source upload was rejected"),
+            { statusCode: response.status }
+          );
+        }
+        return;
+      }
+      failureStage = "captured_session_sync";
+      await prepareSourceSyncRelationship(
+        {
+          deploymentProfile: config.deploymentProfile,
+          resolveVerifiedLocalDeploymentId: () => deploymentId,
+          upstreamBackendsPath: localEdgeUpstreamBackendsPath,
+          fetch: localEdgeFetch,
+          resolveUpstreamAuthorization: localEdgeResolveUpstreamAuthorization,
+          requireRepository: () => repository
+        },
+        {
+          localUserId: input.localOwnerUserId,
+          sessionId:
+            input.source?.kind === "captured_session"
+              ? input.source.sessionId
+              : input.sessionId!,
+          upstreamBackendId: input.backendId,
+          idempotencyKey: input.mutationId,
+          consentedAt: new Date().toISOString()
+        }
+      );
+    } catch (error) {
+      if (error instanceof PendingShareSourcePreparationError) throw error;
+      throw new PendingShareSourcePreparationError(failureStage, error);
+    }
+  };
   const collaborationActionGrantLifecycle =
     createCollaborationActionGrantLifecycle({ koedHome: config.koedHome });
   const collaborationSharedMemoryControl =
@@ -828,9 +972,30 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
           resolveUpstreamAuthorization: localEdgeResolveUpstreamAuthorization,
           actionGrantLifecycle: collaborationActionGrantLifecycle,
           authorityStore: sharedMemoryAuthorityRepository,
-          preparePendingShareSource,
+          requestPendingShareSourceWork: () =>
+            requestPendingShareSourceWork?.(),
+          requestContinuousNoteAdvancementWork: () =>
+            requestContinuousNoteAdvancementWork?.(),
           loadLocalCandidatePreview:
             localSharedMemoryCandidatePreparation?.loadCandidatePreview,
+          loadPersonalNoteCandidatePreview:
+            localSharedMemoryCandidatePreparation?.loadPersonalNoteCandidatePreview,
+          resolveCandidateSourceIdentity:
+            localSharedMemoryCandidatePreparation?.resolveCandidateSourceIdentity,
+          reportDiagnostic: (diagnostic) =>
+            app.log.warn(
+              {
+                event: {
+                  name: diagnostic.code,
+                  category: "database",
+                  operation: diagnostic.operation,
+                  public_grant_reference: diagnostic.publicGrantReference,
+                  failure_stage: diagnostic.failureStage,
+                  http_status: diagnostic.httpStatus
+                }
+              },
+              "Shared Memory authority projection failed"
+            ),
           prepareLocalLcmRepresentation:
             localSharedMemoryCandidatePreparation?.prepareLcmRepresentation,
           ensureEnrollmentBinding: (input) =>
@@ -842,34 +1007,102 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
       : undefined);
   if (config.teamCollaborationEnabled && sharedMemoryAuthorityRepository) {
     let sourceWorkerRunning = false;
+    let sourceWorkerRequested = false;
     const drainPendingShareSourceWork = () => {
+      sourceWorkerRequested = true;
       if (sourceWorkerRunning) return;
       sourceWorkerRunning = true;
       void (async () => {
-        const work =
-          await sharedMemoryAuthorityRepository.claimPendingShareSourceWork({
-            limit: 10
-          });
-        for (const item of work) {
-          try {
-            await preparePendingShareSource({
-              backendId: item.backendId,
-              localOwnerUserId: item.localOwnerUserId,
-              sessionId: item.localSessionId,
-              mutationId: item.mutationId
+        do {
+          sourceWorkerRequested = false;
+          const work =
+            await sharedMemoryAuthorityRepository.claimPendingShareSourceWork({
+              limit: 10
             });
-            await sharedMemoryAuthorityRepository.finishPendingShareSourceWork({
-              workId: item.workId,
-              outcome: "completed"
-            });
-          } catch {
-            await sharedMemoryAuthorityRepository.finishPendingShareSourceWork({
-              workId: item.workId,
-              outcome: "retry",
-              redactedFailureCode: "source_preparation_failed"
-            });
+          for (const item of work) {
+            try {
+              await preparePendingShareSource({
+                backendId: item.backendId,
+                localOwnerUserId: item.localOwnerUserId,
+                source: item.source,
+                pendingShareId: item.pendingShareId,
+                mutationId: item.mutationId,
+                mode: item.mode
+              });
+              await sharedMemoryAuthorityRepository.finishPendingShareSourceWork(
+                {
+                  workId: item.workId,
+                  outcome: "completed"
+                }
+              );
+            } catch (error) {
+              const statusCode =
+                typeof error === "object" &&
+                error !== null &&
+                "statusCode" in error &&
+                typeof error.statusCode === "number"
+                  ? error.statusCode
+                  : null;
+              const redactedFailureCode =
+                statusCode === 401 || statusCode === 403
+                  ? "source_preparation_unauthorized"
+                  : statusCode === 409
+                    ? "source_preparation_conflict"
+                    : statusCode === 422
+                      ? "source_preparation_rejected"
+                      : "source_preparation_failed";
+              app.log.warn(
+                {
+                  event: { name: "pending_share.source_work.retry" },
+                  pendingShareId: item.pendingShareId,
+                  backendId: item.backendId,
+                  failureStage:
+                    error instanceof PendingShareSourcePreparationError
+                      ? error.failureStage
+                      : "unknown",
+                  errorClass:
+                    error instanceof Error ? error.name : "UnknownError",
+                  causeClass:
+                    error instanceof Error && error.cause instanceof Error
+                      ? error.cause.name
+                      : null,
+                  candidateStage:
+                    error instanceof Error &&
+                    error.cause instanceof PersonalNoteCandidatePreparationError
+                      ? error.cause.candidateStage
+                      : null,
+                  errorCode:
+                    typeof error === "object" &&
+                    error !== null &&
+                    "code" in error &&
+                    typeof error.code === "string" &&
+                    /^[A-Z0-9_]{1,80}$/.test(error.code)
+                      ? error.code
+                      : typeof error === "object" &&
+                          error !== null &&
+                          "cause" in error &&
+                          typeof error.cause === "object" &&
+                          error.cause !== null &&
+                          "code" in error.cause &&
+                          typeof error.cause.code === "string" &&
+                          /^[A-Z0-9_]{1,80}$/.test(error.cause.code)
+                        ? error.cause.code
+                        : null,
+                  statusCode
+                },
+                "Pending Share source work will retry"
+              );
+              await sharedMemoryAuthorityRepository.finishPendingShareSourceWork(
+                {
+                  workId: item.workId,
+                  outcome: "retry",
+                  redactedFailureCode
+                }
+              );
+            }
           }
-        }
+          if (work.length === 10) sourceWorkerRequested = true;
+        } while (sourceWorkerRequested);
       })()
         .catch((error: unknown) => {
           app.log.error(
@@ -882,26 +1115,124 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
         })
         .finally(() => {
           sourceWorkerRunning = false;
+          if (sourceWorkerRequested) drainPendingShareSourceWork();
         });
     };
+    requestPendingShareSourceWork = drainPendingShareSourceWork;
     pendingShareSourceWorkerTimer = setInterval(
       drainPendingShareSourceWork,
       5_000
     );
     pendingShareSourceWorkerTimer.unref();
     drainPendingShareSourceWork();
+
+    let noteAdvancementWorkerRunning = false;
+    let noteAdvancementWorkerRequested = false;
+    const drainContinuousNoteAdvancementWork = () => {
+      noteAdvancementWorkerRequested = true;
+      if (noteAdvancementWorkerRunning || !collaborationSharedMemoryControl) {
+        return;
+      }
+      noteAdvancementWorkerRunning = true;
+      void (async () => {
+        do {
+          noteAdvancementWorkerRequested = false;
+          const work =
+            await sharedMemoryAuthorityRepository.claimContinuousPersonalNoteAdvancementWork(
+              { limit: 10 }
+            );
+          for (const item of work) {
+            try {
+              await collaborationSharedMemoryControl.advanceContinuousPersonalNoteRevision(
+                {
+                  backendId: item.backendId,
+                  localOwnerUserId: item.localOwnerUserId,
+                  noteId: item.noteId,
+                  noteRevision: item.noteRevision
+                }
+              );
+              await sharedMemoryAuthorityRepository.finishContinuousPersonalNoteAdvancementWork(
+                { workId: item.workId, outcome: "completed" }
+              );
+            } catch (error) {
+              app.log.warn(
+                {
+                  event: { name: "personal_note.continuous_share.retry" },
+                  noteId: item.noteId,
+                  noteRevision: item.noteRevision,
+                  backendId: item.backendId,
+                  errorClass:
+                    error instanceof Error ? error.name : "UnknownError"
+                },
+                "Continuous Personal Note Share advancement will retry"
+              );
+              await sharedMemoryAuthorityRepository.finishContinuousPersonalNoteAdvancementWork(
+                {
+                  workId: item.workId,
+                  outcome: "retry",
+                  redactedFailureCode: "note_advancement_failed"
+                }
+              );
+            }
+          }
+          if (work.length === 10) noteAdvancementWorkerRequested = true;
+        } while (noteAdvancementWorkerRequested);
+      })()
+        .catch((error: unknown) => {
+          app.log.error(
+            {
+              err: error,
+              event: { name: "personal_note.continuous_share_worker.failed" }
+            },
+            "Continuous Personal Note Share worker failed"
+          );
+        })
+        .finally(() => {
+          noteAdvancementWorkerRunning = false;
+          if (noteAdvancementWorkerRequested) {
+            drainContinuousNoteAdvancementWork();
+          }
+        });
+    };
+    requestContinuousNoteAdvancementWork = drainContinuousNoteAdvancementWork;
+    continuousNoteAdvancementWorkerTimer = setInterval(
+      drainContinuousNoteAdvancementWork,
+      5_000
+    );
+    continuousNoteAdvancementWorkerTimer.unref();
+    drainContinuousNoteAdvancementWork();
   }
   const collaborationActionGrantControl =
     options.collaborationActionGrantControl ??
     createCollaborationActionGrantControl({
       koedHome: config.koedHome,
       fetch: localEdgeFetch,
+      resolveCandidateSourceIdentity:
+        localSharedMemoryCandidatePreparation?.resolveCandidateSourceIdentity,
       actionGrantLifecycle: collaborationActionGrantLifecycle
     });
 
   const collaborationNavigationInvalidationListeners = new Set<
     (backendId: string) => void
   >();
+  const personalNoteRepository = repository;
+  if (personalNoteRepository) {
+    personalNoteMemoryRepairService = createPersonalNoteMemoryRepairService({
+      repository: personalNoteRepository,
+      enqueueEmbedding,
+      requestContinuousShareAdvancement: () =>
+        requestContinuousNoteAdvancementWork?.(),
+      onError: (error) => {
+        app.log.error(
+          {
+            err: error,
+            event: { name: "personal_note.memory_repair.failed" }
+          },
+          "Personal Note memory repair failed"
+        );
+      }
+    });
+  }
   const routeContext = {
     config,
     requireRepository,
@@ -909,6 +1240,19 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     rateLimit: rateLimitHandlers,
     collaboration: {
       admission: collaborationAdmission,
+      projectPersonalNote: async (
+        input: Parameters<typeof projectPersonalNoteToMemory>[1]
+      ) => {
+        await projectPersonalNoteToMemory(
+          {
+            repository: requireRepository(),
+            enqueueEmbedding,
+            requestContinuousShareAdvancement: () =>
+              requestContinuousNoteAdvancementWork?.()
+          },
+          input
+        );
+      },
       actionGrantLifecycle: collaborationActionGrantLifecycle,
       actionGrantControl: collaborationActionGrantControl,
       sharedMemoryControl: collaborationSharedMemoryControl,
@@ -1166,9 +1510,12 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   registerApiTokenRoutes(app, routeContext);
   registerTeamRoutes(app, routeContext);
   registerCollaborationRoutes(app, {
-    requireCollaborationRepository,
+    requireCollaborationRepository: requireRepository,
+    requireSharedMemoryRepository: requireRepository,
+    projectPersonalNote: routeContext.collaboration.projectPersonalNote,
     authenticateSessionOrDeviceCredential:
       authHelpers.authenticateSessionOrDeviceCredential,
+    authenticateApiToken: authHelpers.authenticateApiToken,
     readRateLimit: rateLimitHandlers.memoryRead,
     writeRateLimit: rateLimitHandlers.memoryWrite,
     admission: routeContext.collaboration.admission
@@ -1195,7 +1542,21 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     authenticateSessionOrDeviceCredential:
       authHelpers.authenticateSessionOrDeviceCredential,
     readRateLimit: rateLimitHandlers.memoryRead,
-    writeRateLimit: rateLimitHandlers.memoryWrite
+    writeRateLimit: rateLimitHandlers.memoryWrite,
+    reportDiagnostic: (diagnostic) =>
+      app.log.warn(
+        {
+          event: {
+            name: diagnostic.code,
+            category: "security",
+            operation: diagnostic.operation,
+            public_grant_reference: diagnostic.publicGrantReference,
+            failure_stage: diagnostic.failureStage,
+            http_status: diagnostic.httpStatus
+          }
+        },
+        "Shared Memory protected operation failed"
+      )
   });
   teamConversationSourceService = createTeamConversationSourceService({
     app,

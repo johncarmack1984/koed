@@ -126,14 +126,6 @@ const personalChannel = () => ({
   archivedAt: null
 });
 
-const notesToSelf = () => ({
-  ...personalChannel(),
-  kind: "notes_to_self" as const,
-  name: null,
-  topic: null,
-  participants: [participant()]
-});
-
 const workspaceChannel = () => ({
   ...personalChannel(),
   scope: "team" as const,
@@ -175,6 +167,19 @@ const messagePage = () => ({
 const limits = () => ({ ...COLLABORATION_DEFAULT_LIMITS });
 
 const actionGrant = () => ({ id: ids.actionGrant });
+
+const capturedSource = () => ({
+  kind: "captured_session" as const,
+  sessionId: ids.sharedSession,
+  logicalMemoryId: ids.logicalMemory
+});
+
+const capturedSourceCapabilities = [
+  "lcm_rollups" as const,
+  "lcm_leaves" as const,
+  "memory_events" as const,
+  "curated_assertions" as const
+];
 
 const approvalReview = () => ({
   version: 1 as const,
@@ -257,12 +262,15 @@ const previewItem = () => ({
 });
 
 const preview = () => ({
+  source: capturedSource(),
   logicalMemoryId: ids.logicalMemory,
   teamId: ids.team,
   workspaceId: ids.workspace,
-  representation: "memory_events" as const,
+  sourceCapabilities: capturedSourceCapabilities,
+  activationRepresentation: "memory_events" as const,
   maximumFidelity: "memory_events" as const,
   includeCuratedMemory: false,
+  mode: "continuous" as const,
   previewRevision: 1,
   sourceRevision: 1,
   policyRevision: 1,
@@ -276,6 +284,9 @@ const preview = () => ({
 });
 
 const grant = () => ({
+  source: capturedSource(),
+  sourceCapabilities: capturedSourceCapabilities,
+  activationRepresentation: "memory_events" as const,
   id: ids.shareGrant,
   logicalGrantId: ids.logicalThread,
   logicalMemoryId: ids.logicalMemory,
@@ -283,6 +294,7 @@ const grant = () => ({
   teamId: ids.team,
   workspaceId: ids.workspace,
   consentId: ids.consent,
+  mode: "continuous" as const,
   maximumFidelity: "memory_events" as const,
   includeCuratedMemory: false,
   fidelityPolicyRevision: 1,
@@ -295,7 +307,15 @@ const grant = () => ({
   companionThreadId: ids.thread
 });
 
+const ownedGrant = () => {
+  const { companionThreadId, ...owned } = grant();
+  void companionThreadId;
+  return owned;
+};
+
 const pendingShare = () => ({
+  source: capturedSource(),
+  sourceCapabilities: capturedSourceCapabilities,
   id: ids.shareGrant,
   mutationId: ids.mutation,
   logicalGrantId: ids.logicalThread,
@@ -303,7 +323,7 @@ const pendingShare = () => ({
   logicalMemoryId: ids.logicalMemory,
   teamId: ids.team,
   workspaceId: ids.workspace,
-  representation: "lcm_leaves" as const,
+  activationRepresentation: "lcm_leaves" as const,
   maximumFidelity: "lcm_leaves" as const,
   includeCuratedMemory: false,
   mode: "continuous" as const,
@@ -320,7 +340,8 @@ const pendingShare = () => ({
   updatedAt: timestamp,
   activatedAt: null,
   revokedAt: null,
-  grantId: null
+  grantId: null,
+  grantVersion: null
 });
 
 const snapshot = () => ({
@@ -345,7 +366,6 @@ const snapshot = () => ({
     teamPrincipal: null,
     personal: {
       memory: [],
-      notesToSelf: notesToSelf(),
       channels: [personalChannel()]
     },
     teams: []
@@ -544,7 +564,6 @@ describe("collaboration renderer commands", () => {
   it("classifies every selection scope from the shared contract", () => {
     const personal = [
       { kind: "personal_memory" as const },
-      { kind: "notes_to_self" as const },
       { kind: "personal_channel" as const, threadId: ids.thread }
     ];
     const team = [
@@ -876,12 +895,15 @@ describe("collaboration renderer commands", () => {
       {
         command: "collaboration.preview_shared_memory",
         input: {
+          source: capturedSource(),
+          sourceCapabilities: capturedSourceCapabilities,
+          activationRepresentation: "memory_events",
           logicalMemoryId: ids.logicalMemory,
           teamId: ids.team,
           workspaceId: ids.workspace,
-          representation: "memory_events",
           maximumFidelity: "memory_events",
           includeCuratedMemory: false,
+          mode: "continuous",
           actionGrant: actionGrant()
         }
       },
@@ -896,6 +918,13 @@ describe("collaboration renderer commands", () => {
       {
         command: "collaboration.share_memory",
         input: {
+          source: {
+            kind: "captured_session",
+            sessionId: ids.sharedSession,
+            logicalMemoryId: ids.logicalMemory
+          },
+          sourceCapabilities: capturedSourceCapabilities,
+          activationRepresentation: "memory_events",
           mutationId: ids.mutation,
           logicalGrantId: ids.logicalThread,
           logicalMemoryId: ids.logicalMemory,
@@ -908,7 +937,6 @@ describe("collaboration renderer commands", () => {
           previewRevision: 1,
           previewHash: "b".repeat(64),
           expiresAt: null,
-          candidateSessionId: ids.sharedSession,
           actionGrant: actionGrant()
         }
       },
@@ -927,6 +955,13 @@ describe("collaboration renderer commands", () => {
       {
         command: "collaboration.change_shared_memory_fidelity",
         input: {
+          source: {
+            kind: "captured_session",
+            sessionId: ids.sharedSession,
+            logicalMemoryId: ids.logicalMemory
+          },
+          sourceCapabilities: capturedSourceCapabilities,
+          activationRepresentation: "lcm_leaves",
           mutationId: ids.mutation,
           logicalMemoryId: ids.logicalMemory,
           teamId: ids.team,
@@ -940,7 +975,6 @@ describe("collaboration renderer commands", () => {
           previewRevision: 1,
           previewHash: "b".repeat(64),
           expiresAt: null,
-          candidateSessionId: ids.sharedSession,
           actionGrant: actionGrant()
         }
       }
@@ -969,6 +1003,67 @@ describe("collaboration renderer commands", () => {
           mutationId: ids.mutation,
           expectedOperationVersion: 1,
           action: "revoke"
+        }
+      }).success
+    ).toBe(true);
+  });
+
+  it("accepts replacing a Personal Note grant with a newer Note revision", () => {
+    const input = {
+      source: {
+        kind: "personal_note" as const,
+        noteId: ids.sourceItem,
+        noteRevision: 2,
+        memoryEventId: ids.event,
+        logicalMemoryId: ids.logicalMemory
+      },
+      sourceCapabilities: ["memory_events" as const],
+      activationRepresentation: "memory_events" as const,
+      mutationId: ids.mutation,
+      logicalMemoryId: ids.logicalMemory,
+      teamId: ids.team,
+      workspaceId: ids.workspace,
+      shareGrantId: ids.shareGrant,
+      consentId: ids.consent,
+      maximumFidelity: "memory_events" as const,
+      includeCuratedMemory: false,
+      expectedGrantVersion: 1,
+      mode: "snapshot" as const,
+      previewRevision: 1,
+      previewHash: "b".repeat(64),
+      expiresAt: null
+    };
+    expect(
+      collaborationRendererCommandSchema.safeParse({
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
+        requestId: ids.request,
+        command: "collaboration.change_shared_memory_fidelity",
+        input: { ...input, actionGrant: actionGrant() }
+      }).success
+    ).toBe(true);
+    expect(
+      collaborationRendererCommandSchema.safeParse({
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
+        requestId: ids.request,
+        command: "collaboration.change_shared_memory_fidelity",
+        input: {
+          ...input,
+          mode: "continuous",
+          actionGrant: actionGrant()
+        }
+      }).success
+    ).toBe(true);
+    expect(
+      collaborationRendererCommandSchema.safeParse({
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
+        requestId: ids.request,
+        command: "collaboration.request_action_grant",
+        input: {
+          intent: {
+            intent: "collaboration.change_shared_memory_fidelity",
+            commandRequestId: ids.request,
+            ...input
+          }
         }
       }).success
     ).toBe(true);
@@ -1034,16 +1129,26 @@ describe("collaboration renderer commands", () => {
       {
         intent: "collaboration.preview_shared_memory",
         commandRequestId: ids.mutation,
+        source: capturedSource(),
+        sourceCapabilities: capturedSourceCapabilities,
+        activationRepresentation: "memory_events",
         logicalMemoryId: ids.logicalMemory,
         teamId: ids.team,
         workspaceId: ids.workspace,
-        representation: "memory_events",
         maximumFidelity: "memory_events",
-        includeCuratedMemory: false
+        includeCuratedMemory: false,
+        mode: "continuous"
       },
       {
         intent: "collaboration.share_memory",
         commandRequestId: ids.mutation,
+        source: {
+          kind: "captured_session",
+          sessionId: ids.sharedSession,
+          logicalMemoryId: ids.logicalMemory
+        },
+        sourceCapabilities: capturedSourceCapabilities,
+        activationRepresentation: "memory_events",
         mutationId: ids.mutation,
         logicalGrantId: ids.logicalThread,
         logicalMemoryId: ids.logicalMemory,
@@ -1055,8 +1160,7 @@ describe("collaboration renderer commands", () => {
         includeCuratedMemory: false,
         previewRevision: 1,
         previewHash: "b".repeat(64),
-        expiresAt: null,
-        candidateSessionId: ids.sharedSession
+        expiresAt: null
       },
       {
         intent: "collaboration.revoke_shared_memory",
@@ -1071,6 +1175,13 @@ describe("collaboration renderer commands", () => {
       {
         intent: "collaboration.change_shared_memory_fidelity",
         commandRequestId: ids.mutation,
+        source: {
+          kind: "captured_session",
+          sessionId: ids.sharedSession,
+          logicalMemoryId: ids.logicalMemory
+        },
+        sourceCapabilities: capturedSourceCapabilities,
+        activationRepresentation: "lcm_leaves",
         mutationId: ids.mutation,
         logicalMemoryId: ids.logicalMemory,
         teamId: ids.team,
@@ -1083,8 +1194,7 @@ describe("collaboration renderer commands", () => {
         mode: "continuous",
         previewRevision: 1,
         previewHash: "b".repeat(64),
-        expiresAt: null,
-        candidateSessionId: ids.sharedSession
+        expiresAt: null
       }
     ] as const) {
       expect(
@@ -1174,21 +1284,27 @@ describe("collaboration renderer commands", () => {
   it("authorizes preview layers cumulatively and gates Curated Memory separately", () => {
     for (const input of [
       {
+        source: capturedSource(),
+        sourceCapabilities: capturedSourceCapabilities,
+        activationRepresentation: "memory_events",
         logicalMemoryId: ids.logicalMemory,
         teamId: ids.team,
         workspaceId: ids.workspace,
-        representation: "memory_events",
         maximumFidelity: "lcm_leaves",
         includeCuratedMemory: false,
+        mode: "continuous",
         actionGrant: actionGrant()
       },
       {
+        source: capturedSource(),
+        sourceCapabilities: capturedSourceCapabilities,
+        activationRepresentation: "curated_assertions",
         logicalMemoryId: ids.logicalMemory,
         teamId: ids.team,
         workspaceId: ids.workspace,
-        representation: "curated_assertions",
         maximumFidelity: "memory_events",
         includeCuratedMemory: false,
+        mode: "continuous",
         actionGrant: actionGrant()
       }
     ]) {
@@ -1204,12 +1320,12 @@ describe("collaboration renderer commands", () => {
 
     for (const input of [
       {
-        representation: "lcm_rollups",
+        activationRepresentation: "lcm_rollups",
         maximumFidelity: "memory_events",
         includeCuratedMemory: false
       },
       {
-        representation: "curated_assertions",
+        activationRepresentation: "curated_assertions",
         maximumFidelity: "lcm_rollups",
         includeCuratedMemory: true
       }
@@ -1220,9 +1336,12 @@ describe("collaboration renderer commands", () => {
           requestId: ids.request,
           command: "collaboration.preview_shared_memory",
           input: {
+            source: capturedSource(),
+            sourceCapabilities: capturedSourceCapabilities,
             logicalMemoryId: ids.logicalMemory,
             teamId: ids.team,
             workspaceId: ids.workspace,
+            mode: "continuous",
             ...input,
             actionGrant: actionGrant()
           }
@@ -1588,12 +1707,6 @@ describe("collaboration snapshots and DTOs", () => {
         ]
       }).success
     ).toBe(false);
-    expect(
-      collaborationThreadSchema.safeParse({
-        ...notesToSelf(),
-        participants: [participant(ids.otherUser, "Bob")]
-      }).success
-    ).toBe(false);
   });
 
   it("rejects cross-scope messages, unsafe failure combinations, and mixed-thread pages", () => {
@@ -1865,7 +1978,7 @@ describe("collaboration results and realtime", () => {
         command: "collaboration.revoke_shared_memory",
         data: {
           grant: {
-            ...grant(),
+            ...ownedGrant(),
             lifecycle: "revoked",
             revokedAt: timestamp
           }

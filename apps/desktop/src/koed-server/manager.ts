@@ -11,8 +11,16 @@ import {
   readDesktopLocalCredentialAuthorization,
   resolveTeamCollaborationEnabled,
   PERSONAL_DESKTOP_CONTRACT_VERSION,
+  MEMORY_ANSWER_TIMEOUT_MAX_MS,
+  MEMORY_ANSWER_TRANSPORT_OVERHEAD_MS,
   personalDesktopChangeSchema,
+  personalDesktopAskSubmitDataSchema,
+  personalDesktopAskThreadDataSchema,
+  personalDesktopAskThreadsDataSchema,
   personalDesktopEventsDataSchema,
+  personalDesktopNoteDataSchema,
+  personalDesktopNoteRenameDataSchema,
+  personalDesktopNotesDataSchema,
   personalDesktopProjectMetadataDataSchema,
   personalDesktopProjectsDataSchema,
   personalDesktopRequestSchema,
@@ -25,7 +33,6 @@ import {
   type PersonalDesktopResult
 } from "@koed/shared";
 import {
-  installLocalModel,
   listProjectMetadata,
   loadRepoEnv,
   resolveKoedServerConfig,
@@ -36,7 +43,8 @@ import {
 import {
   existsSync as nodeExistsSync,
   readFileSync,
-  readdirSync
+  readdirSync,
+  statSync
 } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -157,6 +165,16 @@ export interface KoedServerManagerOptions {
   collaborationNow?: () => number;
   collaborationSleep?: (delayMs: number, signal: AbortSignal) => Promise<void>;
   personalMemoryFetch?: typeof fetch;
+  localAiRuntimeClient?: {
+    askDesktop(
+      input: {
+        askThreadId?: string;
+        idempotencyKey: string;
+        query: string;
+      },
+      caller: { cwd: string }
+    ): Promise<Record<string, unknown>>;
+  };
   startPairingServer?: typeof startPersonalDevicePairingServer;
 }
 
@@ -395,6 +413,14 @@ const objectValue = (value: unknown): Record<string, unknown> | null =>
     ? (value as Record<string, unknown>)
     : null;
 
+const desktopAskErrorMessage = (question: Record<string, unknown>): unknown => {
+  if (question.errorMessage !== "codex_failed") return question.errorMessage;
+  const response = objectValue(question.response);
+  return typeof response?.markdown === "string" && response.markdown.trim()
+    ? response.markdown
+    : "This Ask failed before the Codex worker recorded a detailed reason. Try again.";
+};
+
 const exactDesktopArgs = (
   value: Record<string, unknown> | undefined,
   allowedKeys: string[]
@@ -470,6 +496,7 @@ const personalProjectsData = (payload: Record<string, unknown>) => {
           id: thread.id,
           name: thread.name,
           sessionId: thread.sessionId,
+          logicalMemoryId: thread.logicalMemoryId,
           sourceAiClient: thread.sourceAiClient,
           projectId: thread.projectId,
           projectName: thread.projectName,
@@ -496,16 +523,7 @@ const personalProjectsData = (payload: Record<string, unknown>) => {
             : null;
         const hasVisibleParent =
           parentThreadId !== null && threadIds.has(parentThreadId);
-        const approvalReviewEnvelope = [thread.name, thread.sample].some(
-          (value) =>
-            typeof value === "string" &&
-            isApprovalReviewTranscriptEnvelopeText(value)
-        );
-        return !(
-          thread.threadKind === "subagent" &&
-          hasVisibleParent &&
-          approvalReviewEnvelope
-        );
+        return !(thread.threadKind === "subagent" && hasVisibleParent);
       });
       return {
         id: project.id,
@@ -522,6 +540,8 @@ const personalProjectsData = (payload: Record<string, unknown>) => {
     })
   });
 };
+
+const personalDesktopEventContentMaxLength = 1_048_576;
 
 const localProjectMetadataData = (environment: NodeJS.ProcessEnv) => {
   const projects =
@@ -608,7 +628,8 @@ const personalEventsData = (payload: Record<string, unknown>) => {
         timestamp: event.timestamp,
         sourceEventTime: event.sourceEventTime,
         sourceSequence: event.sourceSequence,
-        ...(typeof event.content === "string"
+        ...(typeof event.content === "string" &&
+        event.content.length <= personalDesktopEventContentMaxLength
           ? { content: event.content }
           : {}),
         contentPreview: event.contentPreview,
@@ -661,6 +682,32 @@ export const personalMemoryChangeFromSseFrame = (
             }
           ]
         : [];
+    const questionIds = Array.isArray(payload.questionIds)
+      ? payload.questionIds
+      : payload.table === "memory_questions" && typeof payload.id === "string"
+        ? [payload.id]
+        : [];
+    const noteIds = Array.isArray(payload.noteIds)
+      ? payload.noteIds
+      : payload.table === "personal_notes" && typeof payload.id === "string"
+        ? [payload.id]
+        : [];
+    if (noteIds.length > 0) {
+      const parsed = personalDesktopChangeSchema.safeParse({
+        contractVersion: PERSONAL_DESKTOP_CONTRACT_VERSION,
+        type: "notes_changed",
+        noteIds: [...new Set(noteIds)]
+      });
+      return parsed.success ? parsed.data : null;
+    }
+    if (questionIds.length > 0) {
+      const parsed = personalDesktopChangeSchema.safeParse({
+        contractVersion: PERSONAL_DESKTOP_CONTRACT_VERSION,
+        type: "ask_questions_changed",
+        questionIds: [...new Set(questionIds)]
+      });
+      return parsed.success ? parsed.data : null;
+    }
     const seen = new Set<string>();
     const eventRefs = payloadEventRefs.flatMap((value) => {
       const ref = objectValue(value);
@@ -1225,6 +1272,7 @@ export const createKoedServerManager = ({
   revealPath,
   selectRecoveryKitPath,
   personalMemoryFetch = globalThis.fetch,
+  localAiRuntimeClient,
   startPairingServer = startPersonalDevicePairingServer
 }: KoedServerManagerOptions): KoedServerManager => {
   let serverProcess: ChildProcess | null = null;
@@ -1239,6 +1287,85 @@ export const createKoedServerManager = ({
     null;
   let personalDevicePairingServerError: string | null = null;
   void environment;
+
+  const callLocalDesktopAsk = async (
+    input: {
+      askThreadId?: string;
+      idempotencyKey: string;
+      query: string;
+    },
+    caller: { cwd: string }
+  ): Promise<Record<string, unknown>> => {
+    const configuredHome = environment.KOED_HOME?.trim();
+    const koedHome = !configuredHome
+      ? resolve(homedir(), ".koed")
+      : configuredHome === "~"
+        ? homedir()
+        : configuredHome.startsWith("~/")
+          ? resolve(homedir(), configuredHome.slice(2))
+          : resolve(configuredHome);
+    const registrationPath = resolve(koedHome, "run", "local-ai-runtime.json");
+    const stats = statSync(registrationPath);
+    if (
+      !stats.isFile() ||
+      (process.platform !== "win32" && (stats.mode & 0o077) !== 0) ||
+      (typeof process.getuid === "function" && stats.uid !== process.getuid())
+    ) {
+      throw new PersonalMemoryBoundaryError("not_ready", true);
+    }
+    const registration = JSON.parse(readFileSync(registrationPath, "utf8")) as {
+      authorization?: unknown;
+      protocolVersion?: unknown;
+      url?: unknown;
+    };
+    if (
+      registration.protocolVersion !== 1 ||
+      typeof registration.authorization !== "string" ||
+      !/^Bearer [A-Za-z0-9_-]{32,}$/u.test(registration.authorization) ||
+      typeof registration.url !== "string"
+    ) {
+      throw new PersonalMemoryBoundaryError("not_ready", true);
+    }
+    const runtimeUrl = new URL(registration.url);
+    if (
+      runtimeUrl.protocol !== "http:" ||
+      !isLoopbackHostname(runtimeUrl.hostname)
+    ) {
+      throw new PersonalMemoryBoundaryError("not_ready", true);
+    }
+    const remote = await fetchBoundedJsonObject(
+      personalMemoryFetch,
+      new URL("/v1/desktop/ask", runtimeUrl),
+      {
+        method: "POST",
+        redirect: "error",
+        headers: {
+          accept: "application/json",
+          authorization: registration.authorization,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ input, caller })
+      },
+      {
+        timeoutMs:
+          MEMORY_ANSWER_TIMEOUT_MAX_MS + MEMORY_ANSWER_TRANSPORT_OVERHEAD_MS,
+        maxBytes: 2 * 1_024 * 1_024
+      }
+    );
+    if (!remote.response.ok) {
+      throw new PersonalMemoryBoundaryError(
+        remote.response.status === 404 ? "not_ready" : "request_failed",
+        remote.response.status === 408 ||
+          remote.response.status === 429 ||
+          remote.response.status >= 500
+      );
+    }
+    return remote.payload;
+  };
+
+  const desktopAskRuntime = localAiRuntimeClient ?? {
+    askDesktop: callLocalDesktopAsk
+  };
 
   const runJson = (args: string[], timeout = 30_000) =>
     new Promise<unknown>((resolvePromise) => {
@@ -2686,6 +2813,249 @@ export const createKoedServerManager = ({
     });
   };
 
+  const listPersonalAskThreads = async (
+    input: Extract<
+      PersonalDesktopRequest,
+      { operation: "personal.ask.threads.list" }
+    >["input"]
+  ) => {
+    const query = new URLSearchParams({ limit: String(input.limit) });
+    if (input.cursor) query.set("cursor", input.cursor);
+    const payload = await authenticatedPersonalMemoryRequest(
+      ({ apiOrigin }) => ({
+        url: new URL(`/v1/memory/ask/threads?${query.toString()}`, apiOrigin),
+        init: { method: "GET" }
+      }),
+      1 * 1_024 * 1_024
+    );
+    return personalDesktopAskThreadsDataSchema.parse({
+      threads: payload.threads,
+      nextCursor: payload.next_cursor ?? null
+    });
+  };
+
+  const loadPersonalAskThread = async (
+    input: Extract<
+      PersonalDesktopRequest,
+      { operation: "personal.ask.thread.load" }
+    >["input"]
+  ) => {
+    const payload = await authenticatedPersonalMemoryRequest(
+      ({ apiOrigin }) => ({
+        url: new URL(
+          `/v1/memory/ask/threads/${encodeURIComponent(input.askThreadId)}`,
+          apiOrigin
+        ),
+        init: { method: "GET" }
+      }),
+      16 * 1_024 * 1_024
+    );
+    const questions = Array.isArray(payload.questions)
+      ? payload.questions.map((value) => {
+          const question = objectValue(value) ?? {};
+          return {
+            id: question.id,
+            askThreadId: question.askThreadId,
+            askTurnIndex: question.askTurnIndex,
+            query: question.query,
+            answerMarkdown: question.answerMarkdown,
+            errorMessage: desktopAskErrorMessage(question),
+            status: question.status,
+            createdAt: question.createdAt,
+            updatedAt: question.updatedAt,
+            answeredAt: question.answeredAt
+          };
+        })
+      : payload.questions;
+    return personalDesktopAskThreadDataSchema.parse({
+      turns: questions
+    });
+  };
+
+  const submitPersonalAsk = async (
+    input: Extract<
+      PersonalDesktopRequest,
+      { operation: "personal.ask.submit" }
+    >["input"]
+  ) =>
+    personalDesktopAskSubmitDataSchema.parse(
+      await desktopAskRuntime.askDesktop(input, { cwd: repoRoot })
+    );
+
+  const listPersonalNotes = async (
+    input: Extract<
+      PersonalDesktopRequest,
+      { operation: "personal.notes.list" }
+    >["input"]
+  ) => {
+    const query = new URLSearchParams({ limit: String(input.limit) });
+    if (input.beforeSequence !== undefined) {
+      query.set("beforeSequence", String(input.beforeSequence));
+    }
+    const payload = await authenticatedPersonalMemoryRequest(
+      ({ apiOrigin }) => ({
+        url: new URL(
+          `/v1/collaboration/personal/notes?${query.toString()}`,
+          apiOrigin
+        ),
+        init: { method: "GET" }
+      }),
+      4 * 1_024 * 1_024
+    );
+    return personalDesktopNotesDataSchema.parse({
+      notes: payload.notes,
+      nextBeforeSequence: payload.nextBeforeSequence ?? null
+    });
+  };
+
+  const loadPersonalNote = async (
+    input: Extract<
+      PersonalDesktopRequest,
+      { operation: "personal.notes.load" }
+    >["input"]
+  ) => {
+    const payload = await authenticatedPersonalMemoryRequest(
+      ({ apiOrigin }) => ({
+        url: new URL(
+          `/v1/collaboration/personal/notes/${encodeURIComponent(input.noteId)}`,
+          apiOrigin
+        ),
+        init: { method: "GET" }
+      }),
+      4 * 1_024 * 1_024
+    );
+    const note = objectValue(payload.note);
+    if (!note) {
+      throw new PersonalMemoryBoundaryError("invalid_response", false);
+    }
+    const event = note.event === null ? null : objectValue(note.event);
+    const mappedEvent = event
+      ? personalEventsData({ events: [event] }).events[0]
+      : null;
+    if (
+      (note.memoryEventId === null && note.event !== null) ||
+      (note.memoryEventId !== null &&
+        (!mappedEvent || mappedEvent.id !== note.memoryEventId))
+    ) {
+      throw new PersonalMemoryBoundaryError("invalid_response", false);
+    }
+    return personalDesktopNoteDataSchema.parse({
+      note: { ...note, event: mappedEvent }
+    });
+  };
+
+  const createPersonalNote = async (
+    input: Extract<
+      PersonalDesktopRequest,
+      { operation: "personal.notes.create" }
+    >["input"]
+  ) => {
+    const payload = await authenticatedPersonalMemoryRequest(
+      ({ apiOrigin }) => ({
+        url: new URL("/v1/collaboration/personal/notes", apiOrigin),
+        init: {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": input.idempotencyKey
+          },
+          body: JSON.stringify({ bodyText: input.body })
+        }
+      }),
+      4 * 1_024 * 1_024
+    );
+    const note = objectValue(payload.note);
+    if (!note) {
+      throw new PersonalMemoryBoundaryError("invalid_response", false);
+    }
+    const event = note.event === null ? null : objectValue(note.event);
+    const mappedEvent = event
+      ? personalEventsData({ events: [event] }).events[0]
+      : null;
+    if (
+      (note.memoryEventId === null && note.event !== null) ||
+      (note.memoryEventId !== null &&
+        (!mappedEvent || mappedEvent.id !== note.memoryEventId))
+    ) {
+      throw new PersonalMemoryBoundaryError("invalid_response", false);
+    }
+    return personalDesktopNoteDataSchema.parse({
+      note: { ...note, event: mappedEvent }
+    });
+  };
+
+  const renamePersonalNote = async (
+    input: Extract<
+      PersonalDesktopRequest,
+      { operation: "personal.notes.rename" }
+    >["input"]
+  ) => {
+    const payload = await authenticatedPersonalMemoryRequest(
+      ({ apiOrigin }) => ({
+        url: new URL(
+          `/v1/collaboration/personal/notes/${encodeURIComponent(input.noteId)}/title`,
+          apiOrigin
+        ),
+        init: {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            expectedTitleVersion: input.expectedTitleVersion,
+            title: input.title
+          })
+        }
+      }),
+      1 * 1_024 * 1_024
+    );
+    return personalDesktopNoteRenameDataSchema.parse({ note: payload.note });
+  };
+
+  const updatePersonalNote = async (
+    input: Extract<
+      PersonalDesktopRequest,
+      { operation: "personal.notes.update" }
+    >["input"]
+  ) => {
+    const payload = await authenticatedPersonalMemoryRequest(
+      ({ apiOrigin }) => ({
+        url: new URL(
+          `/v1/collaboration/personal/notes/${encodeURIComponent(input.noteId)}/body`,
+          apiOrigin
+        ),
+        init: {
+          method: "PATCH",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": input.idempotencyKey
+          },
+          body: JSON.stringify({
+            expectedRevision: input.expectedRevision,
+            bodyText: input.body
+          })
+        }
+      }),
+      4 * 1_024 * 1_024
+    );
+    const note = objectValue(payload.note);
+    if (!note) {
+      throw new PersonalMemoryBoundaryError("invalid_response", false);
+    }
+    const event = note.event === null ? null : objectValue(note.event);
+    const mappedEvent = event
+      ? personalEventsData({ events: [event] }).events[0]
+      : null;
+    if (
+      (note.memoryEventId === null && note.event !== null) ||
+      (note.memoryEventId !== null &&
+        (!mappedEvent || mappedEvent.id !== note.memoryEventId))
+    ) {
+      throw new PersonalMemoryBoundaryError("invalid_response", false);
+    }
+    return personalDesktopNoteDataSchema.parse({
+      note: { ...note, event: mappedEvent }
+    });
+  };
+
   const localAiClientReadModel = async () => {
     const payload = await authenticatedPersonalMemoryRequest(
       ({ apiOrigin }) => ({
@@ -2760,15 +3130,37 @@ export const createKoedServerManager = ({
     const request = personalDesktopRequestSchema.parse(value);
     try {
       const data =
-        request.operation === "personal.projects.list"
-          ? await listPersonalProjects()
-          : request.operation === "personal.projects.metadata.list"
-            ? localProjectMetadataData(environment)
-            : request.operation === "personal.events.load_page"
-              ? await loadPersonalEventPage(request.input)
-              : request.operation === "personal.sessions.assign_project"
-                ? await assignPersonalSessionProject(request.input)
-                : await updatePersonalSessionTitle(request.input);
+        request.operation === "personal.ask.threads.list"
+          ? await listPersonalAskThreads(request.input)
+          : request.operation === "personal.ask.thread.load"
+            ? await loadPersonalAskThread(request.input)
+            : request.operation === "personal.ask.submit"
+              ? await submitPersonalAsk(request.input)
+              : request.operation === "personal.notes.list"
+                ? await listPersonalNotes(request.input)
+                : request.operation === "personal.notes.load"
+                  ? await loadPersonalNote(request.input)
+                  : request.operation === "personal.notes.create"
+                    ? await createPersonalNote(request.input)
+                    : request.operation === "personal.notes.rename"
+                      ? await renamePersonalNote(request.input)
+                      : request.operation === "personal.notes.update"
+                        ? await updatePersonalNote(request.input)
+                        : request.operation === "personal.projects.list"
+                          ? await listPersonalProjects()
+                          : request.operation ===
+                              "personal.projects.metadata.list"
+                            ? localProjectMetadataData(environment)
+                            : request.operation === "personal.events.load_page"
+                              ? await loadPersonalEventPage(request.input)
+                              : request.operation ===
+                                  "personal.sessions.assign_project"
+                                ? await assignPersonalSessionProject(
+                                    request.input
+                                  )
+                                : await updatePersonalSessionTitle(
+                                    request.input
+                                  );
       return personalDesktopResultSchema.parse({
         contractVersion: PERSONAL_DESKTOP_CONTRACT_VERSION,
         operation: request.operation,
@@ -2974,11 +3366,15 @@ export const createKoedServerManager = ({
         "policy",
         "--id",
         backendId,
+        "--personal-collaboration",
+        "enabled",
         "--team-workspace-read",
         "enabled",
         "--share-grant-management",
         "enabled",
         "--sync",
+        "enabled",
+        "--managed-execution",
         "enabled",
         "--admin",
         "enabled"
@@ -3167,48 +3563,15 @@ export const createKoedServerManager = ({
         );
       }
       case "model": {
-        const result = await installLocalModel(
-          resolveKoedServerPaths(environment),
-          "embedding",
-          environment,
-          {
-            fetch: personalMemoryFetch,
-            onProgress: (progress) => {
-              onProgress({
-                completedBytes: progress.completedBytes,
-                message:
-                  progress.phase === "downloading"
-                    ? "Downloading embedding model…"
-                    : progress.phase === "verifying"
-                      ? "Verifying embedding model…"
-                      : "Embedding model verified.",
-                totalBytes: progress.totalBytes
-              });
-            }
-          }
-        );
-        if (!result.ok || !resolveTeamCollaborationEnabled(environment)) {
-          return {
-            ok: result.ok,
-            message: result.message
-          };
-        }
         onProgress({
           completedBytes: null,
-          message: "Downloading Privacy Filter model…",
+          message: "Installing required local models…",
           totalBytes: null
         });
-        const privacyModel = await runJson(
-          ["models", "install", "--kind", "privacy"],
-          600_000
+        return setupActionResult(
+          await runModelInstallJson(),
+          "Required local model installation failed."
         );
-        return {
-          ok: resultOk(privacyModel),
-          message: resultMessage(
-            privacyModel,
-            "Privacy Filter model installation failed."
-          )
-        };
       }
       case "services": {
         onProgress({

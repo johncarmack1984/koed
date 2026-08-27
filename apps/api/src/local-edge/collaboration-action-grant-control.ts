@@ -11,7 +11,8 @@ import {
   type CollaborationActionGrantIntent,
   type CollaborationActionGrantReference,
   type CollaborationCommandResult,
-  type CollaborationRendererCommand
+  type CollaborationRendererCommand,
+  type SharedMemorySourceRef
 } from "@koed/shared";
 import { z } from "zod";
 
@@ -68,23 +69,38 @@ export interface CollaborationActionGrantControlContext {
     "action_grant" | "share_grant_management" | "managed_execution"
   >;
   resolveSharedMemoryPreviewTarget?: (input: {
+    source: SharedMemorySourceRef;
+    sourceCapabilities: Array<
+      "memory_events" | "lcm_leaves" | "lcm_rollups" | "curated_assertions"
+    >;
     logicalMemoryId: string;
     teamId: string;
     workspaceId: string;
-    representation:
+    activationRepresentation:
       | "memory_events"
       | "lcm_leaves"
       | "lcm_rollups"
       | "curated_assertions";
     maximumFidelity: "memory_events" | "lcm_leaves" | "lcm_rollups";
     includeCuratedMemory: boolean;
+    mode: "snapshot" | "continuous";
   }) => Promise<{ remoteReplicaId: string } | null>;
   resolveSharedMemoryConsentPreview?: (input: {
+    source: SharedMemorySourceRef;
+    sourceCapabilities: Array<
+      "memory_events" | "lcm_leaves" | "lcm_rollups" | "curated_assertions"
+    >;
+    activationRepresentation:
+      | "memory_events"
+      | "lcm_leaves"
+      | "lcm_rollups"
+      | "curated_assertions";
     logicalMemoryId: string;
     teamId: string;
     workspaceId: string;
     maximumFidelity: "memory_events" | "lcm_leaves" | "lcm_rollups";
     includeCuratedMemory: boolean;
+    mode: "snapshot" | "continuous";
     previewRevision: number;
     previewHash: string;
   }) => Promise<{ previewId: string } | null>;
@@ -102,6 +118,10 @@ export interface CollaborationActionGrantControlOptions {
   actionGrantTtlMs?: number;
   ambiguousResponseWindowMs?: number;
   random?: () => number;
+  resolveCandidateSourceIdentity?(localOwnerUserId: string): {
+    sourceDeploymentProtocolId: string;
+    sourceOwnerPrincipalId: string;
+  } | null;
 }
 
 export interface CollaborationActionGrantControl {
@@ -129,6 +149,7 @@ class ControlFailure extends Error {
       | "conflict"
       | "rate_limited"
       | "temporarily_unavailable"
+      | "protocol_mismatch"
       | "internal_error",
     readonly retryAfterMs: number | null = null
   ) {
@@ -195,16 +216,19 @@ const collaborationActionGrantOperationForIntent = (
   resolved?: {
     sharedMemoryRemoteReplicaId?: string;
     sharedMemoryPreviewId?: string;
+  },
+  candidateSourceIdentity?: {
+    sourceDeploymentProtocolId: string;
+    sourceOwnerPrincipalId: string;
   }
 ): CollaborationActionGrantIntentOperation | null => {
   const remoteIntent = highRiskActionGrantIntentFromCollaborationIntent(
     backend.baseUrl,
     intent,
-    resolved
+    resolved,
+    candidateSourceIdentity
   );
-  if (!remoteIntent) {
-    return null;
-  }
+  if (!remoteIntent) return null;
   const operation = resolveHighRiskActionGrantOperation({
     clientRequestId: referenceId,
     intent: remoteIntent
@@ -341,6 +365,12 @@ const mapPermanentFailure = (status: number): ControlFailure => {
 const decisionResponseMayBeAmbiguous = (status: number): boolean =>
   status >= 500;
 
+const supportsCandidateSourceAdmission = (
+  backend: LocalEdgeUpstreamBackend
+): boolean =>
+  backend.capabilities?.payload?.protocols?.sharedMemorySourceAdmission
+    ?.version === 1;
+
 const hasDeviceContext = (
   context: CollaborationActionGrantControlContext
 ): context is CollaborationActionGrantControlContext & {
@@ -367,7 +397,8 @@ export const createCollaborationActionGrantControl = (
     actionGrantTtlMs: input.actionGrantTtlMs ?? ACTION_GRANT_TTL_MS,
     ambiguousResponseWindowMs:
       input.ambiguousResponseWindowMs ?? AMBIGUOUS_RESPONSE_WINDOW_MS,
-    random: input.random ?? Math.random
+    random: input.random ?? Math.random,
+    resolveCandidateSourceIdentity: input.resolveCandidateSourceIdentity
   };
   const lifecycle =
     input.actionGrantLifecycle ??
@@ -393,23 +424,30 @@ export const createCollaborationActionGrantControl = (
           const previewTarget =
             intent.intent === "collaboration.preview_shared_memory"
               ? await context.resolveSharedMemoryPreviewTarget?.({
+                  source: intent.source,
+                  sourceCapabilities: intent.sourceCapabilities,
+                  activationRepresentation: intent.activationRepresentation,
                   logicalMemoryId: intent.logicalMemoryId,
                   teamId: intent.teamId,
                   workspaceId: intent.workspaceId,
-                  representation: intent.representation,
                   maximumFidelity: intent.maximumFidelity,
-                  includeCuratedMemory: intent.includeCuratedMemory
+                  includeCuratedMemory: intent.includeCuratedMemory,
+                  mode: intent.mode
                 })
               : null;
           const consentPreview =
             intent.intent === "collaboration.share_memory" ||
             intent.intent === "collaboration.change_shared_memory_fidelity"
               ? await context.resolveSharedMemoryConsentPreview?.({
+                  source: intent.source,
+                  sourceCapabilities: intent.sourceCapabilities,
+                  activationRepresentation: intent.activationRepresentation,
                   logicalMemoryId: intent.logicalMemoryId,
                   teamId: intent.teamId,
                   workspaceId: intent.workspaceId,
                   maximumFidelity: intent.maximumFidelity,
                   includeCuratedMemory: intent.includeCuratedMemory,
+                  mode: intent.mode,
                   previewRevision: intent.previewRevision,
                   previewHash: intent.previewHash
                 })
@@ -440,20 +478,40 @@ export const createCollaborationActionGrantControl = (
                   sharedMemoryPreviewId: consentPreview?.previewId
                 }
               : undefined;
+          const isCandidatePreview =
+            intent.intent === "collaboration.preview_shared_memory" &&
+            intent.candidate !== undefined;
+          if (
+            isCandidatePreview &&
+            !supportsCandidateSourceAdmission(context.backend)
+          ) {
+            return failure(command, new ControlFailure("protocol_mismatch"));
+          }
+          const referenceId = options.randomUuid();
+          const candidateSourceIdentity =
+            isCandidatePreview && context.localOwnerUserId
+              ? (options.resolveCandidateSourceIdentity?.(
+                  context.localOwnerUserId
+                ) ?? null)
+              : undefined;
+          if (isCandidatePreview && !candidateSourceIdentity) {
+            return failure(command, new ControlFailure("not_available"));
+          }
           const remoteIntent = highRiskActionGrantIntentFromCollaborationIntent(
             context.backend.baseUrl,
             intent,
-            resolved
+            resolved,
+            candidateSourceIdentity ?? undefined
           );
           if (!remoteIntent) {
             return failure(command, new ControlFailure("invalid_input"));
           }
-          const referenceId = options.randomUuid();
           const operation = collaborationActionGrantOperationForIntent(
             context.backend,
             intent,
             referenceId,
-            resolved
+            resolved,
+            candidateSourceIdentity ?? undefined
           );
           if (!operation) {
             return failure(command, new ControlFailure("invalid_input"));
@@ -717,10 +775,20 @@ export const createCollaborationActionGrantControl = (
     intent: CollaborationActionGrantIntent;
     context: CollaborationActionGrantControlContext;
   }): Promise<string | null> => {
+    const candidateSourceIdentity =
+      input.intent.intent === "collaboration.preview_shared_memory" &&
+      input.intent.candidate &&
+      input.context.localOwnerUserId
+        ? (options.resolveCandidateSourceIdentity?.(
+            input.context.localOwnerUserId
+          ) ?? undefined)
+        : undefined;
     const operation = collaborationActionGrantOperationForIntent(
       input.context.backend,
       input.intent,
-      input.reference.id
+      input.reference.id,
+      undefined,
+      candidateSourceIdentity
     );
     const deviceCredentialId = input.context.upstreamDeviceCredentialId;
     if (

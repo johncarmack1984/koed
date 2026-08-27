@@ -6,6 +6,10 @@ import type {
   TeamWorkspaceRecord,
   UserRecord
 } from "@koed/db";
+import {
+  sharedMemoryGrantScopedPrincipalId,
+  sharedMemoryGrantScopedSourceId
+} from "@koed/shared";
 import Fastify, { type FastifyRequest } from "fastify";
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
@@ -396,6 +400,119 @@ describe("Team lifecycle routes", () => {
         }
       ]
     });
+    await fixture.app.close();
+  });
+
+  it("preserves the source contract for active Shared Memory grants", async () => {
+    const logicalMemoryId = randomUUID();
+    const shareGrantId = randomUUID();
+    const updatedAt = now();
+    const fixture = await createFixture({
+      repository: {
+        getAuthorizedSnapshot: vi.fn(async () => ({
+          scope: "team" as const,
+          personalOwnerUserId: null,
+          teamId,
+          highWaterCursor: 0,
+          threads: [
+            {
+              id: randomUUID(),
+              logicalId: randomUUID(),
+              scope: "team" as const,
+              kind: "shared_session_discussion" as const,
+              personalOwnerUserId: null,
+              teamId,
+              teamWorkspaceId: workspaceId,
+              sharedLogicalMemoryId: logicalMemoryId,
+              shareGrantId,
+              systemKey: null,
+              name: null,
+              topic: null,
+              createdByUserId: user.id,
+              version: 1,
+              lifecycle: "active" as const,
+              latestSequence: 0,
+              lastReadMessageId: null,
+              lastReadSequence: 0,
+              unreadCount: 0,
+              participants: [],
+              createdAt: updatedAt,
+              updatedAt,
+              lastActivityAt: updatedAt,
+              archivedAt: null
+            }
+          ]
+        })),
+        listWorkspaceGrants: vi.fn(async () => ({
+          entries: [
+            {
+              shareGrantId,
+              logicalMemoryId,
+              ownerUserId: user.id,
+              ownerDisplayName: user.displayName,
+              sourceCapabilities: ["memory_events"],
+              activationRepresentation: "memory_events",
+              maximumFidelity: "memory_events",
+              includeCuratedMemory: false,
+              title: "Shared Note",
+              activeRepresentation: "memory_events",
+              representationState: "available",
+              representationSourceRevision: 1,
+              representationUpdatedAt: updatedAt,
+              freshness: "fresh",
+              lifecycle: "active",
+              createdAt: updatedAt,
+              updatedAt,
+              companionScope: {
+                scope: "team",
+                kind: "shared_session_discussion",
+                teamId,
+                teamWorkspaceId: workspaceId,
+                logicalMemoryId,
+                shareGrantId
+              }
+            }
+          ],
+          limit: 100,
+          offset: 0,
+          hasMore: false
+        }))
+      }
+    });
+
+    const response = await fixture.app.inject({
+      method: "GET",
+      url: "/v1/teams/navigation"
+    });
+
+    expect(response.statusCode).toBe(200);
+    const navigationGrant =
+      response.json().teams[0].workspaces[0].shareGrants[0];
+    expect(navigationGrant).toMatchObject({
+      id: shareGrantId,
+      logicalMemoryId: sharedMemoryGrantScopedSourceId(
+        shareGrantId,
+        logicalMemoryId
+      ),
+      ownerDisplayName: user.displayName,
+      sourceCapabilities: ["memory_events"],
+      activationRepresentation: "memory_events",
+      companionScope: {
+        logicalMemoryId: sharedMemoryGrantScopedSourceId(
+          shareGrantId,
+          logicalMemoryId
+        )
+      }
+    });
+    expect(navigationGrant).not.toHaveProperty("ownerUserId");
+    const navigationThread = response.json().teams[0].threads[0];
+    expect(navigationThread.sharedLogicalMemoryId).toBe(
+      sharedMemoryGrantScopedSourceId(shareGrantId, logicalMemoryId)
+    );
+    expect(navigationThread.createdByUserId).toBe(
+      sharedMemoryGrantScopedPrincipalId(shareGrantId, user.id)
+    );
+    expect(JSON.stringify(response.json())).not.toContain(logicalMemoryId);
     await fixture.app.close();
   });
 

@@ -1,3 +1,4 @@
+import type { MemorySourceRepository } from "@koed/db";
 import { describe, expect, it, vi } from "vitest";
 import {
   createLocalSharedMemoryCandidatePreparation,
@@ -61,6 +62,12 @@ describe("createLocalSharedMemoryCandidatePreparation", () => {
     getSharedMemoryLcmSyncState: vi.fn(
       async (): Promise<"pending" | "ready"> => "ready"
     ),
+    getLocalSyncDeployment: vi.fn(async () => ({
+      protocolDeploymentId: "deployment-1"
+    })),
+    getPersonalNoteRevisionMemoryEvent: vi.fn<
+      MemorySourceRepository["getPersonalNoteRevisionMemoryEvent"]
+    >(async () => null),
     listCuratedMemoryAssertions: vi.fn(
       async (): Promise<Array<Record<string, unknown>>> => []
     ),
@@ -69,6 +76,9 @@ describe("createLocalSharedMemoryCandidatePreparation", () => {
     ),
     listLcmGraphNodes: vi.fn(
       async (): Promise<Array<Record<string, unknown>>> => []
+    ),
+    listCapturedSessionSyncEligibleLcmNodeIds: vi.fn(
+      async (): Promise<string[]> => []
     ),
     listLcmGraphThreads: vi.fn(async () => [
       {
@@ -109,7 +119,8 @@ describe("createLocalSharedMemoryCandidatePreparation", () => {
     const input = {
       localOwnerUserId: "owner-1",
       sessionId: "session-1",
-      representation: "memory_events" as const
+      representation: "memory_events" as const,
+      mode: "continuous" as const
     };
     const first = await preparation.loadCandidatePreview(input);
     const second = await preparation.loadCandidatePreview(input);
@@ -121,6 +132,80 @@ describe("createLocalSharedMemoryCandidatePreparation", () => {
       items: [{ id: "event-1", sequence: 2 }]
     });
     expect(second?.candidateHash).toBe(first?.candidateHash);
+    expect(candidateRepository.listLcmGraphEvents).toHaveBeenCalledWith(
+      { userId: "owner-1" },
+      expect.objectContaining({ canonicalCapturedSessionEventsOnly: true })
+    );
+  });
+
+  it("builds one owner-bound immutable Personal Note candidate", async () => {
+    const candidateRepository = repository();
+    const noteId = "00000000-0000-4000-8000-000000000011";
+    const eventId = "00000000-0000-4000-8000-000000000012";
+    candidateRepository.getPersonalNoteRevisionMemoryEvent.mockResolvedValue({
+      id: eventId,
+      actor: "user",
+      eventType: "message",
+      sourceRuntime: "codex",
+      captureMethod: "api",
+      model: null,
+      projectId: null,
+      projectName: null,
+      projectPath: null,
+      sessionId: null,
+      threadId: null,
+      threadName: null,
+      content: "Immutable Note body",
+      contentPreview: "Immutable Note body",
+      rawContent: undefined,
+      metadata: {},
+      linkedNodeIds: [],
+      timestamp: "2026-08-18T12:00:00.000Z",
+      sourceEventTime: "2026-08-18T12:00:00.000Z",
+      sourceSequence: 7,
+      capturedAt: "2026-08-18T12:00:00.000Z",
+      createdAt: "2026-08-18T12:00:00.000Z",
+      visibility: "personal",
+      invalidatedAt: null,
+      invalidationReason: null
+    });
+    const preparation = createLocalSharedMemoryCandidatePreparation({
+      repository: candidateRepository as never,
+      resolveDeploymentId: () => "deployment-1",
+      requestLcmSummaryWork: vi.fn()
+    });
+    const input = {
+      localOwnerUserId: "00000000-0000-4000-8000-000000000010",
+      noteId,
+      noteRevision: 4,
+      mode: "snapshot" as const
+    };
+    const first = await preparation.loadPersonalNoteCandidatePreview(input);
+    const reloaded = await preparation.loadPersonalNoteCandidatePreview(input);
+
+    expect(first).toMatchObject({
+      source: {
+        kind: "personal_note",
+        noteId,
+        noteRevision: 4,
+        memoryEventId: eventId
+      },
+      sourceCapabilities: ["memory_events"],
+      activationRepresentation: "memory_events",
+      mode: "snapshot",
+      sourceRevision: 4,
+      itemCount: 1,
+      excludedItemCount: 0,
+      manifest: [{ sourceId: eventId }],
+      items: [{ id: eventId, sequence: 1 }]
+    });
+    expect(reloaded?.candidateHash).toBe(first?.candidateHash);
+    expect(
+      candidateRepository.getPersonalNoteRevisionMemoryEvent
+    ).toHaveBeenCalledWith(
+      { userId: input.localOwnerUserId },
+      { noteId, revision: 4 }
+    );
   });
 
   it("maps current curated assertions with eligible evidence", async () => {
@@ -148,7 +233,8 @@ describe("createLocalSharedMemoryCandidatePreparation", () => {
       preparation.loadCandidatePreview({
         localOwnerUserId: "owner-1",
         sessionId: "session-1",
-        representation: "curated_assertions"
+        representation: "curated_assertions",
+        mode: "continuous"
       })
     ).resolves.toMatchObject({
       itemCount: 1,
@@ -196,7 +282,8 @@ describe("createLocalSharedMemoryCandidatePreparation", () => {
       preparation.loadCandidatePreview({
         localOwnerUserId: "owner-1",
         sessionId: "session-1",
-        representation: "memory_events"
+        representation: "memory_events",
+        mode: "continuous"
       })
     ).resolves.toBeNull();
   });
@@ -223,7 +310,8 @@ describe("createLocalSharedMemoryCandidatePreparation", () => {
     const candidate = await preparation.loadCandidatePreview({
       localOwnerUserId: "owner-1",
       sessionId: "session-1",
-      representation: "memory_events"
+      representation: "memory_events",
+      mode: "continuous"
     });
 
     expect(candidate).toMatchObject({
@@ -256,7 +344,8 @@ describe("createLocalSharedMemoryCandidatePreparation", () => {
       preparation.loadCandidatePreview({
         localOwnerUserId: "owner-1",
         sessionId: "session-1",
-        representation: "memory_events"
+        representation: "memory_events",
+        mode: "continuous"
       })
     ).resolves.toBeNull();
   });
@@ -278,6 +367,9 @@ describe("createLocalSharedMemoryCandidatePreparation", () => {
         }
       }
     ]);
+    candidateRepository.listCapturedSessionSyncEligibleLcmNodeIds.mockResolvedValue(
+      ["00000000-0000-4000-8000-000000000002"]
+    );
     const preparation = createLocalSharedMemoryCandidatePreparation({
       repository: candidateRepository as never,
       resolveDeploymentId: () => "deployment-1",
@@ -288,11 +380,40 @@ describe("createLocalSharedMemoryCandidatePreparation", () => {
       preparation.loadCandidatePreview({
         localOwnerUserId: "owner-1",
         sessionId: "session-1",
-        representation: "lcm_leaves"
+        representation: "lcm_leaves",
+        mode: "continuous"
       })
     ).resolves.toMatchObject({
       items: [{ lexicalAnchors: ["Approval Activity"] }]
     });
+  });
+
+  it("excludes LCM nodes whose provenance cannot cross the sync boundary", async () => {
+    const candidateRepository = repository();
+    candidateRepository.listLcmGraphNodes.mockResolvedValue([
+      {
+        id: "00000000-0000-4000-8000-000000000003",
+        kind: "leaf",
+        updatedAt: "2026-08-14T10:00:00.000Z",
+        summaryText: "This leaf includes excluded Approval Activity.",
+        sourceEventCount: 2,
+        summaryStructuredJson: {}
+      }
+    ]);
+    const preparation = createLocalSharedMemoryCandidatePreparation({
+      repository: candidateRepository as never,
+      resolveDeploymentId: () => "deployment-1",
+      requestLcmSummaryWork: vi.fn()
+    });
+
+    await expect(
+      preparation.loadCandidatePreview({
+        localOwnerUserId: "owner-1",
+        sessionId: "session-1",
+        representation: "lcm_leaves",
+        mode: "snapshot"
+      })
+    ).resolves.toMatchObject({ items: [], itemCount: 0 });
   });
 
   it("wakes LCM work only while the prepared representation is pending", async () => {
