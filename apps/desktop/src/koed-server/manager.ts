@@ -13,6 +13,7 @@ import {
   PERSONAL_DESKTOP_CONTRACT_VERSION,
   personalDesktopChangeSchema,
   personalDesktopEventsDataSchema,
+  personalDesktopProjectMetadataDataSchema,
   personalDesktopProjectsDataSchema,
   personalDesktopRequestSchema,
   personalDesktopResultSchema,
@@ -25,6 +26,7 @@ import {
 } from "@koed/shared";
 import {
   installLocalModel,
+  listProjectMetadata,
   loadRepoEnv,
   resolveKoedServerConfig,
   resolveKoedServerPaths,
@@ -149,6 +151,7 @@ export interface KoedServerManagerOptions {
   ) => ChildProcess;
   openExternal: (url: string) => Promise<unknown>;
   openPath?: (path: string) => Promise<string>;
+  revealPath?: (path: string) => void;
   selectRecoveryKitPath?: () => Promise<string | null>;
   collaborationRandom?: () => number;
   collaborationNow?: () => number;
@@ -517,6 +520,33 @@ const personalProjectsData = (payload: Record<string, unknown>) => {
         threads: visibleThreads
       };
     })
+  });
+};
+
+const localProjectMetadataData = (environment: NodeJS.ProcessEnv) => {
+  const projects =
+    listProjectMetadata(resolveKoedServerPaths(environment)).projects ?? [];
+  return personalDesktopProjectMetadataDataSchema.parse({
+    projects: projects.map((project) => ({
+      schemaVersion: project.schemaVersion,
+      discoveredAt: project.discoveredAt,
+      lastSeenAt: project.lastSeenAt,
+      localProjectId: project.localProjectId,
+      displayName: project.displayName,
+      path: {
+        cwd: project.path.cwd,
+        projectRoot: project.path.projectRoot
+      },
+      ...(project.git
+        ? {
+            git: {
+              branch: project.git.branch,
+              isWorktree: project.git.isWorktree,
+              remotes: project.git.remotes.map(({ display }) => ({ display }))
+            }
+          }
+        : {})
+    }))
   });
 };
 
@@ -1165,7 +1195,7 @@ export const createKoedEnvironment = (
           KOED_DEPENDENCY_MODE: dependencyMode,
           KOED_TEAM_COLLABORATION_ENABLED: valueOr(
             "KOED_TEAM_COLLABORATION_ENABLED",
-            "true"
+            "false"
           ),
           WORK_QUEUE_BACKEND: valueOr("WORK_QUEUE_BACKEND", "local"),
           ...(options.packagedDesktop
@@ -1192,6 +1222,7 @@ export const createKoedServerManager = ({
   spawn,
   openExternal,
   openPath,
+  revealPath,
   selectRecoveryKitPath,
   personalMemoryFetch = globalThis.fetch,
   startPairingServer = startPersonalDevicePairingServer
@@ -2731,11 +2762,13 @@ export const createKoedServerManager = ({
       const data =
         request.operation === "personal.projects.list"
           ? await listPersonalProjects()
-          : request.operation === "personal.events.load_page"
-            ? await loadPersonalEventPage(request.input)
-            : request.operation === "personal.sessions.assign_project"
-              ? await assignPersonalSessionProject(request.input)
-              : await updatePersonalSessionTitle(request.input);
+          : request.operation === "personal.projects.metadata.list"
+            ? localProjectMetadataData(environment)
+            : request.operation === "personal.events.load_page"
+              ? await loadPersonalEventPage(request.input)
+              : request.operation === "personal.sessions.assign_project"
+                ? await assignPersonalSessionProject(request.input)
+                : await updatePersonalSessionTitle(request.input);
       return personalDesktopResultSchema.parse({
         contractVersion: PERSONAL_DESKTOP_CONTRACT_VERSION,
         operation: request.operation,
@@ -3154,9 +3187,27 @@ export const createKoedServerManager = ({
             }
           }
         );
+        if (!result.ok || !resolveTeamCollaborationEnabled(environment)) {
+          return {
+            ok: result.ok,
+            message: result.message
+          };
+        }
+        onProgress({
+          completedBytes: null,
+          message: "Downloading Privacy Filter model…",
+          totalBytes: null
+        });
+        const privacyModel = await runJson(
+          ["models", "install", "--kind", "privacy"],
+          600_000
+        );
         return {
-          ok: result.ok,
-          message: result.message
+          ok: resultOk(privacyModel),
+          message: resultMessage(
+            privacyModel,
+            "Privacy Filter model installation failed."
+          )
         };
       }
       case "services": {
@@ -3631,6 +3682,49 @@ export const createKoedServerManager = ({
         }
         await openExternal(url);
         return { ok: true };
+      },
+      reveal_local_project: async (args) => {
+        const localProjectId = exactDesktopArgs(args, [
+          "localProjectId"
+        ]).localProjectId;
+        if (
+          typeof localProjectId !== "string" ||
+          !/^lp_[0-9a-f]{32}$/.test(localProjectId)
+        ) {
+          throw new Error("Local Project identity is invalid.");
+        }
+        const revealTrustedPath = revealPath;
+        if (!revealTrustedPath) {
+          return {
+            ok: false,
+            error: "Local Project reveal is unavailable."
+          };
+        }
+        try {
+          const project = (
+            listProjectMetadata(resolveKoedServerPaths(environment)).projects ??
+            []
+          ).find((candidate) => candidate.localProjectId === localProjectId);
+          const trustedPath = project?.path.projectRoot ?? project?.path.cwd;
+          if (
+            typeof trustedPath !== "string" ||
+            !trustedPath.trim() ||
+            resolve(trustedPath) !== trustedPath ||
+            !existsSync(trustedPath)
+          ) {
+            return {
+              ok: false,
+              error: "Local Project path is unavailable."
+            };
+          }
+          revealTrustedPath(trustedPath);
+          return { ok: true };
+        } catch {
+          return {
+            ok: false,
+            error: "Local Project path is unavailable."
+          };
+        }
       },
       open_logs: async () => {
         const logsDir = resolve(resolveKoedHome(environment), "logs");
