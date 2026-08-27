@@ -3,7 +3,11 @@ export {
   resolveKoedServerConfig,
   writeKoedServerConfig
 } from "./config.js";
-export { collectKoedServerDoctor, collectKoedServerStatus } from "./status.js";
+export {
+  collectKoedServerDoctor,
+  collectKoedServerStartupStatus,
+  collectKoedServerStatus
+} from "./status.js";
 export { restartKoedServer } from "./restart.js";
 export { removeCodexIntegration, setupCore, setupCodex } from "./setup.js";
 export { removePi, setupPi } from "./pi-setup.js";
@@ -156,5 +160,6 @@ export type {
   KoedServerDoctorCheck,
   KoedServerDoctorResult,
   KoedServerRuntimeState,
+  KoedServerStartupStatus,
   KoedServerStatus
 } from "./types.js";
