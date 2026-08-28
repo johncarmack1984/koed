@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  consumeDesktopActivation,
   createDesktopWindowActivator,
   shouldQuitAfterAllWindowsClosed,
   type DesktopWindowHandle
@@ -15,8 +16,21 @@ describe("Desktop window lifecycle", () => {
     expect(shouldQuitAfterAllWindowsClosed("darwin")).toBe(false);
   });
 
-  it("quits after the last window closes on Windows", () => {
-    expect(shouldQuitAfterAllWindowsClosed("win32")).toBe(true);
+  it("keeps the app running on Windows so the tray can reopen the window", () => {
+    expect(shouldQuitAfterAllWindowsClosed("win32")).toBe(false);
+  });
+
+  it("suppresses only the initial macOS background activation", () => {
+    const initial = consumeDesktopActivation(true);
+    expect(initial).toEqual({
+      backgroundLaunchPending: false,
+      openWindow: false
+    });
+
+    expect(consumeDesktopActivation(initial.backgroundLaunchPending)).toEqual({
+      backgroundLaunchPending: false,
+      openWindow: true
+    });
   });
 
   it("waits for bootstrap before creating a window", async () => {
@@ -83,5 +97,23 @@ describe("Desktop window lifecycle", () => {
     expect(window.restore).toHaveBeenCalledOnce();
     expect(window.show).toHaveBeenCalledOnce();
     expect(window.focus).toHaveBeenCalledOnce();
+  });
+
+  it("restores app-level visibility before opening a window", async () => {
+    const order: string[] = [];
+    const activate = createDesktopWindowActivator({
+      beforeOpen: () => {
+        order.push("app");
+      },
+      createWindow: async () => {
+        order.push("window");
+      },
+      getWindow: () => null,
+      waitForBootstrap: async () => undefined
+    });
+
+    await activate();
+
+    expect(order).toEqual(["app", "window"]);
   });
 });

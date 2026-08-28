@@ -7,6 +7,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createKoedMcpServer,
+  KOED_MCP_UNAVAILABLE_MESSAGE,
   type McpCallerContextResolver
 } from "../src/mcp-server-factory.js";
 import type { LocalAiRuntimeClient } from "../src/local-runtime-client.js";
@@ -111,17 +112,69 @@ describe("Koed MCP 2026-07-28 protocol", () => {
     ]);
   });
 
-  it("fails initialization while Local AI Runtime capabilities are unavailable", async () => {
+  it("starts in degraded mode and recovers when Koed becomes available", async () => {
+    const callTool = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("runtime is starting"))
+      .mockResolvedValue({ ok: true });
+    const capabilities = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("runtime is starting"))
+      .mockResolvedValue({
+        protocolVersion: 1 as const,
+        curatedMemoryIntakeAvailable: true
+      });
     const runtimeClient = {
-      capabilities: async () => {
-        throw new Error("runtime is starting");
-      },
-      callTool: vi.fn()
+      capabilities,
+      callTool
     } as unknown as LocalAiRuntimeClient;
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const server = serveStdio(
+      (context) => createKoedMcpServer(context, { runtimeClient }),
+      { transport: serverTransport, legacy: "serve" }
+    );
+    const client = new Client(
+      { name: "unavailable-koed-test", version: "1.0.0" },
+      { capabilities: {}, versionNegotiation: { mode: "legacy" } }
+    );
+
+    await expect(client.connect(clientTransport)).resolves.toBeUndefined();
+    await expect(client.listTools()).resolves.toMatchObject({
+      tools: [{ name: "memory_answer" }]
+    });
 
     await expect(
-      createKoedMcpServer({} as never, { runtimeClient })
-    ).rejects.toThrow("runtime is starting");
+      client.callTool({
+        name: "memory_answer",
+        arguments: { query: "Can Koed recall this?" }
+      })
+    ).resolves.toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: KOED_MCP_UNAVAILABLE_MESSAGE }]
+    });
+
+    await expect(
+      client.callTool({
+        name: "memory_answer",
+        arguments: { query: "Can Koed recall this now?" }
+      })
+    ).resolves.toMatchObject({ structuredContent: { ok: true } });
+    await expect(client.listTools()).resolves.toMatchObject({
+      tools: [{ name: "memory_answer" }, { name: "memory_intake_propose" }]
+    });
+    await expect(
+      client.callTool({
+        name: "memory_intake_propose",
+        arguments: {
+          proposed_claim: "Remember this after Koed reconnects."
+        }
+      })
+    ).resolves.toMatchObject({ structuredContent: { ok: true } });
+    expect(capabilities).toHaveBeenCalledTimes(2);
+    expect(callTool).toHaveBeenCalledTimes(3);
+    await client.close();
+    await server.close();
   });
 
   it("forwards per-request caller metadata and returns structured content", async () => {

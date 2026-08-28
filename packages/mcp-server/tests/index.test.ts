@@ -190,6 +190,16 @@ lineReader.on("line", (line) => {
   return scriptPath;
 };
 
+const resolveMemoryAnswerWorkerTestConfig = (
+  directory: string,
+  env: NodeJS.ProcessEnv
+) =>
+  resolveMemoryAnswerWorkerConfig({
+    ...env,
+    KOED_HOME: path.join(directory, "koed-home"),
+    CODEX_HOME: path.join(directory, "codex-home")
+  });
+
 const lcmSummaryJson = (summary_text: string) =>
   JSON.stringify({
     schema_version: LCM_STRUCTURED_SUMMARY_SCHEMA_VERSION,
@@ -1484,8 +1494,7 @@ describe("LCM summary background service", () => {
           teamWorkspaceId,
           limit: 10,
           config: {
-            ...resolveMemoryAnswerWorkerConfig({
-              KOED_HOME: directory,
+            ...resolveMemoryAnswerWorkerTestConfig(directory, {
               MEMORY_ANSWER_PROVIDER: "codex",
               MEMORY_ANSWER_TIMEOUT_MS: "5000",
               MEMORY_ANSWER_MAX_ATTEMPTS: "1",
@@ -1680,6 +1689,7 @@ describe("LCM summary background service", () => {
       MEMORY_API_URL: apiUrl,
       MEMORY_API_TOKEN: personalToken,
       KOED_HOME: directory,
+      CODEX_HOME: path.join(directory, "codex-home"),
       KOED_TEAM_UPSTREAM_BACKEND_ID: backendId,
       MEMORY_ANSWER_PROVIDER: "codex",
       MEMORY_CODEX_APP_SERVER_BINARY: appServerBinary,
@@ -1975,8 +1985,7 @@ describe("LCM summary background service", () => {
           projectId: "/repo/koed",
           limit: 10,
           config: {
-            ...resolveMemoryAnswerWorkerConfig({
-              KOED_HOME: directory,
+            ...resolveMemoryAnswerWorkerTestConfig(directory, {
               MEMORY_ANSWER_PROVIDER: "codex",
               MEMORY_ANSWER_TIMEOUT_MS: "5000",
               MEMORY_ANSWER_MAX_ATTEMPTS: "1",

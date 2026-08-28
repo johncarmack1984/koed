@@ -1446,6 +1446,7 @@ export function App({
         collaborationSnapshot={snapshot}
         initialSection={route.section}
         hardwareAcceleration={window.koedDesktop?.hardwareAcceleration}
+        launchAtStartup={window.koedDesktop?.launchAtStartup}
         localAiClients={window.koedDesktop?.localAiClients}
         onSectionChange={(section) =>
           dispatch({
@@ -1574,7 +1575,7 @@ export function App({
               principalId:
                 snapshot?.navigation.personalOwner.id ?? "local-personal"
             },
-            route: { kind: "personal-memory-projects" }
+            route: { kind: "personal-memory-ask" }
           })
         }
         onActivateTeam={(teamId) => choose({ kind: "team_people", teamId })}

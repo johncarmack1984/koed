@@ -13,6 +13,7 @@ import {
   memoryIntakeProposeToolDescription,
   memoryServerInstructions,
   resolveToolExposureConfig,
+  unavailableBackendToolCapabilities,
   type BackendToolCapabilities
 } from "./index.js";
 import { LocalAiRuntimeClient } from "./local-runtime-client.js";
@@ -30,10 +31,26 @@ import {
 
 export const KOED_MCP_PROTOCOL_VERSION = "2026-07-28" as const;
 
+export const KOED_MCP_UNAVAILABLE_MESSAGE =
+  "The koed MCP cannot connect to the local server.";
+
 const jsonResponse = (payload: Record<string, unknown>) => ({
   structuredContent: payload,
   content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }]
 });
+
+const toolErrorResponse = (message: string) => ({
+  isError: true,
+  content: [{ type: "text" as const, text: message }]
+});
+
+const backendToolCapabilities = async (
+  runtimeClient: LocalAiRuntimeClient
+): Promise<BackendToolCapabilities> =>
+  runtimeClient.capabilities().then((capabilities) => ({
+    curatedMemoryIntakeAvailable:
+      capabilities.curatedMemoryIntakeAvailable === true
+  }));
 
 const defaultCallerContext = (
   context: Parameters<NonNullable<Parameters<McpServer["registerTool"]>[2]>>[1]
@@ -127,16 +144,18 @@ export const createKoedMcpServer = async (
     callerContextResolver = ({ defaultContext }) => defaultContext
   }: CreateKoedMcpServerOptions = {}
 ): Promise<McpServer> => {
-  const runtimeCapabilities: BackendToolCapabilities = await runtimeClient
-    .capabilities()
-    .then((capabilities) => ({
-      curatedMemoryIntakeAvailable:
-        capabilities.curatedMemoryIntakeAvailable === true
-    }));
-  const activeTools = exposedTools(
-    resolveToolExposureConfig(environment),
-    runtimeCapabilities
-  );
+  let runtimeCapabilities: BackendToolCapabilities;
+  let runtimeAvailable = true;
+  let capabilitiesNeedRefresh = false;
+  try {
+    runtimeCapabilities = await backendToolCapabilities(runtimeClient);
+  } catch {
+    runtimeCapabilities = unavailableBackendToolCapabilities;
+    runtimeAvailable = false;
+    capabilitiesNeedRefresh = true;
+  }
+  const toolExposure = resolveToolExposureConfig(environment);
+  const registeredTools = new Set<LocalRuntimeToolName>();
   const server = new McpServer(
     { name: "koed-mcp", title: "Koed Memory", version: "0.2.0" },
     {
@@ -149,9 +168,8 @@ export const createKoedMcpServer = async (
     }
   );
 
-  for (const name of activeTools) {
-    if (!allTools.includes(name)) continue;
-    const toolName = name as LocalRuntimeToolName;
+  const registerTool = (toolName: LocalRuntimeToolName): void => {
+    if (registeredTools.has(toolName)) return;
     server.registerTool(
       toolName,
       {
@@ -159,9 +177,9 @@ export const createKoedMcpServer = async (
         description: toolDescription(toolName),
         inputSchema: toolSchema(toolName) as z.ZodObject
       },
-      async (input, context) =>
-        jsonResponse(
-          await runtimeClient.callTool(
+      async (input, context) => {
+        try {
+          const response = await runtimeClient.callTool(
             toolName,
             input as Record<string, unknown>,
             callerContextResolver({
@@ -169,10 +187,40 @@ export const createKoedMcpServer = async (
               requestContext: _requestContext
             }),
             context.mcpReq.signal
-          )
-        )
+          );
+          runtimeAvailable = true;
+          if (capabilitiesNeedRefresh) {
+            try {
+              const capabilities = await backendToolCapabilities(runtimeClient);
+              registerExposedTools(capabilities);
+              capabilitiesNeedRefresh = false;
+            } catch {
+              // A successful tool call can still return while capability refresh
+              // waits for the Local AI Runtime to finish starting.
+            }
+          }
+          return jsonResponse(response);
+        } catch (error) {
+          if (!runtimeAvailable) {
+            return toolErrorResponse(KOED_MCP_UNAVAILABLE_MESSAGE);
+          }
+          throw error;
+        }
+      }
     );
-  }
+    registeredTools.add(toolName);
+  };
+
+  const registerExposedTools = (
+    capabilities: BackendToolCapabilities
+  ): void => {
+    for (const name of exposedTools(toolExposure, capabilities)) {
+      if (!allTools.includes(name)) continue;
+      registerTool(name as LocalRuntimeToolName);
+    }
+  };
+
+  registerExposedTools(runtimeCapabilities);
 
   return server;
 };
