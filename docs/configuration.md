@@ -77,6 +77,10 @@ Supported mode fields:
   after restart. Upgrading an existing Desktop installation preserves an
   explicit environment value; otherwise, Team collaboration becomes disabled
   until this opt-in is supplied. When disabled,
+  Desktop presents a Personal-only interface: Team rail entries, navigation,
+  commands, sharing actions, connection preferences, and add-or-join actions
+  are absent. Retained Team selections and navigation history reconcile to a
+  Personal route rather than exposing cached Team state.
   capability discovery reports Team Workspaces, collaboration, Share Grants,
   Cross-Identity Sync, remote upstreams, and device enrollment unavailable.
   Team chat, Shared Memory, Team realtime, retention, high-risk, support, Team
