@@ -5,6 +5,8 @@ import {
   PROTOCOL_VERSION_META_KEY,
   type McpRequestContext
 } from "@modelcontextprotocol/server";
+import releaseManifest from "@koed/koed/package.json" with { type: "json" };
+import { assertKoedReleaseVersion } from "@koed/koed/release-version";
 import { z } from "zod";
 import {
   allTools,
@@ -30,6 +32,17 @@ import {
 } from "./memory-tool-schemas.js";
 
 export const KOED_MCP_PROTOCOL_VERSION = "2026-07-28" as const;
+
+export const resolveKoedMcpServerVersion = (manifest: unknown): string => {
+  const version =
+    manifest && typeof manifest === "object"
+      ? (manifest as { version?: unknown }).version
+      : undefined;
+  return assertKoedReleaseVersion(version, "Koed release metadata");
+};
+
+export const KOED_MCP_SERVER_VERSION =
+  resolveKoedMcpServerVersion(releaseManifest);
 
 export const KOED_MCP_UNAVAILABLE_MESSAGE =
   "The koed MCP cannot connect to the local server.";
@@ -157,7 +170,11 @@ export const createKoedMcpServer = async (
   const toolExposure = resolveToolExposureConfig(environment);
   const registeredTools = new Set<LocalRuntimeToolName>();
   const server = new McpServer(
-    { name: "koed-mcp", title: "Koed Memory", version: "0.2.0" },
+    {
+      name: "koed-mcp",
+      title: "Koed Memory",
+      version: KOED_MCP_SERVER_VERSION
+    },
     {
       instructions: memoryServerInstructions,
       supportedProtocolVersions: [KOED_MCP_PROTOCOL_VERSION],

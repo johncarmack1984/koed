@@ -295,6 +295,11 @@ const collectNativeRuntimeTargets = ({
 export const buildReleaseArtifactMetadata = (options) => {
   const targets = collectServerPackageTargets(options);
   const nativeRuntimeTargets = collectNativeRuntimeTargets(options);
+  if (options.tag !== `v${options.version}`) {
+    throw new Error(
+      `Release tag ${options.tag} does not match product version ${options.version}.`
+    );
+  }
   const metadata = {
     schemaVersion: 1,
     release: {
@@ -305,6 +310,7 @@ export const buildReleaseArtifactMetadata = (options) => {
       desktop: {
         kind: "desktop",
         packageName: "koed",
+        version: options.version,
         description: "Koed Desktop control-plane package assets."
       },
       koedServerAppRuntime: {

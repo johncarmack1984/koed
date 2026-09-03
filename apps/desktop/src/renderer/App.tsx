@@ -1619,7 +1619,7 @@ export function App({
         statusStore={activeStatusStore}
         teamCollaborationEnabled={teamCollaborationEnabled}
         theme={theme.preference}
-        version="0.4.4"
+        version={__KOED_DESKTOP_VERSION__}
       />
     );
   } else if (snapshot) {

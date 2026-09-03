@@ -47,6 +47,7 @@
     "eval:lcm-summary": "pnpm --filter @koed/evals eval:lcm-summary:live",
     "changeset": "changeset",
     "release:version": "changeset version && node scripts/sync-product-release.mjs --consume-changesets",
+    "release:check": "node scripts/check-product-release.mjs",
     "release:notes": "node scripts/product-release-notes.mjs",
     "codex:configure": "node scripts/configure-codex.mjs",
     "claude:configure": "node scripts/configure-claude.mjs",
@@ -104,6 +105,7 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.59.3",
     "vite": "^8.0.13",
-    "vitest": "^4.1.6"
+    "vitest": "^4.1.6",
+    "yaml": "^2.9.0"
   }
 }
