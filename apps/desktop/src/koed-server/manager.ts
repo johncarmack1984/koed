@@ -33,6 +33,7 @@ import {
   type PersonalDesktopResult
 } from "@koed/shared";
 import {
+  discoverProjectMetadata,
   listProjectMetadata,
   loadRepoEnv,
   resolveKoedServerConfig,
@@ -695,6 +696,32 @@ const localProjectMetadataData = (environment: NodeJS.ProcessEnv) => {
         : {})
     }))
   });
+};
+
+const localProjectMetadataRefreshMs = 5 * 60 * 1_000;
+
+const localProjectPathsFrom = (
+  projects: Array<{ path: string | null }>
+): Set<string> => {
+  const projectPaths = new Set<string>();
+  for (const project of projects) {
+    if (!project.path?.trim()) continue;
+    const cwd = resolve(project.path);
+    try {
+      if (statSync(cwd).isDirectory()) projectPaths.add(cwd);
+    } catch {
+      // Missing or inaccessible Project paths have no local metadata.
+    }
+  }
+  return projectPaths;
+};
+
+const projectMetadataIsStale = (lastSeenAt: string | undefined): boolean => {
+  const lastSeenMs = lastSeenAt ? Date.parse(lastSeenAt) : Number.NaN;
+  return (
+    !Number.isFinite(lastSeenMs) ||
+    Date.now() - lastSeenMs >= localProjectMetadataRefreshMs
+  );
 };
 
 const personalEventsData = (payload: Record<string, unknown>) => {
@@ -1410,6 +1437,8 @@ export const createKoedServerManager = ({
 }: KoedServerManagerOptions): KoedServerManager => {
   let serverProcess: ChildProcess | null = null;
   let enrollmentReconciliation: Promise<void> | null = null;
+  let projectMetadataReconciliation: Promise<void> | null = null;
+  const pendingProjectMetadataPaths = new Set<string>();
   let retainedPersonalApiOrigin: string | null = null;
   let retainedPersonalApiToken: string | null = null;
   let personalApiTokenProvisioning: Promise<
@@ -2406,8 +2435,8 @@ export const createKoedServerManager = ({
     return remote.payload;
   };
 
-  const listPersonalProjects = async () =>
-    personalProjectsData(
+  const listPersonalProjects = async () => {
+    const projects = personalProjectsData(
       await authenticatedPersonalMemoryRequest(
         ({ apiOrigin }) => {
           const url = new URL("/v1/memory/graph/threads", apiOrigin);
@@ -2421,6 +2450,53 @@ export const createKoedServerManager = ({
         16 * 1_024 * 1_024
       )
     );
+    await reconcileLocalProjectMetadata(projects.projects);
+    return projects;
+  };
+
+  const reconcileLocalProjectMetadata = async (
+    projects: Array<{ path: string | null }>
+  ): Promise<void> => {
+    for (const path of localProjectPathsFrom(projects)) {
+      pendingProjectMetadataPaths.add(path);
+    }
+    if (projectMetadataReconciliation) return projectMetadataReconciliation;
+
+    const paths = resolveKoedServerPaths(environment);
+    projectMetadataReconciliation = (async () => {
+      try {
+        while (pendingProjectMetadataPaths.size) {
+          const projectPaths = [...pendingProjectMetadataPaths];
+          pendingProjectMetadataPaths.clear();
+          const metadataByPath = new Map<string, string>();
+          try {
+            for (const project of listProjectMetadata(paths).projects ?? []) {
+              metadataByPath.set(project.path.cwd, project.lastSeenAt);
+              if (project.path.projectRoot) {
+                metadataByPath.set(
+                  project.path.projectRoot,
+                  project.lastSeenAt
+                );
+              }
+            }
+          } catch {
+            // Malformed metadata must not block Personal Memory.
+          }
+          for (const cwd of projectPaths) {
+            if (!projectMetadataIsStale(metadataByPath.get(cwd))) continue;
+            try {
+              await discoverProjectMetadata(paths, { cwd });
+            } catch {
+              // One unavailable Project must not block Personal Memory.
+            }
+          }
+        }
+      } finally {
+        projectMetadataReconciliation = null;
+      }
+    })();
+    return projectMetadataReconciliation;
+  };
 
   const managedExecutionFrom = (
     value: unknown
