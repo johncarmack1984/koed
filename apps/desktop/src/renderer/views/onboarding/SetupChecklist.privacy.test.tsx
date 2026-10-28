@@ -38,6 +38,7 @@ const makeApi = () =>
       target: "missing" as const,
       helper: "unsupported" as const,
       version: null,
+      template: null,
       pathVisible: false,
       fingerprint: null
     })),
