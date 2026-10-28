@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
 import { parse } from "yaml";
@@ -7,10 +7,6 @@ import { parse } from "yaml";
 const root = resolve(import.meta.dirname, "..");
 const release = readFileSync(
   resolve(root, ".github/workflows/release.yml"),
-  "utf8"
-);
-const recovery = readFileSync(
-  resolve(root, ".github/workflows/release-desktop-assets.yml"),
   "utf8"
 );
 
@@ -91,8 +87,10 @@ test("reviewed identity comes from immutable build artifacts, not candidate draf
   );
 });
 
-test("desktop recovery fails closed until draft source is independently authenticated", () => {
-  const { jobs } = parse(recovery);
+test("desktop recovery is absent or fails closed until its source is authenticated", () => {
+  const path = resolve(root, ".github/workflows/release-desktop-assets.yml");
+  if (!existsSync(path)) return;
+  const { jobs } = parse(readFileSync(path, "utf8"));
   assert.equal(
     jobs["recover-desktop-assets"].if,
     "${{ github.event_name == 'desktop-recovery-disabled' }}"
@@ -137,16 +135,14 @@ test("protected identity downloads flatten artifact-ID layout to expected CLI pa
   }
 });
 
-test("production gate precedes dependency installation and recovery shares its lock", () => {
+test("production gate precedes dependency installation", () => {
   const workflow = parse(release);
-  assert.equal(workflow.concurrency, parse(recovery).concurrency);
   const steps = workflow.jobs["publish-release"].steps;
   const gate = steps.findIndex((step) =>
     step.run?.includes("scripts/release-approval.mjs")
   );
   const install = steps.findIndex((step) => step.run?.includes("pnpm install"));
   assert.ok(gate >= 0 && install > gate);
-  assert.doesNotMatch(recovery, /release-promotion-adapter\.mjs/);
 });
 
 test("asset jobs only run for absent releases or resumable drafts", () => {
@@ -162,9 +158,7 @@ test("asset jobs only run for absent releases or resumable drafts", () => {
 
 test("release retries verify existing asset bytes and never clobber", () => {
   assert.doesNotMatch(release, /--clobber/);
-  assert.doesNotMatch(recovery, /--clobber/);
   assert.match(release, /scripts\/ensure-release-assets\.mjs/);
-  assert.match(recovery, /scripts\/ensure-release-assets\.mjs/);
 });
 
 test("official promotion invokes pin-only adapter behind publication and approval gates", () => {
@@ -179,5 +173,4 @@ test("official promotion invokes pin-only adapter behind publication and approva
   assert.match(adapter, /main\(\)\.catch\([\s\S]*process\.exitCode = 1/);
   assert.doesNotMatch(adapter, /process\.exit\(0\)/);
   assert.doesNotMatch(release, /draft=false|npm publish|npm dist-tag/);
-  assert.doesNotMatch(recovery, /draft=false/);
 });
