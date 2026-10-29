@@ -2,11 +2,18 @@ import {
   PERSONAL_DESKTOP_INITIAL_EVENT_LIMIT,
   PERSONAL_DESKTOP_OLDER_EVENT_LIMIT,
   type PersonalDesktopApi,
+  type PersonalDesktopProject,
   type PersonalDesktopConversationEvent,
   type PersonalDesktopProjectThread
 } from "@koed/shared/personal-desktop";
 
 import { mergeConversationEvents } from "../../desktop-conversation.js";
+import {
+  partitionPersonalInventory,
+  classifyPersonalInventory,
+  repositoryScopeId
+} from "@koed/shared/personal-desktop";
+import type { PersonalFolderObservation } from "@koed/shared";
 import {
   mergeProjectSources,
   type DesktopProject,
@@ -31,6 +38,12 @@ export type PersonalMemoryDetail = {
 };
 
 export type PersonalMemorySnapshot = {
+  inventory: ReturnType<typeof partitionPersonalInventory<DesktopProject>> & {
+    localCheckouts: DesktopProjectMetadata[];
+    localFolders: PersonalFolderObservation[];
+    reconciliationPending: boolean | null;
+    classification: ReturnType<typeof classifyPersonalInventory>;
+  };
   error: string | null;
   loading: boolean;
   projectOrder: string[];
@@ -46,6 +59,13 @@ export const personalMemoryThreadKey = (
 ): string => `${thread.projectId}:${thread.id}`;
 
 const emptySnapshot = (): PersonalMemorySnapshot => ({
+  inventory: {
+    ...partitionPersonalInventory<DesktopProject>([]),
+    localCheckouts: [],
+    localFolders: [],
+    reconciliationPending: null,
+    classification: classifyPersonalInventory([])
+  },
   error: null,
   loading: false,
   projectOrder: [],
@@ -96,6 +116,19 @@ export class PersonalMemoryStore {
           const eventIds = this.#detailRefreshEventIds.get(key) ?? new Set();
           eventIds.add(id);
           this.#detailRefreshEventIds.set(key, eventIds);
+          for (const thread of this.#snapshot.threadsByKey.values()) {
+            if (
+              thread.sourceThreadId &&
+              thread.sourceProject?.id === projectId &&
+              thread.sourceThreadId === threadId
+            ) {
+              const namedKey = personalMemoryThreadKey(thread);
+              const pending =
+                this.#detailRefreshEventIds.get(namedKey) ?? new Set<string>();
+              pending.add(id);
+              this.#detailRefreshEventIds.set(namedKey, pending);
+            }
+          }
         }
       } else if (change.type === "conversation_presentation_changed") {
         this.#projectRefreshPending = true;
@@ -169,14 +202,21 @@ export class PersonalMemoryStore {
     if (!silent) {
       this.#replace({ ...this.#snapshot, loading: true, error: null });
     }
-    try {
-      const graphProjects = await this.#api.listProjects();
-      const metadataProjects = await (
-        this.#api.listProjectMetadata?.() ??
-        Promise.resolve<DesktopProjectMetadata[]>([])
-      ).catch(() => []);
+    let complete = false;
+    let preview: PersonalDesktopProject[] | undefined;
+    let details: {
+      metadataProjects: DesktopProjectMetadata[];
+      localFolders: PersonalFolderObservation[];
+      status: { reconciliationPending: boolean } | null;
+    } = { metadataProjects: [], localFolders: [], status: null };
+    const publish = (
+      graphProjects: PersonalDesktopProject[],
+      loading: boolean
+    ) => {
+      if (request !== this.#projectRequest) return;
+      const { metadataProjects, localFolders, status } = details;
       const projects = mergeProjectSources(graphProjects, metadataProjects);
-      if (request !== this.#projectRequest) return this.#snapshot;
+      if (request !== this.#projectRequest) return;
       const projectsById = new Map<string, DesktopProject>();
       const threadsByKey = new Map<string, PersonalDesktopProjectThread>();
       for (const project of projects) {
@@ -190,17 +230,119 @@ export class PersonalMemoryStore {
           threadsByKey.set(personalMemoryThreadKey(thread), thread);
         }
       }
+      for (const [key, detail] of this.#cache)
+        if (detail.thread.sourceThreadId && !threadsByKey.has(key))
+          this.#cache.delete(key);
       this.#replace({
+        inventory: {
+          ...partitionPersonalInventory(
+            projects.filter(
+              (project) =>
+                project.threads.length > 0 ||
+                project.namedProject ||
+                project.folder
+            )
+          ),
+          localCheckouts: metadataProjects,
+          localFolders,
+          reconciliationPending: status?.reconciliationPending ?? null,
+          classification: classifyPersonalInventory(graphProjects)
+        },
         error: null,
-        loading: false,
+        loading,
         projectOrder: projects.map(({ id }) => id),
         projectsById,
         revision: this.#snapshot.revision + 1,
         threadsByKey
       });
       this.#prune();
+    };
+    let firstProjects: Promise<void> | undefined;
+    try {
+      const graphProjects = this.#api.listProjects();
+      // The initial named inventory must not wait for complete source enumeration.
+      // Refreshes retain their existing, complete inventory until replacement.
+      if (!this.#snapshot.projectOrder.length) {
+        firstProjects = this.#api
+          .listNamedProjects?.()
+          .then((projects) => {
+            if (complete || request !== this.#projectRequest) return;
+            preview = projects;
+            publish(projects, true);
+          })
+          .catch(() => undefined);
+      }
+      const enrichment = Promise.all([
+        (
+          this.#api.listProjectMetadata?.() ??
+          Promise.resolve<DesktopProjectMetadata[]>([])
+        ).catch(() => []),
+        (
+          this.#api.listLocalFolders?.() ??
+          Promise.resolve<PersonalFolderObservation[]>([])
+        ).catch(() => []),
+        (this.#api.projectStatus?.() ?? Promise.resolve(null)).catch(() => null)
+      ]).then(([metadataProjects, localFolders, status]) => {
+        details = { metadataProjects, localFolders, status };
+        if (preview && !complete) publish(preview, true);
+        return details;
+      });
+      const [projects] = await Promise.all([graphProjects, enrichment]);
+      complete = true;
+      publish(projects, false);
+      // Publish the catalog before optional first-launch preparation. Only
+      // registered native checkouts selected by a current Git rule qualify.
+      if (this.#api.prepareLocalFolder && request === this.#projectRequest) {
+        const repositories = new Set(
+          projects.flatMap((project) =>
+            (project.inclusionRules ?? []).flatMap((rule) =>
+              !rule.removedAt && rule.target.kind === "repository"
+                ? [repositoryScopeId(rule.target.repository)]
+                : []
+            )
+          )
+        );
+        // Unresolved checkouts have no repository scope and match no Git rule.
+        const candidates = details.metadataProjects.filter(
+          (metadata) =>
+            metadata.repository &&
+            metadata.repository.kind !== "unresolved" &&
+            repositories.has(repositoryScopeId(metadata.repository)) &&
+            !details.localFolders.some(
+              (folder) =>
+                folder.normalizedPath ===
+                (metadata.path.projectRoot ?? metadata.path.cwd)
+            )
+        );
+        const prepared = await Promise.allSettled(
+          candidates.map((metadata) =>
+            this.#api.prepareLocalFolder!({
+              localProjectId: metadata.localProjectId
+            })
+          )
+        );
+        if (
+          request === this.#projectRequest &&
+          prepared.some((result) => result.status === "fulfilled")
+        ) {
+          const [metadataProjects, localFolders] = await Promise.all([
+            (
+              this.#api.listProjectMetadata?.() ??
+              Promise.resolve(details.metadataProjects)
+            ).catch(() => details.metadataProjects),
+            (
+              this.#api.listLocalFolders?.() ??
+              Promise.resolve(details.localFolders)
+            ).catch(() => details.localFolders)
+          ]);
+          details = { ...details, metadataProjects, localFolders };
+          publish(projects, false);
+        }
+      }
       return this.#snapshot;
     } catch (cause) {
+      await firstProjects;
+      complete = true;
       if (request !== this.#projectRequest) return this.#snapshot;
       this.#replace({
         ...this.#snapshot,
@@ -316,7 +458,22 @@ export class PersonalMemoryStore {
     try {
       const events = await this.#api.loadEventPage({
         projectId: thread.projectId,
-        threadId: thread.id,
+        threadId: thread.sourceThreadId ?? thread.id,
+        ...(thread.sourceThreadId && thread.sessionId
+          ? { sessionId: thread.sessionId }
+          : {}),
+        ...(thread.folderSelection
+          ? {
+              folderSelection: thread.folderSelection,
+              sessionId: thread.sessionId ?? undefined
+            }
+          : {}),
+        ...(thread.namedProjectId
+          ? {
+              namedProjectId: thread.namedProjectId,
+              sessionId: thread.sessionId!
+            }
+          : {}),
         limit: PERSONAL_DESKTOP_INITIAL_EVENT_LIMIT
       });
       if (this.#cache.get(key) !== entry) return entry;
@@ -362,7 +519,22 @@ export class PersonalMemoryStore {
       try {
         const events = await this.#api.loadEventPage({
           projectId: thread.projectId,
-          threadId: thread.id,
+          threadId: thread.sourceThreadId ?? thread.id,
+          ...(thread.sourceThreadId && thread.sessionId
+            ? { sessionId: thread.sessionId }
+            : {}),
+          ...(thread.folderSelection
+            ? {
+                folderSelection: thread.folderSelection,
+                sessionId: thread.sessionId ?? undefined
+              }
+            : {}),
+          ...(thread.namedProjectId
+            ? {
+                namedProjectId: thread.namedProjectId,
+                sessionId: thread.sessionId!
+              }
+            : {}),
           limit: PERSONAL_DESKTOP_OLDER_EVENT_LIMIT,
           eventIds: [...changedEventIds]
         });
@@ -415,7 +587,22 @@ export class PersonalMemoryStore {
     try {
       const older = await this.#api.loadEventPage({
         projectId: thread.projectId,
-        threadId: thread.id,
+        threadId: thread.sourceThreadId ?? thread.id,
+        ...(thread.sourceThreadId && thread.sessionId
+          ? { sessionId: thread.sessionId }
+          : {}),
+        ...(thread.folderSelection
+          ? {
+              folderSelection: thread.folderSelection,
+              sessionId: thread.sessionId ?? undefined
+            }
+          : {}),
+        ...(thread.namedProjectId
+          ? {
+              namedProjectId: thread.namedProjectId,
+              sessionId: thread.sessionId!
+            }
+          : {}),
         limit: PERSONAL_DESKTOP_OLDER_EVENT_LIMIT,
         cursor: eventCursor(cursor)
       });

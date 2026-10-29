@@ -1,7 +1,37 @@
+import { preserveRoutedCaptureTarget } from "./personal-capture-target-routing.js";
+import {
+  personalSourceSelectionSql,
+  projectPersonalInspectionQuery,
+  type PersonalSelectionQuery
+} from "./personal-selection-sql.js";
+import { projectFromRepositoryIdentity } from "./session-project.js";
+import { recordFolderObservation } from "./folder-assignment.js";
+import {
+  effectiveProjectPathSql,
+  effectiveProjectNameSql
+} from "./project-scope-sql.js";
+import {
+  repositoryAssignmentSchema,
+  type PersonalFolderAssignment,
+  type PersonalFolderObservation,
+  personalFolderContextSchema,
+  personalFolderScopeId,
+  type PersonalFolderContext,
+  type RepositoryAssignment
+} from "@koed/shared";
 import { basename } from "node:path";
 import pg from "pg";
 import type { MemoryActor } from "@koed/core";
-import { crossIdentitySyncDeterministicUuid } from "@koed/shared";
+import {
+  repositoryIdentitySchema,
+  type RepositoryIdentity,
+  crossIdentitySyncDeterministicUuid
+} from "@koed/shared";
+import {
+  mapRepositoryAssignment,
+  recordRepositoryObservation,
+  type RepositoryAssignmentRow
+} from "./repository-assignment.js";
 import type {
   ActorContext,
   CaptureMethod,
@@ -13,6 +43,7 @@ import type {
 } from "./types.js";
 
 export interface CapturedSessionRepository {
+  listPersonalFolders(actor: ActorContext): Promise<PersonalFolderContext[]>;
   createCapturedSession(
     actor: ActorContext,
     input: {
@@ -35,37 +66,36 @@ export interface CapturedSessionRepository {
       importObservedAt?: string;
       metadata?: Record<string, unknown>;
       detectedProjects?: PersonalProjectReference[];
+      repositoryIdentity?: RepositoryIdentity;
+      folderObservation?: PersonalFolderObservation;
+      currentFolderObservation?: PersonalFolderObservation;
+      // Internal verified PDS import, never accepted from a capture API request.
+      replicatedRepositoryAssignment?: RepositoryAssignment;
     }
   ): Promise<CapturedSessionRecord>;
   getCapturedSession(
     actor: ActorContext,
-    sessionId: string
+    sessionId: string,
+    input?: PersonalSelectionQuery
   ): Promise<CapturedSessionRecord | null>;
   listCapturedSessionSummaries(
     actor: ActorContext,
-    input?: { limit?: number }
+    input?: PersonalSelectionQuery & { limit?: number }
   ): Promise<CapturedSessionSummaryRecord[]>;
   getCapturedSessionSummary(
     actor: ActorContext,
-    sessionId: string
+    sessionId: string,
+    input?: PersonalSelectionQuery
   ): Promise<CapturedSessionSummaryRecord | null>;
   getCapturedSessionSummaryByLogicalMemoryId(
     actor: ActorContext,
-    logicalMemoryId: string
+    logicalMemoryId: string,
+    input?: PersonalSelectionQuery
   ): Promise<CapturedSessionSummaryRecord | null>;
   updateCapturedSessionTitle(
     actor: ActorContext,
     sessionId: string,
     input: { title: string }
-  ): Promise<CapturedSessionRecord | null>;
-  moveCapturedSessionToProject(
-    actor: ActorContext,
-    sessionId: string,
-    project: PersonalProjectReference
-  ): Promise<CapturedSessionRecord | null>;
-  resetCapturedSessionProject(
-    actor: ActorContext,
-    sessionId: string
   ): Promise<CapturedSessionRecord | null>;
   listCapturedSessionsNeedingTitles(
     actor: ActorContext,
@@ -73,7 +103,7 @@ export interface CapturedSessionRepository {
   ): Promise<CapturedSessionTitleCandidate[]>;
   getLatestCapturedSessionForProject(
     actor: ActorContext,
-    input: { projectId: string }
+    input: PersonalSelectionQuery & { projectId: string }
   ): Promise<CapturedSessionRecord | null>;
   updateCapturedSessionGeneratedTitle(
     actor: ActorContext,
@@ -84,6 +114,8 @@ export interface CapturedSessionRepository {
 
 export interface CapturedSessionRepositoryOptions {
   transactionClient?: pg.PoolClient;
+  /** Internal verified transport uses its logical binding, never provider-ID convergence. */
+  verifiedSourceIdentityOnly?: boolean;
 }
 
 export interface CapturedSessionSummaryRecord {
@@ -105,7 +137,9 @@ export interface CapturedSessionSummaryRecord {
     | "revoked";
 }
 
-type CapturedSessionRow = {
+type CapturedSessionRow = RepositoryAssignmentRow & {
+  capture_inserted?: boolean;
+  repository_assignment_inherited?: boolean;
   id: string;
   logical_session_id: string;
   owner_user_id: string | null;
@@ -117,6 +151,7 @@ type CapturedSessionRow = {
   capture_method: CaptureMethod;
   model: string | null;
   cwd: string | null;
+  folder_assignment: PersonalFolderAssignment;
   source_kind: string | null;
   source_adapter_version: string | null;
   source_fingerprint: string | null;
@@ -140,6 +175,12 @@ const ensureCapturedSessionLogicalMemory = async (
   ownerUserId: string,
   sessionId: string
 ): Promise<string | null> => {
+  const binding = await client.query<{ logical_memory_id: string }>(
+    `select logical_memory_id from local_captured_session_logical_memories
+      where owner_user_id = $1 and local_session_id = $2`,
+    [ownerUserId, sessionId]
+  );
+  if (binding.rows[0]) return binding.rows[0].logical_memory_id;
   const deployment = await client.query<{
     id: string;
     protocol_deployment_id: string;
@@ -154,7 +195,7 @@ const ensureCapturedSessionLogicalMemory = async (
     return null;
   }
   const logicalMemoryId = crossIdentitySyncDeterministicUuid({
-    protocol: "koed.captured-session-sync/v1",
+    protocol: "koed.captured-session-sync/v2",
     sourceDeploymentId: localDeployment.protocol_deployment_id,
     sourceUserId: ownerUserId,
     originSessionId: sessionId,
@@ -255,15 +296,17 @@ const mapCapturedSessionSummary = (
 export const getCapturedSessionSummaryWithClient = async (
   client: pg.Pool | pg.PoolClient,
   actor: ActorContext,
-  sessionId: string
+  sessionId: string,
+  input: PersonalSelectionQuery = {}
 ): Promise<CapturedSessionSummaryRecord | null> => {
+  const { selection } = projectPersonalInspectionQuery(actor.userId, input);
   const result = await client.query<CapturedSessionSummaryRow>(
     `
       select
         s.id as session_id,
         lm.id as logical_memory_id,
         nullif(btrim(s.metadata ->> 'threadName'), '') as title,
-        coalesce(s.project_override_name, s.automatic_project_name) as project_name,
+        ${effectiveProjectNameSql("s")} as project_name,
         greatest(
           s.updated_at,
           coalesce(max(coalesce(me.source_event_time, me.captured_at)), s.updated_at)
@@ -322,6 +365,7 @@ export const getCapturedSessionSummaryWithClient = async (
         and s.visibility = 'personal'
         and s.invalidated_at is null
         and s.personal_deleted_at is null
+        and ${personalSourceSelectionSql("s", "$3", { inspection: true, includeUnassigned: true })}
         and exists (
           select 1
           from users owner
@@ -332,28 +376,36 @@ export const getCapturedSessionSummaryWithClient = async (
       group by s.id, lm.id, relationship.state, relationship.revoked_at,
                relationship.source_cursor, relationship.last_synced_at
     `,
-    [actor.userId, sessionId]
+    [actor.userId, sessionId, JSON.stringify(selection)]
   );
   return result.rows[0] ? mapCapturedSessionSummary(result.rows[0]) : null;
 };
 
-const projectReference = (
-  id: string | null,
-  name: string | null,
-  path: string | null
-): PersonalProjectReference | null => (id && name ? { id, name, path } : null);
-
 const mapCapturedSession = (row: CapturedSessionRow): CapturedSessionRecord => {
-  const automaticProject = projectReference(
-    row.automatic_project_id,
-    row.automatic_project_name,
-    row.automatic_project_path
+  const assignment = mapRepositoryAssignment(row);
+  const captured = {
+    id: row.automatic_project_id,
+    name: row.automatic_project_name,
+    path: row.automatic_project_path
+  };
+  const override = {
+    id: row.project_override_id,
+    name: row.project_override_name,
+    path: row.project_override_path
+  };
+  const projectFor = (identity: RepositoryIdentity | null) =>
+    projectFromRepositoryIdentity(
+      identity,
+      assignment.automatic,
+      captured,
+      override
+    );
+  const automaticProject = projectFromRepositoryIdentity(
+    assignment.automatic,
+    assignment.automatic,
+    captured
   );
-  const projectOverride = projectReference(
-    row.project_override_id,
-    row.project_override_name,
-    row.project_override_path
-  );
+  const projectOverride = projectFor(assignment.override);
   return {
     id: row.id,
     logicalSessionId: row.logical_session_id,
@@ -365,6 +417,7 @@ const mapCapturedSession = (row: CapturedSessionRow): CapturedSessionRecord => {
     captureMethod: row.capture_method,
     model: row.model,
     cwd: row.cwd,
+    folderAssignment: row.folder_assignment,
     sourceKind: row.source_kind,
     sourceAdapterVersion: row.source_adapter_version,
     sourceFingerprint: row.source_fingerprint,
@@ -372,12 +425,13 @@ const mapCapturedSession = (row: CapturedSessionRow): CapturedSessionRecord => {
     importObservedAt: row.import_observed_at?.toISOString() ?? null,
     metadata: row.metadata ?? {},
     capturedProjectProvenance: row.captured_project_provenance ?? {},
+    repositoryAssignment: assignment,
     automaticProject,
     projectOverride,
-    project: projectOverride ?? automaticProject,
-    projectAssignmentSource: projectOverride
+    project: projectFor(assignment.effective),
+    projectAssignmentSource: assignment.override
       ? "user_override"
-      : automaticProject
+      : assignment.automatic
         ? "detected"
         : null,
     projectAssignmentUpdatedAt:
@@ -495,20 +549,43 @@ const hasExplicitDetectedProjectIdentity = (input: {
 const capturedSessionColumns = `
   id, logical_session_id, owner_user_id, visibility, external_session_id, external_thread_id,
   forked_from_external_thread_id,
-  source_runtime, capture_method, model, cwd,
+  source_runtime, capture_method, model, cwd, folder_assignment,
   source_kind, source_adapter_version, source_fingerprint,
   captured_project, import_observed_at, metadata,
   captured_project_provenance,
   automatic_project_id, automatic_project_name, automatic_project_path,
   automatic_project_detected_at,
   project_override_id, project_override_name, project_override_path,
-  project_override_at, created_at
+  project_override_at, created_at, repository_assignment_state, repository_assignment_version,
+  repository_automatic_identity, repository_override_identity
 `;
 
 export const createCapturedSessionRepository = (
   pool: pg.Pool,
   options: CapturedSessionRepositoryOptions = {}
 ): CapturedSessionRepository => ({
+  async listPersonalFolders(actor) {
+    const result = await pool.query<{ context: unknown }>(
+      `select distinct (case when folder_assignment->'correction'->>'state'='corrected'
+        then folder_assignment->'correction'->'value' else folder_assignment->'original' end)->'value' as context
+       from sessions where owner_user_id=$1 and visibility='personal'
+         and invalidated_at is null and personal_deleted_at is null
+         and (case when folder_assignment->'correction'->>'state'='corrected'
+           then folder_assignment->'correction'->'value' else folder_assignment->'original' end)->>'state'='known'`,
+      [actor.userId]
+    );
+    const contexts = result.rows
+      .map((row) => personalFolderContextSchema.parse(row.context))
+      .filter((folder) => folder.reference.ownerUserId === actor.userId);
+    const byIdentity = new Map(
+      contexts
+        .sort((a, b) => a.normalizedPath.localeCompare(b.normalizedPath))
+        .map((folder) => [personalFolderScopeId(folder.reference), folder])
+    );
+    return [...byIdentity]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([, folder]) => folder);
+  },
   async createCapturedSession(actor, input) {
     const ownsTransaction = !options.transactionClient;
     const client = options.transactionClient ?? (await pool.connect());
@@ -516,12 +593,34 @@ export const createCapturedSessionRepository = (
       if (ownsTransaction) {
         await client.query("begin");
       }
-      if (input.externalSessionId) {
+      if (input.externalSessionId && !options.verifiedSourceIdentityOnly) {
         await client.query(
           "select pg_advisory_xact_lock(hashtextextended($1, 0))",
           [`captured-session:${actor.userId}:${input.externalSessionId}`]
         );
       }
+      if (input.logicalSessionId) {
+        await client.query(
+          "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+          [`captured-session-logical:${actor.userId}:${input.logicalSessionId}`]
+        );
+      }
+      const replicatedAssignment = input.replicatedRepositoryAssignment
+        ? repositoryAssignmentSchema.parse(input.replicatedRepositoryAssignment)
+        : undefined;
+      const repositoryIdentity = input.repositoryIdentity
+        ? repositoryIdentitySchema.parse(input.repositoryIdentity)
+        : undefined;
+      if (
+        !options.verifiedSourceIdentityOnly &&
+        repositoryIdentity?.kind === "local_project"
+      )
+        throw Object.assign(
+          new Error(
+            "Named Projects cannot establish source context. Capture recorded Git or Folder evidence."
+          ),
+          { statusCode: 410, code: "personal_legacy_write_retired" }
+        );
       const metadata = { ...(input.metadata ?? {}) };
       const forkedFromExternalThreadId =
         input.forkedFromExternalThreadId ??
@@ -546,7 +645,7 @@ export const createCapturedSessionRepository = (
               ? "ambiguous"
               : "no_signal"
       };
-      if (input.externalSessionId) {
+      if (input.externalSessionId && !options.verifiedSourceIdentityOnly) {
         const converged = await client.query<CapturedSessionRow>(
           `
             update sessions
@@ -663,6 +762,21 @@ export const createCapturedSessionRepository = (
               { statusCode: 409 }
             );
           }
+          await recordFolderObservation(
+            client,
+            convergedRow,
+            input.folderObservation,
+            Boolean(input.importObservedAt),
+            input.currentFolderObservation,
+            options.verifiedSourceIdentityOnly
+          );
+          await recordRepositoryObservation(
+            client,
+            convergedRow,
+            repositoryIdentity,
+            input.cwd,
+            options.verifiedSourceIdentityOnly
+          );
           await ensureCapturedSessionLogicalMemory(
             client,
             actor.userId,
@@ -673,6 +787,51 @@ export const createCapturedSessionRepository = (
           }
           return mapCapturedSession(convergedRow);
         }
+      }
+      if (input.externalSessionId && !options.verifiedSourceIdentityOnly) {
+        // Legacy native replacement can retain recorded source facts, but it
+        // must not revive a deletion or guess how an independent Capture Target
+        // transfers to a new Session. Its implicit policy key must also remain
+        // exact, and a Session-bound policy cannot be dropped on replacement.
+        // Serialize replacement with policy edits without taking a policy lock
+        // for ordinary fresh captures.
+        await client.query(
+          `select pg_advisory_xact_lock(hashtextextended($1,0)) where exists (
+            select 1 from sessions where owner_user_id=$2 and external_session_id=$3
+              and visibility='personal' and (invalidated_at is not null or personal_deleted_at is not null)
+          )`,
+          [
+            `capture-policy:${actor.userId}`,
+            actor.userId,
+            input.externalSessionId
+          ]
+        );
+        const removed = await client.query(
+          `select 1 from sessions s where owner_user_id=$1 and external_session_id=$2 and visibility='personal'
+          and (personal_deleted_at is not null or (invalidated_at is not null and (
+            invalidation_reason is not null or project_override_id is not null
+            or coalesce(s.automatic_project_id,s.cwd) is distinct from $3::text
+            or exists (
+              select 1 from personal_capture_target_bindings b
+              where b.owner_user_id=s.owner_user_id and b.session_id=s.id
+            ) or exists (
+              select 1 from capture_policies policy where policy.owner_user_id=s.owner_user_id
+                and policy.target_type='thread' and policy.thread_id=s.id::text
+            )
+          ))) limit 1`,
+          [
+            actor.userId,
+            input.externalSessionId,
+            automaticProject?.id ?? input.cwd ?? null
+          ]
+        );
+        if (removed.rows.length)
+          throw Object.assign(
+            new Error(
+              "This Conversation was removed. Start a new Conversation to capture new activity."
+            ),
+            { statusCode: 409, code: "captured_session_removed" }
+          );
       }
       const result = await client.query<CapturedSessionRow>(
         `
@@ -706,7 +865,7 @@ export const createCapturedSessionRepository = (
           source_fingerprint,
           captured_project,
           import_observed_at,
-          logical_session_id
+          logical_session_id, repository_assignment_state, repository_automatic_identity, repository_override_identity, repository_assignment_version
         )
         values (
           $1, 'personal', $2, $3, $4, $5, $6, $7, $8, $9,
@@ -716,6 +875,7 @@ export const createCapturedSessionRepository = (
             from sessions parent
             where parent.owner_user_id = $1
               and parent.visibility = 'personal'
+              and ${options.verifiedSourceIdentityOnly ? "false" : "true"}
               and (
                 parent.external_thread_id = $14
                 or parent.external_session_id = $14
@@ -727,7 +887,7 @@ export const createCapturedSessionRepository = (
           $15, $16, $17, $18, $19,
           $20, $21, $22, $23,
           case when $21::text is null then null else now() end,
-          $24, $25, $26, coalesce($29::uuid, gen_random_uuid())
+          $24, $25, $26, coalesce($29::uuid, gen_random_uuid()), coalesce($32::text,'recorded'), $31::jsonb, $33::jsonb, coalesce($34::integer,1)
         )
         on conflict (owner_user_id, visibility, idempotency_key)
         where idempotency_key is not null
@@ -801,7 +961,7 @@ export const createCapturedSessionRepository = (
             or sessions.forked_from_external_thread_id is null
             or sessions.forked_from_external_thread_id = $13
           )
-        returning ${capturedSessionColumns}
+        returning ${capturedSessionColumns}, (xmax = 0) as capture_inserted
       `,
         [
           actor.userId,
@@ -856,7 +1016,13 @@ export const createCapturedSessionRepository = (
           detectedProjectInputProvided,
           explicitProjectIdentityProvided,
           input.logicalSessionId ?? null,
-          input.externalThreadId ?? null
+          input.externalThreadId ?? null,
+          replicatedAssignment
+            ? replicatedAssignment.automatic
+            : (repositoryIdentity ?? null),
+          replicatedAssignment?.state ?? null,
+          replicatedAssignment?.override ?? null,
+          replicatedAssignment?.version ?? null
         ]
       );
 
@@ -877,6 +1043,28 @@ export const createCapturedSessionRepository = (
           new Error("Captured Session native thread identity conflicts"),
           { statusCode: 409, code: "captured_session_thread_conflict" }
         );
+      }
+      await recordFolderObservation(
+        client,
+        row,
+        input.folderObservation,
+        Boolean(input.importObservedAt),
+        input.currentFolderObservation,
+        options.verifiedSourceIdentityOnly
+      );
+      await recordRepositoryObservation(
+        client,
+        row,
+        repositoryIdentity,
+        input.cwd,
+        options.verifiedSourceIdentityOnly
+      );
+      if (
+        row.capture_inserted &&
+        !row.repository_assignment_inherited &&
+        !replicatedAssignment
+      ) {
+        await preserveRoutedCaptureTarget(client, actor.userId, row.id);
       }
       await ensureCapturedSessionLogicalMemory(client, actor.userId, row.id);
       if (ownsTransaction) {
@@ -921,55 +1109,8 @@ export const createCapturedSessionRepository = (
     return result.rows[0] ? mapCapturedSession(result.rows[0]) : null;
   },
 
-  async moveCapturedSessionToProject(actor, sessionId, input) {
-    const project = normalizedProjectReference(input);
-    if (!project) return null;
-    const result = await pool.query<CapturedSessionRow>(
-      `
-        update sessions
-        set
-          project_override_id = $3,
-          project_override_name = $4,
-          project_override_path = $5,
-          project_override_at = now(),
-          project_override_by_user_id = $1,
-          updated_at = now()
-        where id = $2
-          and owner_user_id = $1
-          and visibility = 'personal'
-          and invalidated_at is null
-          and personal_deleted_at is null
-        returning ${capturedSessionColumns}
-      `,
-      [actor.userId, sessionId, project.id, project.name, project.path]
-    );
-    return result.rows[0] ? mapCapturedSession(result.rows[0]) : null;
-  },
-
-  async resetCapturedSessionProject(actor, sessionId) {
-    const result = await pool.query<CapturedSessionRow>(
-      `
-        update sessions
-        set
-          project_override_id = null,
-          project_override_name = null,
-          project_override_path = null,
-          project_override_at = null,
-          project_override_by_user_id = null,
-          updated_at = now()
-        where id = $2
-          and owner_user_id = $1
-          and visibility = 'personal'
-          and invalidated_at is null
-          and personal_deleted_at is null
-        returning ${capturedSessionColumns}
-      `,
-      [actor.userId, sessionId]
-    );
-    return result.rows[0] ? mapCapturedSession(result.rows[0]) : null;
-  },
-
-  async getCapturedSession(actor, sessionId) {
+  async getCapturedSession(actor, sessionId, input = {}) {
+    const { selection } = projectPersonalInspectionQuery(actor.userId, input);
     const result = await pool.query<CapturedSessionRow>(
       `
         select ${capturedSessionColumns}
@@ -978,13 +1119,16 @@ export const createCapturedSessionRepository = (
           and owner_user_id = $1
           and visibility = 'personal'
           and invalidated_at is null
+          and personal_deleted_at is null
+          and ${personalSourceSelectionSql("sessions", "$3", { inspection: true, includeUnassigned: true })}
       `,
-      [actor.userId, sessionId]
+      [actor.userId, sessionId, JSON.stringify(selection)]
     );
     return result.rows[0] ? mapCapturedSession(result.rows[0]) : null;
   },
 
   async listCapturedSessionSummaries(actor, input = {}) {
+    const { selection } = projectPersonalInspectionQuery(actor.userId, input);
     const limit = Math.min(Math.max(input.limit ?? 200, 1), 500);
     const result = await pool.query<CapturedSessionSummaryRow>(
       `
@@ -992,7 +1136,7 @@ export const createCapturedSessionRepository = (
           s.id as session_id,
           lm.id as logical_memory_id,
           nullif(btrim(s.metadata ->> 'threadName'), '') as title,
-          coalesce(s.project_override_name, s.automatic_project_name) as project_name,
+          ${effectiveProjectNameSql("s")} as project_name,
           greatest(
             s.updated_at,
             coalesce(max(coalesce(me.source_event_time, me.captured_at)), s.updated_at)
@@ -1050,21 +1194,27 @@ export const createCapturedSessionRepository = (
           and s.visibility = 'personal'
           and s.invalidated_at is null
           and s.personal_deleted_at is null
+          and ${personalSourceSelectionSql("s", "$3", { inspection: true, includeUnassigned: true })}
         group by s.id, lm.id, relationship.state, relationship.revoked_at,
                  relationship.source_cursor, relationship.last_synced_at
         order by latest_activity_at desc, s.id desc
         limit $2
       `,
-      [actor.userId, limit]
+      [actor.userId, limit, JSON.stringify(selection)]
     );
     return result.rows.map(mapCapturedSessionSummary);
   },
 
-  async getCapturedSessionSummary(actor, sessionId) {
-    return getCapturedSessionSummaryWithClient(pool, actor, sessionId);
+  async getCapturedSessionSummary(actor, sessionId, input = {}) {
+    return getCapturedSessionSummaryWithClient(pool, actor, sessionId, input);
   },
 
-  async getCapturedSessionSummaryByLogicalMemoryId(actor, logicalMemoryId) {
+  async getCapturedSessionSummaryByLogicalMemoryId(
+    actor,
+    logicalMemoryId,
+    input = {}
+  ) {
+    const { selection } = projectPersonalInspectionQuery(actor.userId, input);
     const result = await pool.query<{ local_session_id: string }>(
       `select local_memory.local_session_id
          from logical_memories logical
@@ -1077,19 +1227,21 @@ export const createCapturedSessionRepository = (
           and session.visibility = 'personal'
           and session.invalidated_at is null
           and session.personal_deleted_at is null
+          and ${personalSourceSelectionSql("session", "$3", { inspection: true, includeUnassigned: true })}
         where logical.id = $2
           and logical.owner_user_id = $1
           and logical.owner_principal_id = $1
           and logical.source_kind = 'captured_session'
           and logical.lifecycle in ('active', 'stale')
         limit 1`,
-      [actor.userId, logicalMemoryId]
+      [actor.userId, logicalMemoryId, JSON.stringify(selection)]
     );
     return result.rows[0]
       ? getCapturedSessionSummaryWithClient(
           pool,
           actor,
-          result.rows[0].local_session_id
+          result.rows[0].local_session_id,
+          input
         )
       : null;
   },
@@ -1103,8 +1255,8 @@ export const createCapturedSessionRepository = (
           select
             s.id,
             s.external_session_id,
-            coalesce(s.project_override_name, s.automatic_project_name, 'Unassigned') as project_name,
-            coalesce(s.project_override_path, s.automatic_project_path) as project_path,
+            ${effectiveProjectNameSql("s")} as project_name,
+            ${effectiveProjectPathSql("s")} as project_path,
             s.metadata ->> 'threadName' as current_title,
             count(me.id) filter (where me.payload ->> 'actor' in ('user', 'agent'))::text as event_count,
             max(coalesce(me.source_event_time, me.captured_at)) as latest_event_at
@@ -1164,6 +1316,7 @@ export const createCapturedSessionRepository = (
   },
 
   async getLatestCapturedSessionForProject(actor, input) {
+    const { selection } = projectPersonalInspectionQuery(actor.userId, input);
     const result = await pool.query<CapturedSessionRow>(
       `
         select ${capturedSessionColumns}
@@ -1172,17 +1325,11 @@ export const createCapturedSessionRepository = (
           and visibility = 'personal'
           and invalidated_at is null
           and personal_deleted_at is null
-          and (
-            cwd = $2
-            or metadata ->> 'projectId' = $2
-            or metadata ->> 'projectPath' = $2
-            or automatic_project_id = $2
-            or project_override_id = $2
-          )
+          and ${personalSourceSelectionSql("sessions", "$2", { inspection: true, includeUnassigned: true })}
         order by created_at desc, id desc
         limit 1
       `,
-      [actor.userId, input.projectId]
+      [actor.userId, JSON.stringify(selection)]
     );
     const row = result.rows[0];
     return row ? mapCapturedSession(row) : null;

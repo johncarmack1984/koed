@@ -14,10 +14,16 @@ import type {
   PersonalDesktopProjectThread
 } from "@koed/shared/personal-desktop";
 import { PERSONAL_DESKTOP_CONTRACT_VERSION } from "@koed/shared/personal-desktop";
+import {
+  personalFolderExecutionId,
+  personalFolderScopeId,
+  repositoryScopeId
+} from "@koed/shared";
 import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { createProjectSourceFixture } from "../../../project-source-fixture.js";
 import type { DesktopApi } from "../../../types.js";
 import { PersonalMemoryStore } from "../../state/personal-memory.js";
 import type { ManagedConversationRealtimeUpdate } from "../../state/managed-conversation-runtime.js";
@@ -107,6 +113,30 @@ const thread = (
   ...overrides
 });
 
+const executionFixture = createProjectSourceFixture();
+const executionId = personalFolderExecutionId(executionFixture.first.reference);
+const executableProject = (threads: PersonalDesktopProjectThread[]) => ({
+  ...project(threads),
+  ownerUserId: executionFixture.ownerUserId,
+  namedProject: {
+    ...executionFixture.project.namedProject!,
+    projectId: "project-1"
+  },
+  projectReference: {
+    ownerUserId: executionFixture.ownerUserId,
+    projectId: "project-1"
+  },
+  inclusionRules: [
+    {
+      ...executionFixture.project.inclusionRules![1]!,
+      target: {
+        kind: "folder" as const,
+        folder: executionFixture.first.reference
+      }
+    }
+  ]
+});
+
 const event = (index: number): PersonalDesktopConversationEvent => ({
   actor: index % 2 ? "assistant" : "user",
   content: `Event ${index}`,
@@ -133,11 +163,11 @@ const project = (
 const api = (
   overrides: Partial<PersonalDesktopApi> = {}
 ): PersonalDesktopApi => ({
-  assignSessionProject: vi.fn(async () => ({ projectId: null })),
   updateSessionPresentation: vi.fn(async () => {
     throw new Error("not used");
   }),
   listProjects: vi.fn(async () => []),
+  listLocalFolders: async () => executionFixture.localFolders,
   loadEventPage: vi.fn(async () => []),
   updateSessionTitle: vi.fn(async ({ title }) => ({ title })),
   subscribe: vi.fn(() => () => undefined),
@@ -368,6 +398,697 @@ describe("PersonalMemoryWorkspace", () => {
     vi.restoreAllMocks();
   });
 
+  const createdProject: PersonalDesktopProject = {
+    id: "00000000-0000-4000-8000-000000000800",
+    name: "Manual Project",
+    path: null,
+    eventCount: 0,
+    threads: [],
+    namedProject: {
+      projectId: "00000000-0000-4000-8000-000000000800",
+      name: "Manual Project",
+      version: 1,
+      headRevisionId: "00000000-0000-4000-8000-000000000801",
+      deletedAt: null,
+      createdAt: "2026-10-20T00:00:00.000Z",
+      updatedAt: "2026-10-20T00:00:00.000Z"
+    }
+  };
+  const submitCreation = async (name = "Manual Project") => {
+    await act(async () =>
+      changeInput(
+        document.querySelector<HTMLInputElement>(
+          ".personal-project-create-dialog input"
+        )!,
+        name
+      )
+    );
+    await act(async () =>
+      document
+        .querySelector(".personal-project-create-dialog form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }))
+    );
+  };
+
+  const pvFixture = () => {
+    const fixture = createProjectSourceFixture();
+    const store = new PersonalMemoryStore(
+      api({
+        listProjects: async () => fixture.groups,
+        listProjectMetadata: async () => fixture.metadata,
+        listLocalFolders: async () => fixture.localFolders,
+        projectStatus: async () => ({ reconciliationPending: false })
+      })
+    );
+    return { ...fixture, store };
+  };
+  const clickText = async (text: string, selector = "button") => {
+    const button = [
+      ...container.querySelectorAll<HTMLButtonElement>(selector)
+    ].find((item) => item.textContent?.includes(text));
+    expect(button, text).toBeDefined();
+    await act(async () => button!.click());
+  };
+  const openNewConversation = async () => {
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Project actions"]')!
+        .click()
+    );
+    const item = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]')
+    ].find((node) => node.textContent?.trim() === "New Conversation");
+    expect(item).toBeDefined();
+    expect(item?.getAttribute("aria-disabled")).not.toBe("true");
+    await act(async () => item!.click());
+  };
+  it.each([true, false])(
+    "replaces the Project header when switching Projects (management: %s)",
+    async (withManagement) => {
+      const fixture = createProjectSourceFixture();
+      const second: PersonalDesktopProject = {
+        ...createdProject,
+        namedProject: { ...createdProject.namedProject! }
+      };
+      const store = new PersonalMemoryStore(
+        api({
+          listProjects: async () => [...fixture.groups, second],
+          listProjectMetadata: async () => fixture.metadata,
+          listLocalFolders: async () => fixture.localFolders
+        })
+      );
+      const manage = vi.fn<NonNullable<PersonalDesktopApi["manageProject"]>>(
+        async () => {
+          throw new Error("No mutation expected");
+        }
+      );
+      for (const selected of [
+        fixture.project,
+        second,
+        fixture.project,
+        second
+      ]) {
+        await act(async () =>
+          root.render(
+            <PersonalMemoryWorkspace
+              store={store}
+              manageProject={withManagement ? manage : undefined}
+              route={{ kind: "project", projectId: selected.id }}
+              onNavigate={vi.fn()}
+            />
+          )
+        );
+        const headers = container.querySelectorAll(".personal-project-header");
+        expect(headers).toHaveLength(1);
+        expect(headers[0]?.querySelector("h2")?.textContent).toBe(
+          selected.name
+        );
+        expect(container.querySelector(".personal-project-recall")).toBeNull();
+        expect(container.querySelector(".personal-project-sources")).toBeNull();
+        expect(
+          container.querySelector(".personal-source-browser-toggle")
+        ).toBeNull();
+      }
+      expect(manage).not.toHaveBeenCalled();
+    }
+  );
+
+  it("retains the Folder dropdown and saved visibility after header cleanup", async () => {
+    const fixture = createProjectSourceFixture();
+    const previousDesktop = window.koedDesktop;
+    const preferences = new Map<string, string[]>();
+    const invoke = vi.fn(
+      async (
+        command: string,
+        input: { projectId: string; hiddenFolderIds?: string[] }
+      ) => {
+        if (command === "project_folder_filter_set")
+          preferences.set(input.projectId, input.hiddenFolderIds!);
+        else if (command !== "project_folder_filter_get")
+          throw new Error("Unexpected command");
+        return {
+          projectId: input.projectId,
+          hiddenFolderIds: preferences.get(input.projectId) ?? []
+        };
+      }
+    );
+    window.koedDesktop = { invoke } as unknown as DesktopApi;
+    const manage = vi.fn<NonNullable<PersonalDesktopApi["manageProject"]>>(
+      async () => {
+        throw new Error("No membership change expected");
+      }
+    );
+    const store = new PersonalMemoryStore(
+      api({
+        listProjects: async () => [...fixture.groups, createdProject],
+        listProjectMetadata: async () => fixture.metadata,
+        listLocalFolders: async () => fixture.localFolders
+      })
+    );
+    const rows = () =>
+      container.querySelectorAll(".personal-session-row-select");
+    try {
+      await act(async () =>
+        root.render(
+          <Harness
+            initialRoute={{ kind: "project", projectId: fixture.projectId }}
+          >
+            {({ route, onNavigate }) => (
+              <PersonalMemoryWorkspace
+                store={store}
+                route={route}
+                onNavigate={onNavigate}
+                manageProject={manage}
+              />
+            )}
+          </Harness>
+        )
+      );
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('[aria-label="Details for Koed"]')!
+          .click()
+      );
+      const left = () =>
+        [...document.querySelectorAll(".personal-project-folder-checkbox")]
+          .find((label) =>
+            label.textContent?.includes("Show Conversations from /local/koed")
+          )!
+          .querySelector<HTMLInputElement>("input")!;
+      const all = () =>
+        document.querySelector<HTMLInputElement>(
+          '[aria-label="Select all folders"]'
+        )!;
+      expect(rows()).toHaveLength(4);
+      expect(all().checked).toBe(true);
+      await act(async () => left().click());
+      expect(rows()).toHaveLength(2);
+      expect(all().indeterminate).toBe(true);
+      await act(async () =>
+        document
+          .querySelector<HTMLButtonElement>(
+            '[aria-label="Close Project details"]'
+          )!
+          .click()
+      );
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(
+            `[data-project-id="${createdProject.id}"]`
+          )!
+          .click()
+      );
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(
+            `[data-project-id="${fixture.projectId}"]`
+          )!
+          .click()
+      );
+      expect(rows()).toHaveLength(2);
+      await act(async () => store.loadProjects());
+      expect(rows()).toHaveLength(2);
+      await clickText("Show all", ".personal-project-filter-status button");
+      expect(rows()).toHaveLength(4);
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('[aria-label="Details for Koed"]')!
+          .click()
+      );
+      await act(async () => all().click());
+      expect(rows()).toHaveLength(0);
+      expect(container.textContent).toContain(
+        "No Conversations match the folder filter"
+      );
+      await act(async () => all().click());
+      expect(rows()).toHaveLength(4);
+      expect(preferences.get(fixture.projectId)).toEqual([]);
+      expect(manage).not.toHaveBeenCalled();
+      expect(
+        container.querySelectorAll(".personal-project-header")
+      ).toHaveLength(1);
+    } finally {
+      window.koedDesktop = previousDesktop;
+    }
+  });
+
+  it("shows and opens named Projects before the source inventory finishes loading", async () => {
+    const fixture = createProjectSourceFixture();
+    let finishSources!: (projects: PersonalDesktopProject[]) => void;
+    const sources = new Promise<PersonalDesktopProject[]>((resolve) => {
+      finishSources = resolve;
+    });
+    const store = new PersonalMemoryStore(
+      api({
+        listProjects: () => sources,
+        listNamedProjects: async () =>
+          fixture.groups.filter((group) => group.namedProject),
+        listProjectMetadata: async () => fixture.metadata,
+        listLocalFolders: async () => fixture.localFolders
+      })
+    );
+    await act(async () =>
+      root.render(
+        <Harness initialRoute={{ kind: "projects" }}>
+          {({ route, onNavigate }) => (
+            <PersonalMemoryWorkspace
+              store={store}
+              route={route}
+              onNavigate={onNavigate}
+            />
+          )}
+        </Harness>
+      )
+    );
+    expect(store.current().loading).toBe(true);
+    expect(container.querySelectorAll("[data-project-id]")).toHaveLength(1);
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          `[data-project-id="${fixture.projectId}"]`
+        )!
+        .click()
+    );
+    expect(container.querySelectorAll(".personal-project-header")).toHaveLength(
+      1
+    );
+    expect(container.querySelectorAll("[data-session-id]")).toHaveLength(4);
+    expect(container.querySelector(".personal-project-sources")).toBeNull();
+    await act(async () => finishSources(fixture.groups));
+    expect(store.current().loading).toBe(false);
+    expect(container.querySelector(".personal-project-sources")).toBeNull();
+    expect(container.querySelectorAll(".personal-project-header")).toHaveLength(
+      1
+    );
+    expect(container.querySelectorAll("[data-session-id]")).toHaveLength(4);
+  });
+
+  it.each([true, false])(
+    "keeps the Project header clean and moves New Conversation into its menu (management: %s)",
+    async (withManagement) => {
+      const fixture = pvFixture();
+      const manage = vi.fn<NonNullable<PersonalDesktopApi["manageProject"]>>(
+        async () => {
+          throw new Error("No membership change expected");
+        }
+      );
+      await act(async () =>
+        root.render(
+          <Harness
+            initialRoute={{
+              kind: "project",
+              projectId: fixture.projectId,
+              sourceFilter: { kind: "git", key: repositoryScopeId(fixture.git) }
+            }}
+          >
+            {({ route, onNavigate }) => (
+              <PersonalMemoryWorkspace
+                route={route}
+                onNavigate={onNavigate}
+                store={fixture.store}
+                managedConversations={managedApi()}
+                manageProject={withManagement ? manage : undefined}
+              />
+            )}
+          </Harness>
+        )
+      );
+      expect(container.querySelectorAll("[data-project-id]")).toHaveLength(1);
+      expect(container.querySelectorAll("[data-session-id]")).toHaveLength(4);
+      expect(container.querySelector(".personal-project-recall")).toBeNull();
+      expect(container.querySelector(".personal-project-sources")).toBeNull();
+      expect(
+        container.querySelector(".personal-source-browser-toggle")
+      ).toBeNull();
+      expect(container.querySelector(".personal-new-conversation")).toBeNull();
+      await openNewConversation();
+      expect(
+        container.querySelector('[aria-label^="Execution Folder:"]')
+      ).not.toBeNull();
+      expect(manage).not.toHaveBeenCalled();
+    }
+  );
+
+  it("keeps remote Folder links browse-only with New Conversation disabled in the menu", async () => {
+    const fixture = pvFixture(),
+      managed = managedApi();
+    await act(async () =>
+      root.render(
+        <PersonalMemoryWorkspace
+          route={{
+            kind: "project",
+            projectId: personalFolderScopeId(fixture.second.reference)
+          }}
+          onNavigate={vi.fn()}
+          store={fixture.store}
+          managedConversations={managed}
+        />
+      )
+    );
+    expect(container.querySelectorAll("[data-session-id]")).toHaveLength(1);
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Project actions"]')!
+        .click()
+    );
+    const item = [...document.querySelectorAll('[role="menuitem"]')].find(
+      (node) => node.textContent?.trim() === "New Conversation"
+    )!;
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(managed.start).not.toHaveBeenCalled();
+  });
+
+  it("PV-04 requires a concrete local Folder choice for a multi-source Project launch", async () => {
+    sessionStorage.clear();
+    const fixture = pvFixture(),
+      managed = managedApi();
+    await act(async () =>
+      root.render(
+        <Harness
+          initialRoute={{ kind: "project", projectId: fixture.projectId }}
+        >
+          {({ route, onNavigate }) => (
+            <PersonalMemoryWorkspace
+              route={route}
+              onNavigate={onNavigate}
+              store={fixture.store}
+              managedConversations={managed}
+            />
+          )}
+        </Harness>
+      )
+    );
+    await openNewConversation();
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    const draft = "Keep this draft when changing Folders.";
+    await act(async () => changeTextarea(textarea, draft));
+    expect(container.querySelector(".personal-execution-folder")).toBeNull();
+    expect(
+      container.querySelector('[aria-label^="Execution Folder:"]')?.textContent
+    ).toContain("Choose Folder");
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[aria-label="Start Conversation"]'
+      )?.disabled
+    ).toBe(true);
+    const chooseFolder = async (path: string) => {
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(
+            '[aria-label^="Execution Folder:"]'
+          )!
+          .click()
+      );
+      await act(async () =>
+        document
+          .querySelector<HTMLElement>(
+            `[role="menuitemradio"][title="${path}"]`
+          )!
+          .click()
+      );
+    };
+    await chooseFolder("/local/koed");
+    expect(container.querySelector("textarea")).toBe(textarea);
+    expect(textarea.value).toBe(draft);
+    await chooseFolder("/local/notes");
+    expect(container.querySelector("textarea")).toBe(textarea);
+    expect(textarea.value).toBe(draft);
+    const id = personalFolderExecutionId(fixture.notes.reference);
+    await vi.waitFor(() =>
+      expect(managed.discoverCommands).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: id })
+      )
+    );
+    await clickText("", '[aria-label="Start Conversation"]');
+    expect(managed.start).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: id, runnerKind: "local_device" })
+    );
+    expect(managed.send).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: draft })
+    );
+  });
+
+  it("keeps the draft and requires a new choice if its local Folder becomes unavailable", async () => {
+    sessionStorage.clear();
+    const fixture = createProjectSourceFixture();
+    let available = fixture.localFolders;
+    const store = new PersonalMemoryStore(
+      api({
+        listProjects: async () => fixture.groups,
+        listProjectMetadata: async () => fixture.metadata,
+        listLocalFolders: async () => available
+      })
+    );
+    await act(async () =>
+      root.render(
+        <PersonalMemoryWorkspace
+          route={{ kind: "project", projectId: fixture.projectId }}
+          onNavigate={vi.fn()}
+          store={store}
+          managedConversations={managedApi()}
+        />
+      )
+    );
+    await openNewConversation();
+    const choose = async (path: string) => {
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(
+            '[aria-label^="Execution Folder:"]'
+          )!
+          .click()
+      );
+      await act(async () =>
+        document
+          .querySelector<HTMLElement>(
+            `[role="menuitemradio"][title="${path}"]`
+          )!
+          .click()
+      );
+    };
+    await choose("/local/notes");
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    await act(async () =>
+      changeTextarea(textarea, "Keep this draft if the Folder disappears.")
+    );
+    available = fixture.localFolders.filter(
+      (folder) => folder.normalizedPath !== "/local/notes"
+    );
+    await act(async () => store.loadProjects());
+    expect(container.querySelector("textarea")).toBe(textarea);
+    expect(textarea.value).toBe("Keep this draft if the Folder disappears.");
+    expect(
+      container.querySelector('[aria-label^="Execution Folder:"]')?.textContent
+    ).toContain("Choose Folder");
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[aria-label="Start Conversation"]'
+      )!.disabled
+    ).toBe(true);
+    await choose("/local/koed");
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[aria-label="Start Conversation"]'
+      )!.disabled
+    ).toBe(false);
+    expect(textarea.value).toBe("Keep this draft if the Folder disappears.");
+  });
+
+  it("keeps empty backend Projects visible without source-move prompts", async () => {
+    const id = "00000000-0000-4000-8000-000000000091",
+      stamp = "2026-10-19T12:00:00.000Z";
+    const named: PersonalDesktopProject = {
+      id,
+      name: "New Release",
+      path: null,
+      eventCount: 0,
+      threads: [],
+      namedProject: {
+        projectId: id,
+        name: "New Release",
+        version: 1,
+        headRevisionId: "00000000-0000-4000-8000-000000000092",
+        deletedAt: null,
+        createdAt: stamp,
+        updatedAt: stamp
+      },
+      projectReference: {
+        ownerUserId: "00000000-0000-4000-8000-000000000093",
+        projectId: id
+      }
+    };
+    const store = new PersonalMemoryStore(
+      api({ listProjects: async () => [named] })
+    );
+    const manageProject =
+      vi.fn<NonNullable<PersonalDesktopApi["manageProject"]>>();
+    const reviewSharing = vi.fn();
+    await act(async () =>
+      root.render(
+        <PersonalMemoryWorkspace
+          manageProject={manageProject}
+          onReviewGitAnchorSharing={reviewSharing}
+          route={{ kind: "project", projectId: id }}
+          store={store}
+          onNavigate={() => undefined}
+        />
+      )
+    );
+    expect(container.textContent).toContain("New Release");
+    expect(container.textContent).toContain("No Conversations in this Project");
+    expect(container.textContent).toContain("Open Manage Project sources");
+    expect(container.textContent).not.toContain("Ask this Project");
+    expect(container.textContent).not.toContain("Ask this Folder");
+    expect(
+      container.querySelector('[aria-label="Project actions"]')
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[aria-label="Manage Project sources"]')
+        ?.textContent
+    ).toBe("");
+    expect(container.textContent).not.toContain("Move existing Conversations");
+    expect(container.querySelector('[aria-label="Move Project"]')).toBeNull();
+    expect(document.querySelector(".personal-project-transfer")).toBeNull();
+    expect(container.textContent).not.toContain("Review Project sharing");
+    expect(container.textContent).not.toContain("Review Sharing");
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Project actions"]')!
+        .click()
+    );
+    const reviewItem = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]')
+    ].find((item) => item.textContent?.trim() === "Share");
+    expect(reviewItem).toBeDefined();
+    await act(async () => reviewItem!.click());
+    expect(reviewSharing).toHaveBeenCalledExactlyOnceWith(
+      { kind: "project", project: named.projectReference },
+      "New Release"
+    );
+  });
+
+  it("creates a named empty Project without a folder and opens it despite an active search", async () => {
+    const registered: PersonalDesktopProject[] = [];
+    const store = new PersonalMemoryStore(
+      api({ listProjects: async () => registered })
+    );
+    const onNavigate = vi.fn();
+    const onCreateProject = vi.fn(async () => {
+      registered.push(createdProject);
+      return (await store.loadProjects()).projectsById.get(createdProject.id)!;
+    });
+    await act(async () =>
+      root.render(
+        <PersonalMemoryWorkspace
+          onCreateProject={onCreateProject}
+          onNavigate={onNavigate}
+          route={{ kind: "projects" }}
+          store={store}
+        />
+      )
+    );
+    const search = container.querySelector<HTMLInputElement>(
+      'input[type="search"]'
+    )!;
+    await act(async () => changeInput(search, "missing"));
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Create Project"]')!
+        .click()
+    );
+    expect(onCreateProject).not.toHaveBeenCalled();
+    await submitCreation("  Manual Project  ");
+    expect(onCreateProject).toHaveBeenCalledWith("Manual Project");
+    expect(onNavigate).toHaveBeenCalledWith({
+      kind: "project",
+      projectId: createdProject.id
+    });
+    expect(search.value).toBe("");
+    expect(
+      [...container.querySelectorAll("[data-project-id]")].some(
+        (element) =>
+          element.getAttribute("data-project-id") === createdProject.id
+      )
+    ).toBe(true);
+    await act(async () => {
+      await store.loadProjects();
+    });
+    expect(store.current().projectsById.get(createdProject.id)).toMatchObject({
+      path: null,
+      threads: []
+    });
+  });
+
+  it("keeps raw captured and empty sources outside the named Project catalog after refresh", async () => {
+    let source = project([]);
+    const store = new PersonalMemoryStore(
+      api({ listProjects: async () => [source, createdProject] })
+    );
+    await act(async () =>
+      root.render(
+        <PersonalMemoryWorkspace
+          onNavigate={vi.fn()}
+          route={{ kind: "projects" }}
+          store={store}
+        />
+      )
+    );
+    expect(container.querySelectorAll("[data-project-id]")).toHaveLength(1);
+    expect(
+      container.querySelector(`[data-project-id="${createdProject.id}"]`)
+    ).not.toBeNull();
+    source = project([thread(2)]);
+    await act(async () => store.loadProjects());
+    expect(container.querySelectorAll("[data-project-id]")).toHaveLength(1);
+    expect(store.current().projectsById.get(source.id)?.threads).toHaveLength(
+      1
+    );
+  });
+
+  it("cancels creation without a write and retains a failed name for retry", async () => {
+    const store = new PersonalMemoryStore(api());
+    const onNavigate = vi.fn();
+    const onCreateProject = vi.fn(async (): Promise<null> => {
+      throw new Error("Project could not be saved.");
+    });
+    await act(async () =>
+      root.render(
+        <PersonalMemoryWorkspace
+          onCreateProject={onCreateProject}
+          onNavigate={onNavigate}
+          route={{ kind: "projects" }}
+          store={store}
+        />
+      )
+    );
+    const create = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Create Project"]'
+    )!;
+    await act(async () => create.click());
+    await act(async () =>
+      [
+        ...document.querySelectorAll<HTMLButtonElement>(
+          ".personal-project-create-dialog button"
+        )
+      ]
+        .find((button) => button.textContent === "Cancel")!
+        .click()
+    );
+    expect(onCreateProject).not.toHaveBeenCalled();
+    expect(onNavigate).not.toHaveBeenCalled();
+    await act(async () => create.click());
+    await submitCreation();
+    expect(
+      document.querySelector('.personal-project-create-dialog [role="alert"]')
+        ?.textContent
+    ).toContain("Project could not be saved.");
+    expect(
+      document.querySelector<HTMLInputElement>(
+        ".personal-project-create-dialog input"
+      )?.value
+    ).toBe("Manual Project");
+  });
+
   it("clears execution context attachments when navigating to another Conversation", async () => {
     const otherSession = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const store = new PersonalMemoryStore(
@@ -408,7 +1129,7 @@ describe("PersonalMemoryWorkspace", () => {
     expect(container.textContent).not.toContain("selected-context.ts");
   });
 
-  it("loads the normalized Project index and restores focus through drilldown", async () => {
+  it("opens a normalized source deep link and focuses its Conversation list", async () => {
     const source = project([
       thread(1, {
         sourceAiClient: "pi",
@@ -426,8 +1147,25 @@ describe("PersonalMemoryWorkspace", () => {
         branch: "main",
         isWorktree: false,
         remotes: [{ display: "github.com/koed-labs/koed" }]
+      },
+      repository: {
+        kind: "portable_repository",
+        key: "koed_index_fixture",
+        root: source.path,
+        branch: "main",
+        checkoutId: "checkout_index_fixture",
+        originatingDeviceId: "studio-id",
+        reason: "origin",
+        selectedRemote: "origin",
+        anchorDisplay: "github.com/koed-labs/koed"
       }
     };
+    source.repository = metadata.repository;
+    source.id = repositoryScopeId(metadata.repository!);
+    source.threads = source.threads.map((item) => ({
+      ...item,
+      projectId: source.id
+    }));
     const store = new PersonalMemoryStore(
       api({
         listProjects: vi.fn(async () => [source]),
@@ -437,7 +1175,7 @@ describe("PersonalMemoryWorkspace", () => {
 
     await act(async () => {
       root.render(
-        <Harness initialRoute={{ kind: "projects" }}>
+        <Harness initialRoute={{ kind: "project", projectId: source.id }}>
           {({ onNavigate, route }) => (
             <PersonalMemoryWorkspace
               onNavigate={onNavigate}
@@ -447,32 +1185,6 @@ describe("PersonalMemoryWorkspace", () => {
           )}
         </Harness>
       );
-    });
-    await vi.waitFor(() =>
-      expect(container.textContent).toContain(source.name)
-    );
-    const activeProjects = container.querySelector(
-      '[aria-labelledby="personal-active-projects"]'
-    );
-    expect(activeProjects).not.toBeNull();
-    expect(
-      activeProjects?.querySelector(".personal-project-section-heading")
-        ?.textContent
-    ).toBe("Active1");
-    expect(container.textContent).toContain("koed-labs/koed");
-    const overview = container.querySelector(
-      '[data-project-id="project-1"] .personal-project-overview'
-    );
-    expect(overview?.getAttribute("aria-label")).toBe(
-      "1 Captured Session · 1000 Memory Events"
-    );
-    expect(overview?.querySelector(".lucide-brain")).not.toBeNull();
-    expect(overview?.querySelector(".lucide-book-text")).not.toBeNull();
-
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>('[data-project-id="project-1"]')
-        ?.click();
     });
     const heading = container.querySelector<HTMLElement>(
       '[data-personal-route-focus="project"]'
@@ -673,6 +1385,7 @@ describe("PersonalMemoryWorkspace", () => {
     ).toHaveLength(2);
     expect(container.textContent?.match(/Research Agent/g)).toHaveLength(1);
     expect(container.textContent?.match(/Verification Agent/g)).toHaveLength(1);
+    expect(container.querySelectorAll("[data-session-id]")).toHaveLength(3);
   });
 
   it("provides initial Project loading states for wide and narrow layouts", async () => {
@@ -772,7 +1485,7 @@ describe("PersonalMemoryWorkspace", () => {
     const detail = container.querySelector(".personal-memory-detail-pane");
     const list = container.querySelector(".personal-project-list");
     expect(detail?.textContent).toContain(
-      "Projects appear after the Supported Capture Hook records a Captured Session."
+      "Use + to create a Project, or capture a Conversation to get started."
     );
     expect(list?.textContent).not.toContain("No Projects yet");
     expect(
@@ -1009,91 +1722,6 @@ describe("PersonalMemoryWorkspace", () => {
     ).not.toBeNull();
   });
 
-  it("fences a stale Project move response after the selected session changes", async () => {
-    let resolveMove:
-      | ((value: { projectId: string | null }) => void)
-      | undefined;
-    const assignSessionProject = vi.fn(
-      () =>
-        new Promise<{ projectId: string | null }>((resolve) => {
-          resolveMove = resolve;
-        })
-    );
-    const source = project([thread(1)]);
-    const target = {
-      ...project([]),
-      id: "project-2",
-      name: "Destination Project"
-    };
-    const store = new PersonalMemoryStore(
-      api({
-        listProjects: vi.fn(async () => [source, target]),
-        loadEventPage: vi.fn(async () => [event(1)])
-      })
-    );
-    const onAssigned = vi.fn();
-
-    await act(async () => {
-      root.render(
-        <Harness
-          initialRoute={{
-            kind: "session",
-            projectId: source.id,
-            sessionId
-          }}
-        >
-          {({ onNavigate, route }) => (
-            <PersonalMemoryWorkspace
-              assignSessionProject={assignSessionProject}
-              onNavigate={onNavigate}
-              onSessionProjectAssigned={onAssigned}
-              route={route}
-              store={store}
-            />
-          )}
-        </Harness>
-      );
-    });
-    const manage = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Manage Captured Session"]'
-    );
-    expect(manage?.querySelector("svg[aria-hidden='true']")).not.toBeNull();
-    expect(container.textContent).not.toContain("Move to Project:");
-    expect(container.textContent).not.toContain("Move to another Project");
-
-    await act(async () => manage?.click());
-    await vi.waitFor(() =>
-      expect(document.body.textContent).toContain("Move to Project:")
-    );
-    expect(
-      [...document.querySelectorAll("button")]
-        .find((button) => button.textContent === "Move")
-        ?.classList.contains("personal-move-button")
-    ).toBe(true);
-
-    const form = document.querySelector(
-      ".personal-session-assignment-dialog form"
-    );
-    await act(async () => {
-      const select = form?.querySelector<HTMLSelectElement>("select");
-      if (select) select.value = target.id;
-      form?.dispatchEvent(
-        new Event("submit", { bubbles: true, cancelable: true })
-      );
-    });
-    await act(async () => {
-      root.render(
-        <PersonalMemoryWorkspace
-          onNavigate={vi.fn()}
-          route={{ kind: "projects" }}
-          store={store}
-        />
-      );
-    });
-    await act(async () => resolveMove?.({ projectId: "project-2" }));
-    expect(onAssigned).not.toHaveBeenCalled();
-  });
-
   it("passes only authorized destinations to sharing and keeps mapping advisory", async () => {
     const source = project([thread(1)]);
     const store = new PersonalMemoryStore(
@@ -1103,12 +1731,19 @@ describe("PersonalMemoryWorkspace", () => {
       })
     );
     const onShare = vi.fn();
+    const manageContext = vi
+      .fn<NonNullable<PersonalDesktopApi["manageSourceContext"]>>()
+      .mockRejectedValue(new Error("Context unavailable in fixture"));
+    const manageProject =
+      vi.fn<NonNullable<PersonalDesktopApi["manageProject"]>>();
 
     await act(async () => {
       root.render(
         <PersonalMemoryWorkspace
           onNavigate={vi.fn()}
           onShareToWorkspace={onShare}
+          manageSourceContext={manageContext}
+          manageProject={manageProject}
           projectWorkspaceSuggestions={[
             { projectId: source.id, workspaceId: "revoked" }
           ]}
@@ -1144,12 +1779,29 @@ describe("PersonalMemoryWorkspace", () => {
         />
       );
     });
-    await vi.waitFor(() => expect(container.textContent).toContain("Share"));
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector('[aria-label="Conversation actions"]')
+      ).not.toBeNull()
+    );
+    expect(container.querySelector(".personal-share-button")).toBeNull();
     await act(async () => {
       container
-        .querySelector<HTMLButtonElement>(".personal-share-button")
-        ?.click();
+        .querySelector<HTMLButtonElement>(
+          '[aria-label="Conversation actions"]'
+        )!
+        .click();
     });
+    expect(
+      [...document.querySelectorAll('[role="menuitem"]')].map((item) =>
+        item.textContent?.trim()
+      )
+    ).toEqual(["Share", "Correct context", "Add to Project"]);
+    await act(async () =>
+      [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+        .find((item) => item.textContent?.trim() === "Share")!
+        .click()
+    );
 
     expect(onShare).toHaveBeenCalledWith({
       destinations: [
@@ -1179,6 +1831,44 @@ describe("PersonalMemoryWorkspace", () => {
       },
       suggestedWorkspaceId: null
     });
+    const chooseAction = async (label: string) => {
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(
+            '[aria-label="Conversation actions"]'
+          )!
+          .click()
+      );
+      await act(async () =>
+        [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+          .find((item) => item.textContent?.trim() === label)!
+          .click()
+      );
+    };
+    await chooseAction("Correct context");
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      "Correct source context"
+    );
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+    expect(manageContext).toHaveBeenCalledExactlyOnceWith({
+      action: "get",
+      sessionId
+    });
+    await act(async () =>
+      [
+        ...document.querySelectorAll<HTMLButtonElement>(
+          '[role="dialog"] button'
+        )
+      ]
+        .find((button) => button.textContent === "Cancel")!
+        .click()
+    );
+    await chooseAction("Add to Project");
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      "Projects for this Conversation"
+    );
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+    expect(manageProject).not.toHaveBeenCalled();
   });
 
   it.each([false, true])(
@@ -1243,7 +1933,7 @@ describe("PersonalMemoryWorkspace", () => {
         });
         vi.mocked(managed.launchOptions).mockResolvedValue(launch);
       }
-      const source = project([thread(2, { sessionId: null })]);
+      const source = executableProject([thread(2, { sessionId: null })]);
       const store = new PersonalMemoryStore(
         api({ listProjects: vi.fn(async () => [source]) })
       );
@@ -1263,12 +1953,7 @@ describe("PersonalMemoryWorkspace", () => {
           </Harness>
         );
       });
-      await vi.waitFor(() => expect(container.textContent).toContain("New"));
-      await act(async () => {
-        [...container.querySelectorAll<HTMLButtonElement>("button")]
-          .find((button) => button.textContent === "New")
-          ?.click();
-      });
+      await openNewConversation();
       await act(async () => {
         container
           .querySelector<HTMLButtonElement>(
@@ -1283,7 +1968,7 @@ describe("PersonalMemoryWorkspace", () => {
       );
       expect(managed.start).toHaveBeenCalledWith(
         expect.objectContaining({
-          projectId: "project-1",
+          projectId: executionId,
           aiClientDriverId: "codex",
           aiClientInstanceId: configured ? "codex.work" : "codex.default",
           model: "gpt-test",
@@ -1295,7 +1980,7 @@ describe("PersonalMemoryWorkspace", () => {
       );
       if (configured) return;
       expect(managed.resume).toHaveBeenCalledWith({
-        projectId: "project-1",
+        projectId: executionId,
         capturedSessionId: sessionId,
         threadId: "managed-thread"
       });
@@ -1312,7 +1997,7 @@ describe("PersonalMemoryWorkspace", () => {
       expect(textarea.getAttribute("rows")).toBe("1");
       expect(textarea.value).toBe("Recovered draft");
       expect(managed.readDraft).toHaveBeenCalledWith({
-        projectId: "project-1",
+        projectId: executionId,
         capturedSessionId: "execution-1",
         threadId: "execution-1"
       });
@@ -1322,7 +2007,7 @@ describe("PersonalMemoryWorkspace", () => {
       expect(textarea.value).toBe("First line\nSecond line");
       await vi.waitFor(() =>
         expect(managed.writeDraft).toHaveBeenCalledWith({
-          projectId: "project-1",
+          projectId: executionId,
           capturedSessionId: "execution-1",
           threadId: "execution-1",
           value: "First line\nSecond line"
@@ -1912,7 +2597,7 @@ describe("PersonalMemoryWorkspace", () => {
       )
     });
     const store = new PersonalMemoryStore(
-      api({ listProjects: vi.fn(async () => [project([])]) })
+      api({ listProjects: vi.fn(async () => [executableProject([])]) })
     );
 
     await act(async () => {
@@ -1932,12 +2617,7 @@ describe("PersonalMemoryWorkspace", () => {
         </Harness>
       );
     });
-    await vi.waitFor(() => expect(container.textContent).toContain("New"));
-    await act(async () => {
-      [...container.querySelectorAll<HTMLButtonElement>("button")]
-        .find((button) => button.textContent === "New")
-        ?.click();
-    });
+    await openNewConversation();
     await act(async () => {
       container
         .querySelector<HTMLButtonElement>(
@@ -2045,7 +2725,7 @@ describe("PersonalMemoryWorkspace", () => {
       )
     });
     const store = new PersonalMemoryStore(
-      api({ listProjects: vi.fn(async () => [project([])]) })
+      api({ listProjects: vi.fn(async () => [executableProject([])]) })
     );
 
     await act(async () => {
@@ -2062,18 +2742,13 @@ describe("PersonalMemoryWorkspace", () => {
         </Harness>
       );
     });
-    await vi.waitFor(() => expect(container.textContent).toContain("New"));
     const click = async (element: Element | null | undefined) => {
       expect(element).toBeTruthy();
       await act(async () => {
         (element as HTMLElement).click();
       });
     };
-    await click(
-      [...container.querySelectorAll("button")].find(
-        (button) => button.textContent === "New"
-      )
-    );
+    await openNewConversation();
     await click(
       container.querySelector('button[aria-label^="Model and reasoning:"]')
     );
@@ -2494,7 +3169,7 @@ describe("PersonalMemoryWorkspace", () => {
   it("starts and submits the first message from the new Conversation composer", async () => {
     const managed = managedApi();
     const store = new PersonalMemoryStore(
-      api({ listProjects: vi.fn(async () => [project([])]) })
+      api({ listProjects: vi.fn(async () => [executableProject([])]) })
     );
     await act(async () =>
       root.render(
@@ -2510,12 +3185,7 @@ describe("PersonalMemoryWorkspace", () => {
         </Harness>
       )
     );
-    await vi.waitFor(() => expect(container.textContent).toContain("New"));
-    await act(async () =>
-      [...container.querySelectorAll("button")]
-        .find((button) => button.textContent === "New")!
-        .click()
-    );
+    await openNewConversation();
     expect(managed.start).not.toHaveBeenCalled();
     expect(container.querySelector(".personal-project-detail")).toBeNull();
     expect(container.querySelector(".personal-sessions")).toBeNull();
@@ -2536,11 +3206,7 @@ describe("PersonalMemoryWorkspace", () => {
       container.querySelector(".personal-new-conversation-detail")
     ).toBeNull();
     expect(managed.start).not.toHaveBeenCalled();
-    await act(async () =>
-      [...container.querySelectorAll("button")]
-        .find((button) => button.textContent === "New")!
-        .click()
-    );
+    await openNewConversation();
     await act(async () =>
       changeTextarea(
         container.querySelector("textarea")!,
@@ -3049,6 +3715,13 @@ describe("PersonalMemoryWorkspace", () => {
         remotes: [{ display: "github.com/koed-labs/koed" }]
       }
     };
+    metadata.repository = executionFixture.git;
+    source.repository = executionFixture.git;
+    source.id = repositoryScopeId(executionFixture.git);
+    source.threads = source.threads.map((item) => ({
+      ...item,
+      projectId: source.id
+    }));
     const store = new PersonalMemoryStore(
       api({
         listProjects: vi.fn(async () => [source]),
@@ -3060,7 +3733,7 @@ describe("PersonalMemoryWorkspace", () => {
 
     await act(async () => {
       root.render(
-        <Harness initialRoute={{ kind: "projects" }}>
+        <Harness initialRoute={{ kind: "project", projectId: source.id }}>
           {({ onNavigate, route }) => (
             <PersonalMemoryWorkspace
               onNavigate={onNavigate}
@@ -3073,46 +3746,44 @@ describe("PersonalMemoryWorkspace", () => {
         </Harness>
       );
     });
-    await vi.waitFor(() =>
-      expect(container.textContent).toContain(source.name)
-    );
-
-    const rowRepo = container.querySelector(
-      '[data-project-id="project-1"] .personal-project-repo'
-    );
-    expect(rowRepo?.classList.contains("personal-project-repo-static")).toBe(
-      true
-    );
-    expect(rowRepo?.getAttribute("role")).toBeNull();
-    await act(async () => {
-      (rowRepo as HTMLElement)?.click();
-    });
     expect(openExternal).not.toHaveBeenCalled();
 
-    await act(async () => {
+    expect(
+      container.querySelector(".personal-project-header")?.textContent
+    ).not.toContain(source.path);
+    expect(document.querySelector(".personal-project-details-card")).toBeNull();
+    await act(async () =>
       container
-        .querySelector<HTMLButtonElement>('[data-project-id="project-1"]')
-        ?.click();
-    });
-
-    const headerRepo = container.querySelector(
-      ".personal-project-detail-heading .personal-project-repo"
+        .querySelector<HTMLButtonElement>(
+          ".personal-project-repository-trigger"
+        )!
+        .click()
+    );
+    expect(openExternal).not.toHaveBeenCalled();
+    const headerRepo = document.querySelector(
+      ".personal-project-details-card .personal-project-repo"
     );
     expect(headerRepo?.tagName).toBe("BUTTON");
     await act(async () => {
       (headerRepo as HTMLElement)?.click();
     });
-    expect(openExternal).toHaveBeenCalledWith(
-      "https://github.com/koed-labs/koed"
-    );
+    expect(openExternal).toHaveBeenCalledWith("https://example.test/koed");
 
-    const headerFolder = container.querySelector<HTMLButtonElement>(
-      ".personal-project-detail-heading .personal-project-folder"
+    const headerFolder = document.querySelector<HTMLButtonElement>(
+      ".personal-project-details-folder"
     );
     expect(headerFolder?.getAttribute("aria-label")).toBe(
-      `Reveal ${source.name} in file browser`
+      `Open ${source.path} details`
     );
     await act(async () => headerFolder?.click());
+    expect(revealLocalProject).not.toHaveBeenCalled();
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>(
+          `[aria-label="Reveal ${source.path} in file browser"]`
+        )!
+        .click()
+    );
     expect(revealLocalProject).toHaveBeenCalledWith(metadata.localProjectId);
 
     const sessionRow = container.querySelector(".personal-session-row");
@@ -3139,14 +3810,12 @@ describe("PersonalMemoryWorkspace", () => {
     const sessionHeaderRepo = container.querySelector(
       ".personal-session-header-copy .personal-project-repo"
     );
-    expect(sessionHeaderRepo?.textContent).toContain("koed-labs/koed");
+    expect(sessionHeaderRepo?.textContent).toContain("example.test/koed");
     expect(sessionHeaderRepo?.textContent).not.toContain("github.com/");
     await act(async () => {
       (sessionHeaderRepo as HTMLElement)?.click();
     });
-    expect(openExternal).toHaveBeenLastCalledWith(
-      "https://github.com/koed-labs/koed"
-    );
+    expect(openExternal).toHaveBeenLastCalledWith("https://example.test/koed");
   });
 
   it("uses generic repository semantics for non-GitHub remotes", async () => {
@@ -3164,6 +3833,11 @@ describe("PersonalMemoryWorkspace", () => {
         remotes: [{ display: "gitlab.example/koed-labs/koed" }]
       }
     };
+    source.id = metadata.localProjectId;
+    source.threads = source.threads.map((item) => ({
+      ...item,
+      projectId: source.id
+    }));
     const store = new PersonalMemoryStore(
       api({
         listProjects: vi.fn(async () => [source]),
@@ -3184,14 +3858,19 @@ describe("PersonalMemoryWorkspace", () => {
     });
     await vi.waitFor(() =>
       expect(
-        container.querySelector(
-          ".personal-project-detail-heading .personal-project-repo"
-        )
+        container.querySelector(".personal-project-repository-trigger")
       ).not.toBeNull()
     );
 
-    const repository = container.querySelector<HTMLButtonElement>(
-      ".personal-project-detail-heading .personal-project-repo"
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          ".personal-project-repository-trigger"
+        )!
+        .click()
+    );
+    const repository = document.querySelector<HTMLButtonElement>(
+      ".personal-project-details-card .personal-project-repo"
     );
     expect(repository?.dataset.repositoryProvider).toBe("git");
     expect(repository?.getAttribute("aria-label")).toBe(
@@ -3205,7 +3884,7 @@ describe("PersonalMemoryWorkspace", () => {
     );
   });
 
-  it("shows no activity for a Project without Conversations", async () => {
+  it("keeps a recently refreshed catalogue Project hidden until it has Conversations", async () => {
     const metadata: PersonalDesktopProjectMetadata = {
       schemaVersion: 1,
       discoveredAt: "2026-07-23T00:00:00.000Z",
@@ -3217,6 +3896,7 @@ describe("PersonalMemoryWorkspace", () => {
     const store = new PersonalMemoryStore(
       api({
         listProjects: vi.fn(async () => []),
+        listLocalFolders: async () => executionFixture.localFolders,
         listProjectMetadata: vi.fn(async () => [metadata])
       })
     );
@@ -3230,29 +3910,11 @@ describe("PersonalMemoryWorkspace", () => {
         />
       );
     });
-    await vi.waitFor(() =>
-      expect(
-        container.querySelector(".personal-inactive-toggle")
-      ).not.toBeNull()
+    expect(container.querySelector("[data-project-id]")).toBeNull();
+    expect(container.querySelector(".personal-inactive-toggle")).toBeNull();
+    expect(container.querySelector(".personal-empty-toggle")).toBeNull();
+    expect(store.current().projectsById.has(metadata.localProjectId)).toBe(
+      true
     );
-    await act(async () =>
-      container
-        .querySelector<HTMLButtonElement>(".personal-inactive-toggle")
-        ?.click()
-    );
-    await vi.waitFor(() =>
-      expect(
-        container.querySelector(
-          `[data-project-id="${metadata.localProjectId}"]`
-        )
-      ).not.toBeNull()
-    );
-
-    const projectRow = container.querySelector(
-      `[data-project-id="${metadata.localProjectId}"]`
-    );
-    const activity = projectRow?.querySelector("time");
-    expect(activity?.dateTime).not.toBe(metadata.lastSeenAt);
-    expect(projectRow?.textContent).toContain("No activity");
   });
 });

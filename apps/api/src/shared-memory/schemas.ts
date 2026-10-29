@@ -1,11 +1,22 @@
 import {
   COLLABORATION_SOURCE_PAGE_MAX_ITEMS,
+  conversationSharingRuleControlIntentSchema,
+  snapshotConversionScopeSchema,
+  sharingRuleSourceIdentitySchema,
+  repositorySharingRuleCreationIntentSchema,
+  repositorySharingRuleControlIntentSchema,
+  sharingRuleDetailIntentSchema,
+  sharingRuleContentPolicyIntentSchema,
+  workspaceConversationRestorationIntentSchema,
+  workspaceConversationExclusionIntentSchema,
+  repositorySharingRuleMemberAdmissionSchema,
   personalNoteSourceSelectionIssues,
   sharedMemoryCandidatePreviewSchema,
   sharedMemoryCeilingAuthorizes,
   sharedMemoryFidelityCeilings,
   sharedMemorySourceCapabilitiesSchema,
-  sharedMemorySourceRefSchema
+  sharedMemorySourceRefSchema,
+  teamRepositorySnapshotReviewSchema
 } from "@koed/shared";
 import { z } from "zod";
 import { SHARED_MEMORY_AUTHORITY } from "@koed/db";
@@ -197,6 +208,30 @@ export const sharedMemoryAuthoritySchema = z.discriminatedUnion("source", [
   deviceSharedMemoryAuthoritySchema
 ]);
 
+export const restoreWorkspaceConversationSchema =
+  workspaceConversationRestorationIntentSchema
+    .safeExtend({ authority: deviceSharedMemoryAuthoritySchema })
+    .strict();
+
+export const excludeWorkspaceConversationSchema =
+  workspaceConversationExclusionIntentSchema
+    .extend({ authority: sharedMemoryAuthoritySchema })
+    .strict();
+
+export const createRepositorySharingRuleSchema =
+  repositorySharingRuleCreationIntentSchema
+    .extend({ authority: deviceSharedMemoryAuthoritySchema })
+    .strict();
+
+export const amendSharingRuleDetailSchema = sharingRuleDetailIntentSchema
+  .extend({ authority: deviceSharedMemoryAuthoritySchema })
+  .strict();
+
+export const amendSharingRuleContentPolicySchema =
+  sharingRuleContentPolicyIntentSchema
+    .extend({ authority: deviceSharedMemoryAuthoritySchema })
+    .strict();
+
 export const sourceOwnerPolicyParamsSchema = z
   .object({ logicalMemoryId: uuidSchema })
   .strict();
@@ -271,7 +306,7 @@ export const controlPendingShareSchema = z
   .object({
     mutationId: uuidSchema,
     expectedOperationVersion: z.number().int().safe().positive(),
-    action: z.enum(["retry", "pause", "resume", "revoke"])
+    action: z.enum(["retry", "pause", "resume", "revoke", "stop_direct"])
   })
   .strict();
 
@@ -355,6 +390,7 @@ export const createPendingShareSchema = z
     activationRepresentation: sharedMemoryRepresentationSchema,
     mutationId: uuidSchema,
     logicalGrantId: uuidSchema,
+    expectedGrantVersion: positiveVersionSchema.nullable().default(null),
     consentId: uuidSchema,
     logicalMemoryId: uuidSchema,
     teamId: uuidSchema,
@@ -371,6 +407,49 @@ export const createPendingShareSchema = z
     validateEffectiveSelection(input, context);
     validatePersonalNoteConsent(input, context);
   });
+
+export const createConversationSharingRuleSchema =
+  createPendingShareSchema.safeExtend({
+    source: z
+      .object({
+        kind: z.literal("captured_session"),
+        sessionId: uuidSchema,
+        logicalMemoryId: uuidSchema
+      })
+      .strict(),
+    mode: z.literal("continuous"),
+    snapshotConversion: snapshotConversionScopeSchema.optional(),
+    sourceIdentity: sharingRuleSourceIdentitySchema.optional(),
+    ruleId: uuidSchema,
+    expectedGrantVersion: positiveVersionSchema.nullable(),
+    effectivePrivacyPolicyHash: z.string().regex(/^[a-f0-9]{64}$/)
+  });
+
+export const controlRepositorySharingRuleSchema =
+  repositorySharingRuleControlIntentSchema
+    .omit({ ruleId: true })
+    .extend({ authority: sharedMemoryAuthoritySchema })
+    .strict();
+
+export const createRepositorySharingRuleMemberSchema = z
+  .object(createPendingShareSchema.shape)
+  .omit({ authority: true })
+  .extend({
+    source: z
+      .object({
+        kind: z.literal("captured_session"),
+        sessionId: uuidSchema,
+        logicalMemoryId: uuidSchema
+      })
+      .strict(),
+    mode: z.literal("continuous"),
+    expiresAt: z.null().optional(),
+    membership: repositorySharingRuleMemberAdmissionSchema.omit({
+      ruleId: true
+    })
+  })
+  .strict()
+  .superRefine(validateEffectiveSelection);
 
 export const changeSharedMemoryFidelityBundleSchema = z
   .object({
@@ -398,6 +477,16 @@ export const changeSharedMemoryFidelityBundleSchema = z
 
 export const shareGrantParamsSchema = z
   .object({ shareGrantId: uuidSchema })
+  .strict();
+
+export const updateSharedMemoryRepositorySnapshotSchema = z
+  .object({
+    mutationId: uuidSchema,
+    teamId: uuidSchema,
+    teamWorkspaceId: uuidSchema,
+    expected: teamRepositorySnapshotReviewSchema,
+    authority: sharedMemoryAuthoritySchema
+  })
   .strict();
 
 export const putTeamConversationSourceGrantSchema = z
@@ -469,3 +558,9 @@ export const revokeShareGrantSchema = z
     authority: sharedMemoryAuthoritySchema
   })
   .strict();
+
+export const controlConversationSharingRuleSchema =
+  conversationSharingRuleControlIntentSchema
+    .omit({ ruleId: true })
+    .extend({ authority: sharedMemoryAuthoritySchema })
+    .strict();

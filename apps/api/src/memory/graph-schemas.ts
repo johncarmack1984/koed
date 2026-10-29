@@ -1,5 +1,19 @@
+import {
+  repositoryAssignmentSchema,
+  personalSelectionSnapshotSchema,
+  personalNamedProjectSchema,
+  personalProjectReferenceSchema as ownedPersonalProjectReferenceSchema,
+  personalDirectMembershipSchema,
+  personalProjectRuleSchema,
+  personalFolderContextSchema,
+  personalFolderReferenceSchema,
+  personalMembershipReasonSchema
+} from "@koed/shared";
 import { z } from "zod";
-import { personalConversationPresentationSchema } from "@koed/shared/personal-desktop";
+import {
+  personalConversationPresentationSchema,
+  personalConversationSourceReferenceSchema
+} from "@koed/shared/personal-desktop";
 import { queryBooleanSchema, visibilitySchema } from "./common-schemas.js";
 import { searchDomainSchema } from "./retrieval-schemas.js";
 
@@ -14,6 +28,12 @@ export const graphThreadIndexResponseSchema = z.object({
   projects: z.array(
     z.object({
       id: z.string(),
+      ownerUserId: z.uuid().optional(),
+      namedProject: personalNamedProjectSchema.optional(),
+      projectReference: ownedPersonalProjectReferenceSchema.optional(),
+      inclusionRules: z.array(personalProjectRuleSchema).optional(),
+      directInclusions: z.array(personalDirectMembershipSchema).optional(),
+      folder: personalFolderContextSchema.optional(),
       name: z.string(),
       path: z.string().nullable(),
       eventCount: z.number(),
@@ -23,6 +43,21 @@ export const graphThreadIndexResponseSchema = z.object({
           name: z.string(),
           sessionId: z.string().uuid().nullable(),
           logicalMemoryId: z.string().uuid().nullable().optional(),
+          namedProjectId: z.uuid().optional(),
+          folderSelection: personalFolderReferenceSchema.optional(),
+          sourceThreadId: z.string().optional(),
+          sourceProject: z
+            .object({
+              id: z.string(),
+              name: z.string(),
+              path: z.string().nullable()
+            })
+            .strict()
+            .optional(),
+          membershipReasons: z.array(personalMembershipReasonSchema).optional(),
+          sourceReferences: z
+            .array(personalConversationSourceReferenceSchema)
+            .optional(),
           sourceAiClient: sourceAiClientSchema.nullable(),
           originDeviceId: z.string().nullable().optional(),
           projectId: z.string(),
@@ -32,6 +67,7 @@ export const graphThreadIndexResponseSchema = z.object({
             .enum(["detected", "user_override"])
             .nullable(),
           capturedProjectProvenance: z.record(z.string(), z.unknown()),
+          repositoryAssignment: repositoryAssignmentSchema.optional(),
           eventCount: z.number(),
           invalidatedCount: z.number(),
           latestAt: z.string().datetime({ offset: true }),
@@ -65,7 +101,25 @@ const rejectDeprecatedTeamScope = <T extends z.ZodRawShape>(
     })
     .transform((input) => schema.parse(input));
 
+const personalInspectionQueryShape = {
+  recall_target: z.never().optional(),
+  personal_selection: z.never().optional(),
+  personalSelection: z
+    .preprocess((value) => {
+      if (typeof value !== "string" || value.length > 32768) return value;
+      try {
+        return JSON.parse(value) as unknown;
+      } catch {
+        return value;
+      }
+    }, personalSelectionSnapshotSchema)
+    .optional(),
+  sessionId: z.string().uuid().optional(),
+  projectId: z.string().min(1).optional()
+};
+
 const memoryBrowserQueryShape = {
+  ...personalInspectionQueryShape,
   query: z.string().min(1).optional(),
   visibility: visibilitySchema.optional(),
   projectId: z.string().min(1).optional(),
@@ -89,6 +143,7 @@ export const clusterIdParamsSchema = z.object({ clusterId: z.string().min(1) });
 
 export const clusterMemoriesQuerySchema = rejectDeprecatedTeamScope(
   z.object({
+    ...personalInspectionQueryShape,
     limit: z.coerce.number().int().positive().max(100).default(100)
   })
 );
@@ -100,6 +155,7 @@ export const updateMemorySchema = z.object({
 });
 
 export const graphQuerySchema = z.object({
+  ...personalInspectionQueryShape,
   query: z.string().min(1).optional(),
   visibility: visibilitySchema.optional(),
   projectId: z.string().min(1).optional(),
@@ -144,6 +200,8 @@ export const graphEventsQuerySchema = graphQuerySchema
 export const graphEventParamsSchema = z.object({ eventId: z.string().uuid() });
 
 export const graphEventDetailQuerySchema = z.object({
+  ...personalInspectionQueryShape,
+  threadId: z.string().min(1).optional(),
   includeInvalidated: queryBooleanSchema.default(false),
   includeContent: queryBooleanSchema.default(false),
   includeRaw: queryBooleanSchema.default(false),
@@ -194,32 +252,26 @@ export const graphSessionPresentationPatchSchema = z
     }
   });
 
-const personalProjectReferenceSchema = z
-  .object({
-    id: z.string().trim().min(1).max(512),
-    name: z.string().trim().min(1).max(160),
-    path: z.string().trim().min(1).max(4096).nullable().optional()
-  })
-  .strict()
-  .transform((project) => ({ ...project, path: project.path ?? null }));
-
-export const graphSessionProjectPatchSchema = z.discriminatedUnion("action", [
-  z
-    .object({
-      action: z.literal("move"),
-      project: personalProjectReferenceSchema
-    })
-    .strict(),
-  z.object({ action: z.literal("reset") }).strict()
-]);
-
 export const nodeIdParamsSchema = z.object({ nodeId: z.string().uuid() });
 
 export const expandMemoryNodeQuerySchema = z
   .object({
+    recall_target: z.never().optional(),
+    personalSelection: z.never().optional(),
     search_domain: searchDomainSchema.default("global"),
     session_id: z.string().uuid().optional(),
     project_id: z.string().min(1).optional(),
+    personal_selection: z
+      .preprocess((value) => {
+        if (typeof value !== "string" || value.length > 32768) return value;
+        try {
+          const parsed: unknown = JSON.parse(value);
+          return parsed;
+        } catch {
+          return value;
+        }
+      }, personalSelectionSnapshotSchema)
+      .optional(),
     team_workspace_id: z.string().uuid().optional(),
     authorization_boundary: z.string().min(1).max(32768).optional(),
     recent_days: z.coerce.number().int().positive().max(36500).optional(),
@@ -227,6 +279,12 @@ export const expandMemoryNodeQuerySchema = z
     source_before: z.coerce.date().optional()
   })
   .superRefine((input, context) => {
+    if (input.personal_selection && input.team_workspace_id)
+      context.addIssue({
+        code: "custom",
+        path: ["personal_selection"],
+        message: "Personal selection cannot be used for Team expansion"
+      });
     if (input.authorization_boundary && !input.team_workspace_id) {
       context.addIssue({
         code: z.ZodIssueCode.custom,

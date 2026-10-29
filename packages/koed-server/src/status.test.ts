@@ -145,6 +145,7 @@ args = ["${resolve(repoRoot, "packages/mcp-server/dist/cli.js")}"]
 KOED_HOME = "${koedHome}"
 
 ${[
+  "PreToolUse",
   "SessionStart",
   "UserPromptSubmit",
   "PostToolUse",
@@ -2268,6 +2269,7 @@ describe("Claude Code integration status", () => {
       JSON.stringify({
         hooks: Object.fromEntries(
           [
+            "PreToolUse",
             "SessionStart",
             "UserPromptSubmit",
             "PostToolUse",
@@ -2362,6 +2364,7 @@ describe("Claude Code integration status", () => {
       JSON.stringify({
         hooks: Object.fromEntries(
           [
+            "PreToolUse",
             "SessionStart",
             "UserPromptSubmit",
             "PostToolUse",

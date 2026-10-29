@@ -1,15 +1,31 @@
+import type { ProjectSourceFilter } from "../project-source-navigation.js";
 export type PersonalRoute =
   | { kind: "personal-memory-ask"; askThreadId?: string }
   | { kind: "personal-memory-notes"; noteId?: string; newNote?: true }
   | { kind: "personal-memory-projects" }
   | { kind: "personal-memory-shares"; shareKey?: string }
-  | { kind: "personal-memory-project"; projectId: string }
+  | {
+      kind: "personal-memory-project";
+      projectId: string;
+      sourceFilter?: ProjectSourceFilter;
+    }
   | {
       kind: "personal-memory-session";
+      sourceFilter?: ProjectSourceFilter;
+
       projectId: string;
       sessionId: string;
     }
   | { kind: "personal-chat"; threadId: string };
+
+/** The Project list a Conversation was opened from, including its source filter. */
+export const sessionProjectRoute = (
+  route: Extract<PersonalRoute, { kind: "personal-memory-session" }>
+): Extract<PersonalRoute, { kind: "personal-memory-project" }> => ({
+  kind: "personal-memory-project",
+  projectId: route.projectId,
+  ...(route.sourceFilter ? { sourceFilter: route.sourceFilter } : {})
+});
 
 export type TeamRoute =
   | { kind: "team-people"; teamId: string }
@@ -169,9 +185,9 @@ export const routePath = (route: DesktopRoute): string => {
         ? `/personal/memory/shares/${encodeURIComponent(route.shareKey)}`
         : "/personal/memory/shares";
     case "personal-memory-project":
-      return `/personal/memory/projects/${encodeURIComponent(route.projectId)}`;
+      return `/personal/memory/projects/${encodeURIComponent(route.projectId)}${personalSourceQuery(route)}`;
     case "personal-memory-session":
-      return `/personal/memory/projects/${encodeURIComponent(route.projectId)}/session/${encodeURIComponent(route.sessionId)}`;
+      return `/personal/memory/projects/${encodeURIComponent(route.projectId)}/session/${encodeURIComponent(route.sessionId)}${personalSourceQuery(route)}`;
     case "personal-chat":
       return `/personal/chat/${encodeURIComponent(route.threadId)}`;
     case "team-people":
@@ -189,4 +205,11 @@ export const routePath = (route: DesktopRoute): string => {
     case "onboarding":
       return "/onboarding";
   }
+};
+
+const personalSourceQuery = (route: { sourceFilter?: ProjectSourceFilter }) => {
+  const query = new URLSearchParams();
+  if (route.sourceFilter)
+    query.set("source", JSON.stringify(route.sourceFilter));
+  return query.size ? `?${query}` : "";
 };

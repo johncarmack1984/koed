@@ -7,6 +7,10 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
+    "./project-selection": {
+      "types": "./dist/project-selection-desktop.d.ts",
+      "import": "./dist/project-selection-desktop.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
@@ -66,6 +70,22 @@
     "./source-control": {
       "types": "./dist/source-control.d.ts",
       "import": "./dist/source-control.js"
+    },
+    "./repository-recall": {
+      "types": "./dist/repository-recall.d.ts",
+      "import": "./dist/repository-recall.js"
+    },
+    "./repository-review": {
+      "types": "./dist/repository-review.d.ts",
+      "import": "./dist/repository-review.js"
+    },
+    "./personal-local-folders": {
+      "types": "./dist/personal-local-folders.d.ts",
+      "import": "./dist/personal-local-folders.js"
+    },
+    "./personal-project-default": {
+      "types": "./dist/personal-project-default.d.ts",
+      "import": "./dist/personal-project-default.js"
     }
   },
   "files": [
@@ -79,6 +99,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@noble/hashes": "2.2.0",
     "json-canonicalize": "2.0.0",
     "undici": "^7.28.0",
     "zod": "^4.4.3"

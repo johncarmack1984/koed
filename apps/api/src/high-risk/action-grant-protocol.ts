@@ -1,8 +1,18 @@
 import {
   collaborationActionGrantIntentSchema,
+  conversationSharingRuleControlIntentSchema,
+  conversationSharingRuleCreationIntentSchema,
+  repositorySharingRuleCreationIntentSchema,
+  repositorySharingRuleControlIntentSchema,
+  sharingRuleDetailIntentSchema,
+  sharingRuleContentPolicyIntentSchema,
+  sharingRulePublisherTakeoverIntentSchema,
+  workspaceConversationRestorationIntentSchema,
+  workspaceConversationExclusionIntentSchema,
   collaborationApprovalReviewSchema,
   collaborationApprovalTierSchema,
   highRiskActionGrantCanonicalHash,
+  teamRepositorySnapshotReviewSchema,
   HIGH_RISK_ACTION_GRANT_HASH_DOMAINS,
   type CollaborationActionGrantIntent
 } from "@koed/shared";
@@ -51,8 +61,18 @@ import {
   bindSharedMemoryFidelityChangeOperation,
   bindSharedMemoryCandidatePreviewOperation,
   bindSharedMemoryPendingShareOperation,
+  bindSharedMemoryConversationRuleCreationOperation,
+  bindSharedMemoryRepositoryRuleCreationOperation,
   bindSharedMemoryPreviewOperation,
-  bindSharedMemoryRevokeOperation
+  bindSharedMemoryRevokeOperation,
+  bindSharedMemoryWorkspaceRestorationOperation,
+  bindSharedMemoryWorkspaceExclusionOperation,
+  bindSharedMemoryRuleControlOperation,
+  bindSharedMemoryRuleDetailOperation,
+  bindSharedMemoryRuleContentPolicyOperation,
+  bindSharedMemoryPublisherTakeoverOperation,
+  bindSharedMemoryRepositoryRuleControlOperation,
+  bindSharedMemoryRepositorySnapshotOperation
 } from "./shared-memory-action-definitions.js";
 import {
   bindConversationSourceDiscoveryOperation,
@@ -80,6 +100,27 @@ const createTeamWorkspaceProtectedBodySchema = createTeamWorkspaceSchema.omit({
 });
 
 export const highRiskActionGrantIntentSchema = z.discriminatedUnion("action", [
+  sharingRulePublisherTakeoverIntentSchema
+    .extend({ action: z.literal("shared_memory.publisher_takeover") })
+    .strict(),
+  sharingRuleDetailIntentSchema
+    .extend({ action: z.literal("shared_memory.rule_detail") })
+    .strict(),
+  sharingRuleContentPolicyIntentSchema
+    .extend({ action: z.literal("shared_memory.rule_content_policy") })
+    .strict(),
+  repositorySharingRuleControlIntentSchema
+    .extend({ action: z.literal("shared_memory.repository_rule_control") })
+    .strict(),
+  repositorySharingRuleCreationIntentSchema
+    .extend({ action: z.literal("shared_memory.repository_rule_create") })
+    .strict(),
+  conversationSharingRuleCreationIntentSchema
+    .extend({ action: z.literal("shared_memory.conversation_rule_create") })
+    .strict(),
+  conversationSharingRuleControlIntentSchema
+    .extend({ action: z.literal("shared_memory.rule_control") })
+    .strict(),
   z
     .object({ action: z.literal("team.create"), body: createTeamSchema })
     .strict(),
@@ -264,6 +305,7 @@ export const highRiskActionGrantIntentSchema = z.discriminatedUnion("action", [
         createPendingShareSchema.shape.activationRepresentation,
       mutationId: uuidSchema,
       logicalGrantId: uuidSchema,
+      expectedGrantVersion: createPendingShareSchema.shape.expectedGrantVersion,
       logicalMemoryId: uuidSchema,
       teamId: uuidSchema,
       teamWorkspaceId: uuidSchema,
@@ -286,6 +328,22 @@ export const highRiskActionGrantIntentSchema = z.discriminatedUnion("action", [
       shareGrantId: uuidSchema,
       expectedGrantVersion: revokeShareGrantSchema.shape.expectedGrantVersion,
       reasonCode: revokeShareGrantSchema.shape.reasonCode
+    })
+    .strict(),
+  workspaceConversationRestorationIntentSchema
+    .safeExtend({ action: z.literal("shared_memory.workspace_restore") })
+    .strict(),
+  workspaceConversationExclusionIntentSchema
+    .extend({ action: z.literal("shared_memory.workspace_exclude") })
+    .strict(),
+  z
+    .object({
+      action: z.literal("shared_memory.update_repository_snapshot"),
+      mutationId: uuidSchema,
+      teamId: uuidSchema,
+      teamWorkspaceId: uuidSchema,
+      shareGrantId: uuidSchema,
+      expected: teamRepositorySnapshotReviewSchema
     })
     .strict(),
   z
@@ -693,6 +751,50 @@ export const highRiskActionGrantIntentFromCollaborationIntent = (
               mode: intent.mode
             }
           : null;
+    case "collaboration.take_over_publisher":
+      return {
+        action: "shared_memory.publisher_takeover",
+        mutationId: intent.mutationId,
+        review: intent.review
+      };
+    case "collaboration.create_conversation_rule":
+      return resolved?.sharedMemoryPreviewId === intent.previewId
+        ? {
+            action: "shared_memory.conversation_rule_create",
+            ...(intent.snapshotConversion
+              ? { snapshotConversion: intent.snapshotConversion }
+              : {}),
+            ...(intent.sourceIdentity
+              ? { sourceIdentity: intent.sourceIdentity }
+              : {}),
+            mutationId: intent.mutationId,
+            ruleId: intent.ruleId,
+            source: intent.source,
+            sourceCapabilities: intent.sourceCapabilities,
+            activationRepresentation: intent.activationRepresentation,
+            logicalGrantId: intent.logicalGrantId,
+            logicalMemoryId: intent.logicalMemoryId,
+            teamId: intent.teamId,
+            teamWorkspaceId: intent.workspaceId,
+            consentId: intent.consentId,
+            previewId: intent.previewId,
+            previewRevision: intent.previewRevision,
+            previewHash: intent.previewHash,
+            expectedGrantVersion: intent.expectedGrantVersion,
+            effectivePrivacyPolicyHash: intent.effectivePrivacyPolicyHash,
+            mode: intent.mode,
+            maximumFidelity: intent.maximumFidelity,
+            includeCuratedMemory: intent.includeCuratedMemory,
+            expiresAt: intent.expiresAt
+          }
+        : null;
+    case "collaboration.create_repository_rule":
+      return {
+        action: "shared_memory.repository_rule_create",
+        ...repositorySharingRuleCreationIntentSchema
+          .strip()
+          .parse({ ...intent, teamWorkspaceId: intent.workspaceId })
+      };
     case "collaboration.share_memory":
       return resolved?.sharedMemoryPreviewId
         ? {
@@ -702,6 +804,7 @@ export const highRiskActionGrantIntentFromCollaborationIntent = (
             sourceCapabilities: intent.sourceCapabilities,
             activationRepresentation: intent.activationRepresentation,
             logicalGrantId: intent.logicalGrantId,
+            expectedGrantVersion: intent.expectedGrantVersion,
             logicalMemoryId: intent.logicalMemoryId,
             teamId: intent.teamId,
             teamWorkspaceId: intent.workspaceId,
@@ -715,6 +818,55 @@ export const highRiskActionGrantIntentFromCollaborationIntent = (
             expiresAt: intent.expiresAt
           }
         : null;
+    case "collaboration.amend_rule_detail":
+      if (
+        intent.ruleId !== intent.review.ruleId ||
+        intent.teamId !== intent.review.teamId ||
+        intent.workspaceId !== intent.review.teamWorkspaceId
+      )
+        return null;
+      return {
+        action: "shared_memory.rule_detail",
+        mutationId: intent.mutationId,
+        review: intent.review
+      };
+    case "collaboration.amend_rule_content_policy":
+      if (
+        intent.ruleId !== intent.review.ruleId ||
+        intent.teamId !== intent.review.teamId ||
+        intent.workspaceId !== intent.review.teamWorkspaceId
+      )
+        return null;
+      return {
+        action: "shared_memory.rule_content_policy",
+        mutationId: intent.mutationId,
+        review: intent.review
+      };
+    case "collaboration.control_repository_rule":
+      return {
+        action: "shared_memory.repository_rule_control",
+        selectorKind: "selection",
+        mutationId: intent.mutationId,
+        ruleId: intent.ruleId,
+        teamId: intent.teamId,
+        teamWorkspaceId: intent.workspaceId,
+        expectedAuthorityVersion: intent.expectedAuthorityVersion,
+        publisherFence: intent.publisherFence,
+        controlAction: intent.controlAction
+      };
+    case "collaboration.control_sharing_rule":
+      return {
+        action: "shared_memory.rule_control",
+        controlAction: intent.controlAction,
+        mutationId: intent.mutationId,
+        teamId: intent.teamId,
+        teamWorkspaceId: intent.workspaceId,
+        ruleId: intent.ruleId,
+        reasonId: intent.reasonId,
+        shareGrantId: intent.shareGrantId,
+        expectedAuthorityVersion: intent.expectedAuthorityVersion,
+        expectedGrantVersion: intent.expectedGrantVersion
+      };
     case "collaboration.revoke_shared_memory":
       return {
         action: "shared_memory.revoke",
@@ -724,6 +876,28 @@ export const highRiskActionGrantIntentFromCollaborationIntent = (
         shareGrantId: intent.shareGrantId,
         expectedGrantVersion: intent.expectedGrantVersion,
         reasonCode: intent.reasonCode
+      };
+    case "collaboration.restore_conversation_to_workspace":
+      return {
+        action: "shared_memory.workspace_restore",
+        mutationId: intent.mutationId,
+        scope: intent.scope,
+        restoration: intent.restoration
+      };
+    case "collaboration.exclude_conversation_from_workspace":
+      return {
+        action: "shared_memory.workspace_exclude",
+        mutationId: intent.mutationId,
+        scope: intent.scope
+      };
+    case "collaboration.update_shared_project_snapshot":
+      return {
+        action: "shared_memory.update_repository_snapshot",
+        mutationId: intent.mutationId,
+        teamId: intent.teamId,
+        teamWorkspaceId: intent.workspaceId,
+        shareGrantId: intent.shareGrantId,
+        expected: intent.expected
       };
     case "collaboration.share_conversation_source":
       return {
@@ -875,10 +1049,54 @@ export const resolveHighRiskActionGrantOperation = (input: {
       return bindSharedMemoryPreviewOperation(intent, clientRequestId);
     case "shared_memory.candidate_preview":
       return bindSharedMemoryCandidatePreviewOperation(intent, clientRequestId);
+    case "shared_memory.conversation_rule_create":
+      return bindSharedMemoryConversationRuleCreationOperation(
+        intent,
+        clientRequestId
+      );
+    case "shared_memory.repository_rule_create":
+      return bindSharedMemoryRepositoryRuleCreationOperation(
+        intent,
+        clientRequestId
+      );
     case "shared_memory.pending_share":
       return bindSharedMemoryPendingShareOperation(intent, clientRequestId);
+    case "shared_memory.rule_control":
+      return bindSharedMemoryRuleControlOperation(intent, clientRequestId);
+    case "shared_memory.rule_detail":
+      return bindSharedMemoryRuleDetailOperation(intent, clientRequestId);
+    case "shared_memory.rule_content_policy":
+      return bindSharedMemoryRuleContentPolicyOperation(
+        intent,
+        clientRequestId
+      );
+    case "shared_memory.publisher_takeover":
+      return bindSharedMemoryPublisherTakeoverOperation(
+        intent,
+        clientRequestId
+      );
+    case "shared_memory.repository_rule_control":
+      return bindSharedMemoryRepositoryRuleControlOperation(
+        intent,
+        clientRequestId
+      );
     case "shared_memory.revoke":
       return bindSharedMemoryRevokeOperation(intent, clientRequestId);
+    case "shared_memory.workspace_restore":
+      return bindSharedMemoryWorkspaceRestorationOperation(
+        intent,
+        clientRequestId
+      );
+    case "shared_memory.workspace_exclude":
+      return bindSharedMemoryWorkspaceExclusionOperation(
+        intent,
+        clientRequestId
+      );
+    case "shared_memory.update_repository_snapshot":
+      return bindSharedMemoryRepositorySnapshotOperation(
+        intent,
+        clientRequestId
+      );
     case "shared_memory.conversation_source_grant":
       return bindConversationSourceGrantOperation(intent, clientRequestId);
     case "shared_memory.conversation_source_revoke":

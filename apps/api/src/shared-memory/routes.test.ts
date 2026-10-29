@@ -1,3 +1,5 @@
+import { contentPolicyReviewFixture } from "./test-fixtures/rule-content-policy-review.js";
+import { publisherTakeoverReviewFixture } from "./test-fixtures/publisher-takeover-review.js";
 import { randomUUID } from "node:crypto";
 import cookie from "@fastify/cookie";
 import type {
@@ -21,14 +23,20 @@ import {
 } from "@koed/db";
 import {
   pendingShareSchema,
+  sharingRulePublisherTakeoverReviewInputSchema,
+  sharingRulePublisherTakeoverReviewSchema,
+  sharedMemoryPublisherTakeoverActionGrantBinding,
+  sharingRuleDetailReviewSchema,
+  unresolvedTeamRepositorySnapshot,
   sharedMemoryGrantScopedPrincipalId,
   sharedMemoryGrantScopedSourceId,
   sharedMemoryCeilingAuthorizes,
   sharedMemoryRepresentationsForCeiling,
+  teamRepositorySnapshotReviewSchema,
   SharedMemoryConflictError
 } from "@koed/shared";
 import Fastify, { type FastifyRequest } from "fastify";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -108,6 +116,7 @@ const createFixture = () => {
   ];
 
   let grantVersion = 1;
+  let updatedRepositorySnapshot: SharedMemoryGrantRecord["repositorySnapshot"];
   let revoked = false;
   let maximumFidelity: "memory_events" | "lcm_leaves" | "lcm_rollups" =
     "memory_events";
@@ -167,6 +176,9 @@ const createFixture = () => {
   });
 
   const grantRecord = (): SharedMemoryGrantRecord => ({
+    ...(updatedRepositorySnapshot
+      ? { repositorySnapshot: updatedRepositorySnapshot }
+      : {}),
     source: capturedSource,
     sourceRevisionId: ids.sourceRevision,
     sourceCapabilities: capturedSourceCapabilities,
@@ -203,6 +215,58 @@ const createFixture = () => {
     updatedAt: iso,
     revokedAt: revoked ? iso : null,
     companionScope
+  });
+
+  const ownedRecord = (): NonNullable<
+    Awaited<ReturnType<SharedMemoryRepository["getOwnerShare"]>>
+  > => ({
+    kind: "grant",
+    grant: grantRecord(),
+    sourceAccess: null,
+    summary: {
+      source: capturedSource,
+      sourceSessionId: ids.sourceSession,
+      companionThreadId: null,
+      sourceTitle: "Owned Conversation",
+      teamName: "Team",
+      workspaceName: "Workspace",
+      workspaceContentAccess: "unavailable",
+      mode: "continuous",
+      authorizedPreview: null,
+      lastReadyRevision: 1,
+      lastSuccessfulUpdateAt: iso,
+      workspaceExclusion: null,
+      sharingReasons: [
+        {
+          id: ids.logicalGrant,
+          kind: "direct",
+          rule: null,
+          consentId: ids.consent,
+          consentVersion: 1,
+          mode: "continuous",
+          updateState: "paused",
+          maximumFidelity: "memory_events",
+          includeCuratedMemory: false,
+          permittedRepresentations: [
+            "memory_events",
+            "lcm_leaves",
+            "lcm_rollups"
+          ],
+          maximumAuthorizedSourceRevision: null,
+          expiresAt: null,
+          repositorySnapshot: unresolvedTeamRepositorySnapshot(),
+          repositorySnapshotSourceRevision: 1,
+          publishedRepresentations: [
+            {
+              representation: "memory_events",
+              sourceRevision: 1,
+              recordVersion: 1,
+              state: "available"
+            }
+          ]
+        }
+      ]
+    }
   });
 
   const representationRecord = (
@@ -479,6 +543,145 @@ const createFixture = () => {
   });
 
   const repository: SharedMemoryRepository = {
+    async readmitRepositorySharingRuleMember() {
+      throw new Error("Unexpected retained source admission");
+    },
+    async prepareRepositorySharingRuleMemberReadmission() {
+      throw new Error("Unexpected existing source preparation");
+    },
+    async getRepositorySharingRuleMemberReadmissionAuthority() {
+      throw new Error("Unexpected member readmission authority lookup");
+    },
+    async listRepositorySharingRuleMemberInventory() {
+      throw new Error("Unexpected publisher member inventory");
+    },
+    async getSharingRulePublisherTakeoverReview() {
+      return null;
+    },
+    async takeOverSharingRulePublisher() {
+      throw new Error("Unexpected publisher takeover");
+    },
+    async getWorkspaceConversationRestorationReview() {
+      return null;
+    },
+    async restoreWorkspaceConversation() {
+      throw new Error("Unexpected Workspace restoration");
+    },
+    async getWorkspaceConversationExclusionReview() {
+      return null;
+    },
+    async excludeWorkspaceConversation() {
+      throw new Error("Unexpected Workspace exclusion");
+    },
+    async prepareRetainedSharingRulePublication() {
+      throw new Error("Unexpected retained publication preparation");
+    },
+    async getSharingRuleContentPolicyReview() {
+      return null;
+    },
+    async amendSharingRuleContentPolicy() {
+      throw new Error("Unexpected rule content-policy amendment");
+    },
+    async getSharingRuleDetailReview() {
+      return null;
+    },
+    async amendSharingRuleDetail() {
+      throw new Error("Unexpected rule detail amendment");
+    },
+    async listOwnedRepositorySharingRules() {
+      return { rules: [], nextCursor: null };
+    },
+    async getRepositorySharingRuleControlReview() {
+      return null;
+    },
+    async controlRepositorySharingRule() {
+      throw new Error("Unexpected Git Anchor group control");
+    },
+    async cancelRepositorySharingRuleMutation() {
+      throw new Error("Unexpected member mutation settlement");
+    },
+    async inspectRepositorySharingRuleMembers() {
+      throw new Error("Unexpected member inspection");
+    },
+    async resolveRepositorySharingRuleSource() {
+      throw new Error("Unexpected portable source resolution");
+    },
+    async refreshRepositorySharingRuleMemberContext() {
+      throw new Error("Unexpected member context refresh");
+    },
+    async getRepositorySharingRuleCreationReview() {
+      return null;
+    },
+    async createRepositorySharingRule() {
+      throw new Error("Unexpected Git Anchor rule creation");
+    },
+    async getConversationSharingRuleCreationReview() {
+      return null;
+    },
+    async createPendingConversationSharingRule() {
+      throw new Error("Unexpected rule creation");
+    },
+    async createPendingRepositoryRuleMember() {
+      throw new Error("Unexpected source member admission");
+    },
+    async getConversationSharingRuleControlReview() {
+      return null;
+    },
+    async controlConversationSharingRule() {
+      throw new Error("Unexpected rule control");
+    },
+    async reconcileSharingRuleMembers() {
+      return { processed: 0, prepared: 0, unresolved: 0, failed: 0 };
+    },
+    async prepareSharingRuleMember() {
+      throw new Error("Rule publication is not exposed by this route fixture");
+    },
+    async createConversationSharingRule() {
+      throw new Error(
+        "Conversation sharing rules are not exposed by this route fixture"
+      );
+    },
+    async reviewGrantRepositorySnapshot(actor, input) {
+      repositoryCalls += 1;
+      if (
+        actor.userId !== ids.alice ||
+        input.shareGrantId !== ids.grant ||
+        revoked
+      )
+        throw new SharedMemoryAuthorizationError();
+      return {
+        shareGrantId: ids.grant,
+        teamId: ids.teamA,
+        teamWorkspaceId: ids.workspaceA,
+        grantVersion,
+        sourceRevision: 1,
+        representationId: ids.grant,
+        representationVersion: 1,
+        assignmentVersion: 1,
+        sourceContextHash: "a".repeat(64),
+        currentSnapshot: {
+          version: 1,
+          classification: "portable_repository",
+          fingerprint: "gr_reviewed_project",
+          label: null,
+          branchObservation: null
+        }
+      };
+    },
+    async updateGrantRepositorySnapshot(actor, input) {
+      repositoryCalls += 1;
+      if (
+        actor.userId !== ids.alice ||
+        input.shareGrantId !== ids.grant ||
+        revoked
+      )
+        throw new SharedMemoryAuthorizationError();
+      if (input.expected.grantVersion !== grantVersion)
+        throw new SharedMemoryConflictError();
+      updatedRepositorySnapshot = input.expected.currentSnapshot;
+      grantVersion += 1;
+      return grantRecord();
+    },
     async createSharedMemoryCandidatePreview() {
       return null;
     },
@@ -569,17 +772,21 @@ const createFixture = () => {
     async controlPendingShare() {
       throw new SharedMemoryAuthorizationError();
     },
-    async listOwnerShares(_actor, input) {
+    async listOwnerShares(actor, input) {
       return {
-        entries: [],
+        entries: actor.userId === ids.alice ? [ownedRecord()] : [],
         limit: input.limit,
         hasMore: false,
         snapshotAt: iso,
         next: null
       };
     },
-    async getOwnerShare() {
-      return null;
+    async getOwnerShare(actor, input) {
+      return actor.userId === ids.alice &&
+        input.kind === "grant" &&
+        input.id === ids.grant
+        ? ownedRecord()
+        : null;
     },
     async readOwnerSharePreview() {
       return null;
@@ -918,6 +1125,9 @@ const createFixture = () => {
     async advanceContinuousGrantRepresentations() {
       return { advanced: 0 };
     },
+    async removeSharingRuleMember() {
+      throw new Error("Unexpected membership removal in this route fixture");
+    },
     async reconcileCuratedGrantRepresentations() {
       return { rematerialized: 0, invalidated: 0 };
     },
@@ -1139,6 +1349,7 @@ const buildTestServer = async (
   fixture: ReturnType<typeof createFixture>,
   options: {
     sessionCreatedAt?: Date;
+    replayReceipts?: boolean;
     reportDiagnostic?: SharedMemoryRouteContext["reportDiagnostic"];
   } = {}
 ) => {
@@ -1175,34 +1386,49 @@ const buildTestServer = async (
     return user;
   };
 
+  const fixtureDeviceIds = new Map<
+    string,
+    { id: string; instanceId: string; upstreamBackendId: string }
+  >();
   const deviceContext = async (
     request: FastifyRequest
   ): Promise<DeviceCredentialAuthContext> => {
     const authorization = request.headers.authorization;
-    const match = /^Koed-Device (reader|share|owner-share):secret$/.exec(
-      authorization ?? ""
-    );
+    const match =
+      /^Koed-Device (reader|share|owner-share|owner-publisher):secret$/.exec(
+        authorization ?? ""
+      );
     if (!match) {
       throw Object.assign(new Error("Device credential required"), {
         statusCode: 401
       });
     }
     const credentialKeyId = match[1]!;
+    const stored = fixtureDeviceIds.get(credentialKeyId) ?? {
+      id: randomUUID(),
+      instanceId: randomUUID(),
+      upstreamBackendId: randomUUID()
+    };
+    fixtureDeviceIds.set(credentialKeyId, stored);
     const operationFamilies =
       credentialKeyId === "reader"
         ? ["team_workspace_read", "team_chat_read"]
-        : ["share_grant_management"];
+        : credentialKeyId === "owner-publisher"
+          ? ["share_grant_management", "sync"]
+          : ["share_grant_management"];
     const ownerUserId =
-      credentialKeyId === "owner-share" ? fixture.ids.alice : fixture.ids.bob;
+      credentialKeyId === "owner-share" || credentialKeyId === "owner-publisher"
+        ? fixture.ids.alice
+        : fixture.ids.bob;
     return {
       user: fixture.users.get(ownerUserId)!,
       credential: {
-        id: randomUUID(),
+        id: stored.id,
         ownerUserId,
         enrollmentChallengeId: null,
         credentialKeyId,
-        upstreamBackendId: randomUUID(),
-        deviceInstanceId: randomUUID(),
+        upstreamBackendId: stored.upstreamBackendId,
+        deviceInstanceId: stored.instanceId,
         lineageId: randomUUID(),
         deviceLabel: null,
         credentialVersion: 1,
@@ -1242,15 +1468,34 @@ const buildTestServer = async (
     };
 
   const noRateLimit = async () => {};
+  const executionReceipts = new Map<
+    string,
+    { statusCode: number; body: unknown }
+  >();
   const highRiskRepository = {
     async executeActionGrant(
       input: Parameters<HighRiskActionRepository["executeActionGrant"]>[0]
     ) {
       if (input.actionGrant !== "hrg_test_shared_memory_secret") return null;
+      const key = JSON.stringify([
+        input.ownerUserId,
+        input.deviceCredentialId,
+        input.upstreamBackendId,
+        input.operationFamily,
+        input.action,
+        input.teamId,
+        input.targetId,
+        input.scopeHash,
+        input.requestHash
+      ]);
+      const prior = options.replayReceipts ? executionReceipts.get(key) : null;
+      if (prior) return { ...prior, replayed: true };
       const receipt = await input.execute({
         sharedMemory: fixture.repository,
         teamConversationSource: fixture.sourceRepository
       } as never);
+      if (receipt && options.replayReceipts)
+        executionReceipts.set(key, receipt);
       return receipt ? { ...receipt, replayed: false } : null;
     }
   } as unknown as Pick<HighRiskActionRepository, "executeActionGrant">;
@@ -1421,6 +1666,1850 @@ const ownerGrantIndexUrl = (fixture: ReturnType<typeof createFixture>) =>
   `/v1/shared-memory/logical-memories/${fixture.ids.logicalMemory}/share-grants`;
 
 describe("Shared Memory HTTP routes", () => {
+  it("binds publisher transfer review and execution to the receiving device", async () => {
+    const fixture = createFixture(),
+      ruleId = randomUUID();
+    const reviewLookup = vi.fn<
+      SharedMemoryRepository["getSharingRulePublisherTakeoverReview"]
+    >(async (_actor, input) =>
+      publisherTakeoverReviewFixture({
+        ruleId: input.ruleId,
+        teamId: input.teamId,
+        teamWorkspaceId: input.teamWorkspaceId,
+        receivingCredentialId: input.receivingCredentialId
+      })
+    );
+    fixture.repository.getSharingRulePublisherTakeoverReview = reviewLookup;
+    const transfer = vi.fn<
+      SharedMemoryRepository["takeOverSharingRulePublisher"]
+    >(async (_actor, input) => ({
+      mutationId: input.mutationId,
+      ruleId,
+      state: input.review.state,
+      authorityVersion: input.review.expectedAuthorityVersion + 1,
+      publisherFence: input.review.publisherFence + 1,
+      previousPublisherCredentialId: input.review.currentPublisher.credentialId,
+      publisherCredentialId: input.receivingCredentialId,
+      catchUpState: "queued",
+      approvedAt: new Date().toISOString()
+    }));
+    fixture.repository.takeOverSharingRulePublisher = transfer;
+    const app = await buildTestServer(fixture, { replayReceipts: true }),
+      headers = { authorization: "Koed-Device owner-publisher:secret" };
+    const original = publisherTakeoverReviewFixture({
+      ruleId,
+      teamId: fixture.ids.teamA,
+      teamWorkspaceId: fixture.ids.workspaceA,
+      receivingCredentialId: randomUUID()
+    });
+    const { ruleId: ignoredRuleId, ...input } =
+      sharingRulePublisherTakeoverReviewInputSchema.strip().parse(original);
+    expect(ignoredRuleId).toBe(ruleId);
+    const response = await app.inject({
+      method: "POST",
+      url: `/v1/shared-memory/sharing-rules/${ruleId}/publisher-review`,
+      headers,
+      payload: input
+    });
+    expect(response.statusCode).toBe(200);
+    const review = sharingRulePublisherTakeoverReviewSchema.parse(
+      (jsonBody(response) as { review: unknown }).review
+    );
+    const binding = sharedMemoryPublisherTakeoverActionGrantBinding({
+      mutationId: randomUUID(),
+      review,
+      referenceId: randomUUID()
+    });
+    const probe = await app.inject({
+      method: "POST",
+      url: `${binding.path}/receipt`,
+      headers: {
+        ...headers,
+        "x-koed-action-grant": "hrg_test_shared_memory_secret"
+      },
+      payload: binding.body
+    });
+    expect(probe.statusCode).toBe(200);
+    expect(jsonBody(probe)).toEqual({
+      publisherTransfer: null,
+      receiptPending: true
+    });
+    expect(transfer).not.toHaveBeenCalled();
+    const unavailable = await app.inject({
+      method: "POST",
+      url: `${binding.path}/receipt`,
+      headers: {
+        ...headers,
+        "x-koed-action-grant": "hrg_unissued_receipt_probe_secret"
+      },
+      payload: binding.body
+    });
+    expect(unavailable.statusCode).toBe(200);
+    expect(jsonBody(unavailable)).toEqual({
+      publisherTransfer: null,
+      receiptPending: false
+    });
+    expect(transfer).not.toHaveBeenCalled();
+    const accepted = await app.inject({
+      method: "POST",
+      url: binding.path,
+      headers: {
+        ...headers,
+        "x-koed-action-grant": "hrg_test_shared_memory_secret"
+      },
+      payload: binding.body
+    });
+    expect(accepted.statusCode).toBe(200);
+    expect(transfer).toHaveBeenCalledExactlyOnceWith(
+      { userId: fixture.ids.alice },
+      expect.objectContaining({
+        receivingCredentialId: review.receivingPublisher.credentialId,
+        review
+      })
+    );
+    const replay = await app.inject({
+      method: "POST",
+      url: `${binding.path}/receipt`,
+      headers: {
+        ...headers,
+        "x-koed-action-grant": "hrg_test_shared_memory_secret"
+      },
+      payload: binding.body
+    });
+    expect(replay.statusCode).toBe(200);
+    expect(jsonBody(replay)).toEqual(jsonBody(accepted));
+    expect(transfer).toHaveBeenCalledTimes(1);
+    for (const denied of [
+      sessionHeaders(fixture.ids.alice),
+      { authorization: "Bearer personal-token" },
+      { authorization: "Koed-Device owner-share:secret" }
+    ]) {
+      expect([401, 403]).toContain(
+        (
+          await app.inject({
+            method: "POST",
+            url: `/v1/shared-memory/sharing-rules/${ruleId}/publisher-review`,
+            headers: denied,
+            payload: input
+          })
+        ).statusCode
+      );
+      expect([401, 403]).toContain(
+        (
+          await app.inject({
+            method: "POST",
+            url: binding.path,
+            headers: {
+              ...denied,
+              "x-koed-action-grant": "hrg_test_shared_memory_secret"
+            },
+            payload: binding.body
+          })
+        ).statusCode
+      );
+    }
+    const spoofed = {
+      ...binding.body,
+      review: {
+        ...review,
+        receivingPublisher: {
+          ...review.receivingPublisher,
+          credentialId: randomUUID()
+        }
+      }
+    };
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: binding.path,
+          headers: {
+            ...headers,
+            "x-koed-action-grant": "hrg_test_shared_memory_secret"
+          },
+          payload: spoofed
+        })
+      ).statusCode
+    ).toBe(403);
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: binding.path,
+          headers,
+          payload: binding.body
+        })
+      ).statusCode
+    ).toBe(403);
+    expect(transfer).toHaveBeenCalledTimes(1);
+    await app.close();
+  });
+  it("bounds existing member discovery to the authenticated publisher and exact rule fence", async () => {
+    const fixture = createFixture(),
+      ruleId = randomUUID();
+    const request = { expectedAuthorityVersion: 2, publisherFence: 3 };
+    const member = {
+      membershipId: randomUUID(),
+      logicalMemoryId: fixture.ids.logicalMemory,
+      membershipVersion: 4,
+      state: "present" as const,
+      portableSourceHash: "a".repeat(64)
+    };
+    const page = {
+      ruleId,
+      teamId: fixture.ids.teamA,
+      teamWorkspaceId: fixture.ids.workspaceA,
+      authorityVersion: 2,
+      publisherFence: 3,
+      selectorBindingHash: "b".repeat(64),
+      entries: [member],
+      nextAfterMembershipId: member.membershipId
+    };
+    const list = vi
+      .fn<SharedMemoryRepository["listRepositorySharingRuleMemberInventory"]>()
+      .mockResolvedValue(page);
+    fixture.repository.listRepositorySharingRuleMemberInventory = list;
+    const app = await buildTestServer(fixture);
+    const url = `/v1/shared-memory/repository-rules/${ruleId}/members/inventory`;
+    const headers = { authorization: "Koed-Device owner-publisher:secret" };
+    expect(
+      jsonBody(
+        await app.inject({ method: "POST", url, headers, payload: request })
+      )
+    ).toEqual({ inventory: page });
+    expect(list).toHaveBeenLastCalledWith(
+      { userId: fixture.ids.alice },
+      {
+        ...request,
+        ruleId,
+        publisherCredentialId: expect.any(String)
+      }
+    );
+    list.mockResolvedValueOnce({
+      ...page,
+      entries: [],
+      nextAfterMembershipId: null
+    });
+    expect(
+      jsonBody(
+        await app.inject({
+          method: "POST",
+          url,
+          headers,
+          payload: { ...request, afterMembershipId: member.membershipId }
+        })
+      )
+    ).toEqual({
+      inventory: { ...page, entries: [], nextAfterMembershipId: null }
+    });
+    for (const denied of [
+      { authorization: "Bearer personal-token" },
+      { authorization: "Koed-Device owner-share:secret" },
+      sessionHeaders(fixture.ids.alice)
+    ])
+      expect([401, 403]).toContain(
+        (
+          await app.inject({
+            method: "POST",
+            url,
+            headers: denied,
+            payload: request
+          })
+        ).statusCode
+      );
+    for (const payload of [
+      { ...request, publisherCredentialId: randomUUID() },
+      { ...request, expectedAuthorityVersion: 0 },
+      { ...request, afterMembershipId: "local-session" },
+      { ...request, limit: 1000 }
+    ])
+      expect(
+        (await app.inject({ method: "POST", url, headers, payload })).statusCode
+      ).toBe(400);
+    expect(list).toHaveBeenCalledTimes(2);
+    list.mockRejectedValueOnce(
+      new SharedMemoryAuthorizationError("private member origin")
+    );
+    const denied = await app.inject({
+      method: "POST",
+      url,
+      headers,
+      payload: request
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.body).not.toContain("private member origin");
+    await app.close();
+  });
+  it("resolves portable origins only for the authenticated current publisher", async () => {
+    const fixture = createFixture(),
+      ruleId = randomUUID();
+    const sourceIdentity = {
+      originatingDeploymentId: "private-origin-deployment",
+      originatingDeviceId: "private-origin-device",
+      logicalSessionId: randomUUID()
+    };
+    const resolve = vi
+      .fn<SharedMemoryRepository["resolveRepositorySharingRuleSource"]>()
+      .mockResolvedValue({ logicalMemoryId: fixture.ids.logicalMemory });
+    fixture.repository.resolveRepositorySharingRuleSource = resolve;
+    const app = await buildTestServer(fixture);
+    const url = `/v1/shared-memory/repository-rules/${ruleId}/members/resolve`;
+    const headers = { authorization: "Koed-Device owner-publisher:secret" };
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url,
+          headers,
+          payload: { sourceIdentity }
+        })
+      ).statusCode
+    ).toBe(200);
+    expect(resolve).toHaveBeenCalledExactlyOnceWith(
+      { userId: fixture.ids.alice },
+      { ruleId, sourceIdentity, publisherCredentialId: expect.any(String) }
+    );
+    for (const denied of [
+      { authorization: "Bearer personal-token" },
+      { authorization: "Koed-Device owner-share:secret" },
+      sessionHeaders(fixture.ids.alice)
+    ]) {
+      expect([401, 403]).toContain(
+        (
+          await app.inject({
+            method: "POST",
+            url,
+            headers: denied,
+            payload: { sourceIdentity }
+          })
+        ).statusCode
+      );
+    }
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url,
+          headers,
+          payload: { sourceIdentity, publisherCredentialId: randomUUID() }
+        })
+      ).statusCode
+    ).toBe(400);
+    expect(resolve).toHaveBeenCalledTimes(1);
+    resolve.mockResolvedValueOnce({ logicalMemoryId: null });
+    expect(
+      jsonBody(
+        await app.inject({
+          method: "POST",
+          url,
+          headers,
+          payload: { sourceIdentity }
+        })
+      )
+    ).toEqual({ logicalMemoryId: null });
+    resolve.mockRejectedValueOnce(
+      new SharedMemoryAuthorizationError("private source mapping")
+    );
+    const denied = await app.inject({
+      method: "POST",
+      url,
+      headers,
+      payload: { sourceIdentity }
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.body).not.toContain("private source mapping");
+    await app.close();
+  });
+  it("lists owner Folder rules without exposing paths or accepting Personal API Tokens", async () => {
+    const fixture = createFixture();
+    const selector = { kind: "folder" as const, key: "f".repeat(64) };
+    const page = {
+      rules: [
+        {
+          ruleId: randomUUID(),
+          selector,
+          state: "active" as const,
+          team: { id: fixture.ids.teamA, name: "Team" },
+          workspace: { id: fixture.ids.workspaceA, name: "Workspace" },
+          maximumFidelity: "lcm_rollups" as const,
+          includeCuratedMemory: false,
+          authorityVersion: 1,
+          publisherFence: 1,
+          publisherAvailable: true
+        }
+      ],
+      nextCursor: null
+    };
+    const list = vi
+      .fn<SharedMemoryRepository["listOwnedRepositorySharingRules"]>()
+      .mockResolvedValue(page);
+    fixture.repository.listOwnedRepositorySharingRules = list;
+    const app = await buildTestServer(fixture);
+    const payload = { selector, afterRuleId: null, limit: 50 };
+    for (const headers of [
+      sessionHeaders(fixture.ids.alice),
+      { authorization: "Koed-Device owner-share:secret" }
+    ]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/shared-memory/repository-rules/owned",
+        headers,
+        payload
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ page });
+    }
+    expect(list).toHaveBeenCalledWith({ userId: fixture.ids.alice }, payload);
+    const before = list.mock.calls.length;
+    for (const headers of [
+      { authorization: "Bearer personal-token" },
+      { authorization: "Koed-Device reader:secret" }
+    ]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/shared-memory/repository-rules/owned",
+        headers,
+        payload
+      });
+      expect([401, 403]).toContain(response.statusCode);
+    }
+    const smuggled = await app.inject({
+      method: "POST",
+      url: "/v1/shared-memory/repository-rules/owned",
+      headers: sessionHeaders(fixture.ids.alice),
+      payload: {
+        ...payload,
+        selector: { ...selector, path: "/private/exact-folder" }
+      }
+    });
+    expect(smuggled.statusCode).toBe(400);
+    expect(list).toHaveBeenCalledTimes(before);
+    await app.close();
+  });
+  it("binds bounded member inspection, context refresh and removal to publisher and path identity", async () => {
+    const fixture = createFixture();
+    const ruleId = randomUUID(),
+      membershipId = randomUUID();
+    const membership = {
+      id: membershipId,
+      version: 2,
+      state: "present" as const,
+      selectionSnapshotVersion: randomUUID(),
+      sourceContextHash: hash,
+      gitContextVersion: 1,
+      folderContextVersion: 1,
+      pendingShare: null
+    };
+    const members = {
+      ruleId,
+      state: "paused" as const,
+      authorityVersion: 4,
+      publisherFence: 2,
+      selectorBindingHash: hash,
+      effectivePrivacyPolicyHash: hash,
+      teamId: fixture.ids.teamA,
+      teamWorkspaceId: fixture.ids.workspaceA,
+      maximumFidelity: "memory_events" as const,
+      includeCuratedMemory: false,
+      entries: [
+        {
+          logicalMemoryId: fixture.ids.logicalMemory,
+          workspaceExcluded: false,
+          grant: {
+            id: fixture.ids.grant,
+            logicalGrantId: randomUUID(),
+            version: 5,
+            lifecycle: "active"
+          },
+          member: membership
+        }
+      ]
+    };
+    const inspect = vi
+      .fn<SharedMemoryRepository["inspectRepositorySharingRuleMembers"]>()
+      .mockResolvedValue(members);
+    const refresh = vi
+      .fn<SharedMemoryRepository["refreshRepositorySharingRuleMemberContext"]>()
+      .mockResolvedValue({
+        ruleId,
+        membershipId,
+        membershipVersion: 3,
+        authorityVersion: 4
+      });
+    const remove = vi
+      .fn<SharedMemoryRepository["removeSharingRuleMember"]>()
+      .mockResolvedValue({
+        ruleId,
+        membershipId,
+        membershipVersion: 4,
+        authorityVersion: 5,
+        state: "removed",
+        shareGrantId: fixture.ids.grant
+      });
+    fixture.repository.inspectRepositorySharingRuleMembers = inspect;
+    fixture.repository.refreshRepositorySharingRuleMemberContext = refresh;
+    fixture.repository.removeSharingRuleMember = remove;
+    const app = await buildTestServer(fixture);
+    const headers = { authorization: "Koed-Device owner-publisher:secret" };
+    const base = `/v1/shared-memory/repository-rules/${ruleId}/members`;
+    const inspection = { logicalMemoryIds: [fixture.ids.logicalMemory] };
+    const response = await app.inject({
+      method: "POST",
+      url: `${base}/inspect`,
+      headers,
+      payload: inspection
+    });
+    expect(response.statusCode).toBe(200);
+    expect(jsonBody(response)).toEqual({ members });
+    expect(inspect).toHaveBeenCalledExactlyOnceWith(
+      { userId: fixture.ids.alice },
+      { ...inspection, ruleId, publisherCredentialId: expect.any(String) }
+    );
+    const oversized = await app.inject({
+      method: "POST",
+      url: `${base}/inspect`,
+      headers,
+      payload: {
+        logicalMemoryIds: Array.from({ length: 101 }, () => randomUUID())
+      }
+    });
+    expect(oversized.statusCode).toBe(400);
+    expect(inspect).toHaveBeenCalledTimes(1);
+    const context = {
+      mutationId: randomUUID(),
+      selectionSnapshotVersion: randomUUID(),
+      sourceContextHash: hash,
+      gitContextVersion: 2,
+      folderContextVersion: 1,
+      selectorBindingHash: hash,
+      expectedAuthorityVersion: 4,
+      expectedMembershipVersion: 2,
+      publisherFence: 2
+    };
+    const updated = await app.inject({
+      method: "POST",
+      url: `${base}/${membershipId}/context`,
+      headers,
+      payload: context
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(
+      { userId: fixture.ids.alice },
+      {
+        ...context,
+        ruleId,
+        membershipId,
+        publisherCredentialId: expect.any(String)
+      }
+    );
+    const removal = {
+      mutationId: randomUUID(),
+      selectionSnapshotVersion: context.selectionSnapshotVersion,
+      sourceContextHash: hash,
+      expectedAuthorityVersion: 4,
+      expectedMembershipVersion: 3,
+      publisherFence: 2
+    };
+    const removed = await app.inject({
+      method: "POST",
+      url: `${base}/${membershipId}/remove`,
+      headers,
+      payload: removal
+    });
+    expect(removed.statusCode).toBe(200);
+    expect(remove).toHaveBeenCalledExactlyOnceWith(
+      { userId: fixture.ids.alice },
+      {
+        ...removal,
+        ruleId,
+        membershipId,
+        publisherCredentialId: expect.any(String)
+      }
+    );
+    const spoofed = await app.inject({
+      method: "POST",
+      url: `${base}/${membershipId}/remove`,
+      headers,
+      payload: { ...removal, membershipId: randomUUID() }
+    });
+    expect(spoofed.statusCode).toBe(400);
+    for (const unauthorized of [
+      sessionHeaders(fixture.ids.alice),
+      { authorization: "Bearer personal-token" },
+      { authorization: "Koed-Device owner-share:secret" }
+    ]) {
+      const denied = await app.inject({
+        method: "POST",
+        url: `${base}/inspect`,
+        headers: unauthorized,
+        payload: inspection
+      });
+      expect([401, 403]).toContain(denied.statusCode);
+    }
+    expect(inspect).toHaveBeenCalledTimes(1);
+    await app.close();
+  });
+  it("settles only an exact member mutation for the authenticated publisher", async () => {
+    const fixture = createFixture(),
+      ruleId = randomUUID(),
+      membershipId = randomUUID();
+    const input = {
+      mutationId: randomUUID(),
+      kind: "admit" as const,
+      logicalMemoryId: fixture.ids.logicalMemory,
+      membershipId,
+      requestHash: "a".repeat(64)
+    };
+    const settlement = { ...input, ruleId, state: "canceled" as const };
+    const cancel = vi
+      .fn<SharedMemoryRepository["cancelRepositorySharingRuleMutation"]>()
+      .mockResolvedValue(settlement);
+    fixture.repository.cancelRepositorySharingRuleMutation = cancel;
+    const app = await buildTestServer(fixture);
+    const url = `/v1/shared-memory/repository-rules/${ruleId}/members/cancel-mutation`;
+    const headers = { authorization: "Koed-Device owner-publisher:secret" };
+    const response = await app.inject({
+      method: "POST",
+      url,
+      headers,
+      payload: input
+    });
+    expect(response.statusCode).toBe(200);
+    expect(jsonBody(response)).toEqual({ settlement });
+    expect(cancel).toHaveBeenCalledExactlyOnceWith(
+      { userId: fixture.ids.alice },
+      { ...input, ruleId, publisherCredentialId: expect.any(String) }
+    );
+    for (const unauthorized of [
+      sessionHeaders(fixture.ids.alice),
+      { authorization: "Bearer personal-token" },
+      { authorization: "Koed-Device owner-share:secret" }
+    ]) {
+      const denied = await app.inject({
+        method: "POST",
+        url,
+        headers: unauthorized,
+        payload: input
+      });
+      expect([401, 403]).toContain(denied.statusCode);
+    }
+    const spoofed = await app.inject({
+      method: "POST",
+      url,
+      headers,
+      payload: { ...input, publisherCredentialId: randomUUID() }
+    });
+    expect(spoofed.statusCode).toBe(400);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    await app.close();
+  });
+  it("admits a source only through the authenticated rule publisher and returns a bounded acceptance receipt", async () => {
+    const fixture = createFixture();
+    const ruleId = randomUUID();
+    const receipt = {
+      pendingShareId: randomUUID(),
+      membershipId: randomUUID(),
+      membershipVersion: 1,
+      authorityVersion: 2,
+      publisherFence: 3,
+      sourceRevision: 4
+    };
+    const admit = vi
+      .fn<SharedMemoryRepository["createPendingRepositoryRuleMember"]>()
+      .mockResolvedValue(receipt);
+    fixture.repository.createPendingRepositoryRuleMember = admit;
+    const app = await buildTestServer(fixture);
+    const input = {
+      ...capturedIntent(fixture, "memory_events", "continuous"),
+      mutationId: randomUUID(),
+      logicalGrantId: randomUUID(),
+      consentId: randomUUID(),
+      logicalMemoryId: fixture.ids.logicalMemory,
+      teamId: fixture.ids.teamA,
+      teamWorkspaceId: fixture.ids.workspaceA,
+      preview: { previewId: randomUUID(), previewHash: hash },
+      previewRevision: 1,
+      maximumFidelity: "memory_events",
+      includeCuratedMemory: false,
+      expiresAt: null,
+      membership: {
+        selectionSnapshotVersion: randomUUID(),
+        sourceContextHash: hash,
+        selectorBindingHash: hash,
+        gitContextVersion: 1,
+        folderContextVersion: 1,
+        expectedAuthorityVersion: 2,
+        expectedMembershipVersion: 0,
+        expectedGrantVersion: null,
+        publisherFence: 3
+      }
+    };
+    const url = `/v1/shared-memory/repository-rules/${ruleId}/members`;
+    // Ongoing authority is proved by the current stored rule. This route does
+    // not consume a fresh one-use source-sharing Action Grant.
+    const accepted = await app.inject({
+      method: "POST",
+      url,
+      headers: { authorization: "Koed-Device owner-publisher:secret" },
+      payload: input
+    });
+    expect(accepted.statusCode).toBe(202);
+    expect(jsonBody(accepted)).toEqual({ admission: receipt });
+    expect(admit).toHaveBeenCalledExactlyOnceWith(
+      { userId: fixture.ids.alice },
+      {
+        ...input,
+        expectedGrantVersion: null,
+        publisherCredentialId: expect.any(String),
+        membership: { ...input.membership, ruleId }
+      }
+    );
+    for (const headers of [
+      sessionHeaders(fixture.ids.alice),
+      { authorization: "Koed-Device owner-share:secret" },
+      { authorization: "Bearer personal-token" }
+    ]) {
+      const denied = await app.inject({
+        method: "POST",
+        url,
+        headers,
+        payload: input
+      });
+      expect([401, 403]).toContain(denied.statusCode);
+    }
+    const spoofed = await app.inject({
+      method: "POST",
+      url,
+      headers: { authorization: "Koed-Device owner-publisher:secret" },
+      payload: { ...input, publisherCredentialId: randomUUID() }
+    });
+    expect(spoofed.statusCode).toBe(400);
+    expect(admit).toHaveBeenCalledTimes(1);
+    admit.mockRejectedValueOnce(
+      new SharedMemoryAuthorizationError("private publisher binding detail")
+    );
+    const stale = await app.inject({
+      method: "POST",
+      url,
+      headers: { authorization: "Koed-Device owner-publisher:secret" },
+      payload: input
+    });
+    expect(stale.statusCode).toBe(403);
+    expect(stale.body).not.toContain("private publisher binding detail");
+    await app.close();
+  });
+  it("accepts retained-source admission only from an authenticated owner publisher", async () => {
+    const fixture = createFixture(),
+      ruleId = randomUUID();
+    const receipt = {
+      pendingShareId: randomUUID(),
+      membershipId: randomUUID(),
+      membershipVersion: 2,
+      authorityVersion: 2,
+      publisherFence: 3,
+      sourceRevision: 4
+    };
+    const admit = vi
+      .fn<SharedMemoryRepository["readmitRepositorySharingRuleMember"]>()
+      .mockResolvedValue(receipt);
+    fixture.repository.readmitRepositorySharingRuleMember = admit;
+    const app = await buildTestServer(fixture);
+    const input = {
+      mutationId: randomUUID(),
+      consentId: randomUUID(),
+      logicalMemoryId: fixture.ids.logicalMemory,
+      membership: {
+        selectionSnapshotVersion: randomUUID(),
+        sourceContextHash: hash,
+        selectorBindingHash: hash,
+        gitContextVersion: 1,
+        folderContextVersion: 1,
+        expectedAuthorityVersion: 2,
+        expectedMembershipVersion: 1,
+        expectedGrantVersion: 5,
+        publisherFence: 3,
+        sourceIdentity: {
+          originatingDeploymentId: "native-A",
+          originatingDeviceId: "device-A",
+          logicalSessionId: "conversation-A"
+        }
+      }
+    };
+    const url = `/v1/shared-memory/repository-rules/${ruleId}/members/readmit`;
+    const accepted = await app.inject({
+      method: "POST",
+      url,
+      headers: { authorization: "Koed-Device owner-publisher:secret" },
+      payload: input
+    });
+    expect(accepted.statusCode).toBe(202);
+    expect(jsonBody(accepted)).toEqual({ admission: receipt });
+    expect(admit).toHaveBeenCalledExactlyOnceWith(
+      { userId: fixture.ids.alice },
+      { ...input, ruleId, publisherCredentialId: expect.any(String) }
+    );
+    for (const headers of [
+      sessionHeaders(fixture.ids.alice),
+      { authorization: "Koed-Device owner-share:secret" },
+      { authorization: "Bearer personal-token" }
+    ])
+      expect([401, 403]).toContain(
+        (await app.inject({ method: "POST", url, headers, payload: input }))
+          .statusCode
+      );
+    for (const spoof of [
+      { publisherCredentialId: randomUUID() },
+      { source: { kind: "captured_session", sessionId: randomUUID() } },
+      { existingSourceReadmission: { approved: true } }
+    ])
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url,
+            headers: { authorization: "Koed-Device owner-publisher:secret" },
+            payload: { ...input, ...spoof }
+          })
+        ).statusCode
+      ).toBe(400);
+    expect(admit).toHaveBeenCalledTimes(1);
+    admit.mockRejectedValueOnce(
+      new SharedMemoryAuthorizationError("private original source detail")
+    );
+    const denied = await app.inject({
+      method: "POST",
+      url,
+      headers: { authorization: "Koed-Device owner-publisher:secret" },
+      payload: input
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.body).not.toContain("private original source detail");
+    await app.close();
+  });
+  it("reviews destination policy without creating source, consent or grant authority", async () => {
+    const fixture = createFixture();
+    fixture.repository.getSharedMemoryCandidatePreviewAdmission = async (
+      actor,
+      input
+    ) => {
+      if (
+        actor.userId !== fixture.ids.alice ||
+        input.teamId !== fixture.ids.teamA ||
+        input.teamWorkspaceId !== fixture.ids.workspaceA
+      )
+        throw new SharedMemoryAuthorizationError();
+      if (input.representation !== "memory_events") return null;
+      return {
+        effectiveMaximumFidelity: "memory_events",
+        effectiveIncludeCuratedMemory: false,
+        teamPolicyVersion: 1,
+        teamPolicyHash: hash,
+        workspacePolicyVersion: 1,
+        workspacePolicyHash: hash
+      };
+    };
+    const app = await buildTestServer(fixture);
+    const url = `/v1/shared-memory/teams/${fixture.ids.teamA}/workspaces/${fixture.ids.workspaceA}/sharing-review?representation=memory_events`;
+    const owner = await app.inject({
+      method: "GET",
+      url,
+      headers: sessionHeaders(fixture.ids.alice)
+    });
+    const device = await app.inject({
+      method: "GET",
+      url,
+      headers: { authorization: "Koed-Device owner-share:secret" }
+    });
+    const denied = await app.inject({
+      method: "GET",
+      url,
+      headers: sessionHeaders(fixture.ids.bob)
+    });
+    const token = await app.inject({
+      method: "GET",
+      url,
+      headers: { authorization: "Bearer personal-token" }
+    });
+    const mismatched = await app.inject({
+      method: "GET",
+      url: url.replace(fixture.ids.workspaceA, fixture.ids.workspaceB),
+      headers: sessionHeaders(fixture.ids.alice)
+    });
+    const forbiddenSelector = await app.inject({
+      method: "GET",
+      url: `${url}&target=private-anchor`,
+      headers: sessionHeaders(fixture.ids.alice)
+    });
+    const disallowedDetail = await app.inject({
+      method: "GET",
+      url: url.replace("memory_events", "lcm_leaves"),
+      headers: sessionHeaders(fixture.ids.alice)
+    });
+    expect([
+      owner.statusCode,
+      device.statusCode,
+      denied.statusCode,
+      token.statusCode,
+      mismatched.statusCode,
+      forbiddenSelector.statusCode,
+      disallowedDetail.statusCode
+    ]).toEqual([200, 200, 403, 403, 403, 400, 409]);
+    expect(jsonBody<unknown>(owner)).toMatchObject({
+      review: {
+        teamId: fixture.ids.teamA,
+        workspaceId: fixture.ids.workspaceA,
+        representation: "memory_events",
+        teamPolicyVersion: 1,
+        workspacePolicyVersion: 1
+      }
+    });
+    expect(fixture.repositoryCalls).toBe(0);
+    for (const name of [
+      "consentId",
+      "logicalMemoryId",
+      "sourceSessionId",
+      "grantId"
+    ])
+      expect(owner.body).not.toContain(name);
+    await app.close();
+  });
+
+  it("returns sharing reasons only through owner management, including after Workspace removal", async () => {
+    const fixture = createFixture();
+    const app = await buildTestServer(fixture);
+    const url = `/v1/shared-memory/owned-shares/grant/${fixture.ids.grant}`;
+    const owner = await app.inject({
+      method: "GET",
+      url,
+      headers: sessionHeaders(fixture.ids.alice)
+    });
+    const device = await app.inject({
+      method: "GET",
+      url,
+      headers: { authorization: "Koed-Device owner-share:secret" }
+    });
+    const teammate = await app.inject({
+      method: "GET",
+      url,
+      headers: sessionHeaders(fixture.ids.bob)
+    });
+    const token = await app.inject({
+      method: "GET",
+      url,
+      headers: { authorization: "Bearer personal-token" }
+    });
+    expect([
+      owner.statusCode,
+      device.statusCode,
+      teammate.statusCode,
+      token.statusCode
+    ]).toEqual([200, 200, 404, 403]);
+    expect(jsonBody<unknown>(owner)).toMatchObject({
+      preview: null,
+      share: {
+        sourceAccess: null,
+        summary: {
+          workspaceContentAccess: "unavailable",
+          authorizedPreview: null,
+          workspaceExclusion: null,
+          sharingReasons: [
+            {
+              kind: "direct",
+              rule: null,
+              consentId: fixture.ids.consent,
+              updateState: "paused"
+            }
+          ]
+        }
+      }
+    });
+    const team = await app.inject({
+      method: "GET",
+      url: `${scopedGrantUrl(fixture)}?representation=memory_events`,
+      headers: sessionHeaders(fixture.ids.bob)
+    });
+    expect(team.statusCode).toBe(200);
+    for (const field of [
+      "sharingReasons",
+      "consentId",
+      "ownerPrincipalId",
+      "sourceSessionId"
+    ])
+      expect(team.body).not.toContain(field);
+    expect(owner.body).not.toContain("creatorAuthority");
+    await app.close();
+  });
+
+  it("requires device approval and retains exact snapshot conversion scope on Conversation admission", async () => {
+    const fixture = createFixture();
+    const conversion = {
+      reasonId: randomUUID(),
+      consentId: randomUUID(),
+      consentVersion: 2,
+      sourceRevision: 1,
+      maximumFidelity: "lcm_rollups" as const,
+      includeCuratedMemory: false,
+      expiresAt: null
+    };
+    const input = {
+      ruleId: randomUUID(),
+      mutationId: randomUUID(),
+      logicalGrantId: randomUUID(),
+      consentId: randomUUID(),
+      logicalMemoryId: fixture.ids.logicalMemory,
+      teamId: fixture.ids.teamA,
+      teamWorkspaceId: fixture.ids.workspaceA,
+      source: {
+        kind: "captured_session" as const,
+        sessionId: randomUUID(),
+        logicalMemoryId: fixture.ids.logicalMemory
+      },
+      sourceCapabilities: ["lcm_rollups"],
+      activationRepresentation: "lcm_rollups",
+      preview: { previewId: randomUUID(), previewHash: hash },
+      previewRevision: 1,
+      maximumFidelity: "lcm_rollups",
+      includeCuratedMemory: false,
+      mode: "continuous",
+      expiresAt: null,
+      expectedGrantVersion: 3,
+      effectivePrivacyPolicyHash: hash,
+      snapshotConversion: conversion,
+      authority: {
+        action: SHARED_MEMORY_AUTHORITY,
+        source: "device_action_grant" as const,
+        referenceId: fixture.ids.actionGrantAuthority
+      }
+    };
+    const create = vi
+      .spyOn(fixture.repository, "createPendingConversationSharingRule")
+      .mockImplementation((actor, request) =>
+        fixture.repository.createPendingShare(actor, request)
+      );
+    const app = await buildTestServer(fixture, { replayReceipts: true });
+    try {
+      const url = "/v1/shared-memory/conversation-rules";
+      for (const headers of [
+        sessionHeaders(fixture.ids.alice),
+        { authorization: "Bearer personal-token" },
+        { authorization: "Koed-Device owner-share:secret" }
+      ])
+        expect(
+          (await app.inject({ method: "POST", url, headers, payload: input }))
+            .statusCode
+        ).toBe("cookie" in headers ? 401 : 403);
+      expect(create).not.toHaveBeenCalled();
+      const probe = await app.inject({
+        method: "POST",
+        url: `${url}/receipt`,
+        headers: {
+          authorization: "Koed-Device owner-share:secret",
+          "x-koed-action-grant": "hrg_test_shared_memory_secret"
+        },
+        payload: input
+      });
+      expect(probe.statusCode).toBe(200);
+      expect(jsonBody(probe)).toEqual({
+        ruleId: input.ruleId,
+        pendingShare: null,
+        receiptPending: true
+      });
+      expect(create).not.toHaveBeenCalled();
+      const response = await app.inject({
+        method: "POST",
+        url,
+        headers: {
+          authorization: "Koed-Device owner-share:secret",
+          "x-koed-action-grant": "hrg_test_shared_memory_secret"
+        },
+        payload: input
+      });
+      expect(response.statusCode).toBe(202);
+      expect(create).toHaveBeenCalledExactlyOnceWith(
+        { userId: fixture.ids.alice },
+        {
+          ...input,
+          ruleCreation: {
+            ruleId: input.ruleId,
+            snapshotConversion: conversion,
+            publisherCredentialId: expect.any(String),
+            expectedGrantVersion: 3,
+            effectivePrivacyPolicyHash: hash
+          }
+        }
+      );
+      const replay = await app.inject({
+        method: "POST",
+        url: `${url}/receipt`,
+        headers: {
+          authorization: "Koed-Device owner-share:secret",
+          "x-koed-action-grant": "hrg_test_shared_memory_secret"
+        },
+        payload: input
+      });
+      expect(replay.statusCode).toBe(202);
+      expect(jsonBody(replay)).toEqual(jsonBody(response));
+      expect(create).toHaveBeenCalledTimes(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("reviews owned content policy and requires an exact device Action Grant to amend it", async () => {
+    const fixture = createFixture();
+    const ruleId = randomUUID();
+    const review = contentPolicyReviewFixture({
+      ruleId,
+      teamId: fixture.ids.teamA,
+      teamWorkspaceId: fixture.ids.workspaceA
+    });
+    const read = vi
+      .spyOn(fixture.repository, "getSharingRuleContentPolicyReview")
+      .mockImplementation(async (actor) =>
+        actor.userId === fixture.ids.alice ? review : null
+      );
+    const mutationId = randomUUID();
+    const result = {
+      mutationId,
+      approvedAt: new Date().toISOString(),
+      ruleId,
+      state: review.state,
+      authorityVersion: review.expectedAuthorityVersion + 1,
+      publisherFence: review.publisherFence,
+      contentPolicyVersion: 1,
+      labels: review.labels,
+      globalPolicyHash: review.globalPolicyHash,
+      effectivePrivacyPolicyHash: review.effectivePrivacyPolicyHash,
+      memberCount: review.memberCount
+    };
+    const amend = vi
+      .spyOn(fixture.repository, "amendSharingRuleContentPolicy")
+      .mockResolvedValue(result);
+    const app = await buildTestServer(fixture);
+    try {
+      const reviewInput = {
+        teamId: review.teamId,
+        teamWorkspaceId: review.teamWorkspaceId,
+        labels: review.labels
+      };
+      const reviewUrl = `/v1/shared-memory/sharing-rules/${ruleId}/content-policy-review`;
+      const reviewed = await app.inject({
+        method: "POST",
+        url: reviewUrl,
+        headers: sessionHeaders(fixture.ids.alice),
+        payload: reviewInput
+      });
+      expect(reviewed.statusCode).toBe(200);
+      expect(jsonBody(reviewed)).toEqual({ review });
+      expect(read).toHaveBeenCalledExactlyOnceWith(
+        { userId: fixture.ids.alice },
+        { ruleId, ...reviewInput }
+      );
+      for (const [headers, expected] of [
+        [sessionHeaders(fixture.ids.bob), 409],
+        [{ authorization: "Bearer personal-token" }, 403]
+      ] as const) {
+        expect(
+          (
+            await app.inject({
+              method: "POST",
+              url: reviewUrl,
+              headers,
+              payload: reviewInput
+            })
+          ).statusCode
+        ).toBe(expected);
+      }
+      const url = `/v1/shared-memory/sharing-rules/${ruleId}/content-policy`;
+      const authority = {
+        action: SHARED_MEMORY_AUTHORITY,
+        source: "device_action_grant" as const,
+        referenceId: fixture.ids.actionGrantAuthority
+      };
+      const payload = { mutationId, review, authority };
+      for (const headers of [
+        sessionHeaders(fixture.ids.alice),
+        { authorization: "Bearer personal-token" },
+        { authorization: "Koed-Device owner-share:secret" },
+        {
+          authorization: "Koed-Device reader:secret",
+          "x-koed-action-grant": "hrg_test_shared_memory_secret"
+        }
+      ]) {
+        expect(
+          (await app.inject({ method: "POST", url, headers, payload }))
+            .statusCode
+        ).toBe("cookie" in headers ? 401 : 403);
+      }
+      const headers = {
+        authorization: "Koed-Device owner-share:secret",
+        "x-koed-action-grant": "hrg_test_shared_memory_secret"
+      };
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: `/v1/shared-memory/sharing-rules/${randomUUID()}/content-policy`,
+            headers,
+            payload
+          })
+        ).statusCode
+      ).toBe(403);
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url,
+            headers,
+            payload: { ...payload, labels: review.labels }
+          })
+        ).statusCode
+      ).toBe(400);
+      expect(amend).not.toHaveBeenCalled();
+      const accepted = await app.inject({
+        method: "POST",
+        url,
+        headers,
+        payload
+      });
+      expect(accepted.statusCode).toBe(200);
+      expect(jsonBody(accepted)).toEqual({ contentPolicyAmendment: result });
+      expect(amend).toHaveBeenCalledExactlyOnceWith(
+        { userId: fixture.ids.alice },
+        payload
+      );
+      amend.mockResolvedValue({ ...result, mutationId: randomUUID() });
+      expect(
+        (await app.inject({ method: "POST", url, headers, payload })).statusCode
+      ).toBe(403);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("requires device approval to remove an exclusion and rejects mismatched restoration receipts", async () => {
+    const fixture = createFixture();
+    const input = {
+      logicalMemoryId: fixture.ids.logicalMemory,
+      teamId: fixture.ids.teamA,
+      teamWorkspaceId: fixture.ids.workspaceA
+    };
+    const scope = {
+      ...input,
+      ownerUserId: fixture.ids.alice,
+      shareGrantId: fixture.ids.grant,
+      expectedGrantVersion: 2,
+      expectedExclusionVersion: 1
+    };
+    const excluded = {
+      id: randomUUID(),
+      ...input,
+      ownerUserId: fixture.ids.alice,
+      version: 1,
+      state: "excluded" as const,
+      excludedAt: iso,
+      restoredAt: null,
+      updatedAt: iso
+    };
+    const review = {
+      scope,
+      source: { logicalMemoryId: input.logicalMemoryId, title: "Conversation" },
+      team: { id: input.teamId, name: "Team" },
+      workspace: { id: input.teamWorkspaceId, name: "Workspace" },
+      exclusion: excluded,
+      rules: [],
+      authorityHash: hash,
+      reviewHash: hash,
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    };
+    const read = vi.fn<
+      SharedMemoryRepository["getWorkspaceConversationRestorationReview"]
+    >(async () => review);
+    const restored = {
+      ...excluded,
+      state: "restored" as const,
+      version: 2,
+      restoredAt: iso
+    };
+    const mutate = vi.fn<
+      SharedMemoryRepository["restoreWorkspaceConversation"]
+    >(async () => restored);
+    fixture.repository.getWorkspaceConversationRestorationReview = read;
+    fixture.repository.restoreWorkspaceConversation = mutate;
+    const app = await buildTestServer(fixture);
+    try {
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: "/v1/shared-memory/workspace-exclusions/restore-review",
+            headers: sessionHeaders(fixture.ids.alice),
+            payload: input
+          })
+        ).statusCode
+      ).toBe(200);
+      for (const url of [
+        "/v1/shared-memory/workspace-exclusions/restore-review",
+        "/v1/shared-memory/workspace-exclusions/restore"
+      ]) {
+        expect(
+          (
+            await app.inject({
+              method: "POST",
+              url,
+              headers: { authorization: "Bearer personal-token" },
+              payload: {}
+            })
+          ).statusCode
+        ).toBe(403);
+      }
+      const payload = {
+        mutationId: randomUUID(),
+        scope,
+        restoration: review,
+        authority: {
+          action: SHARED_MEMORY_AUTHORITY,
+          source: "device_action_grant",
+          referenceId: fixture.ids.actionGrantAuthority
+        }
+      };
+      const url = "/v1/shared-memory/workspace-exclusions/restore";
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url,
+            headers: { authorization: "Koed-Device owner-share:secret" },
+            payload
+          })
+        ).statusCode
+      ).toBe(403);
+      expect(mutate).not.toHaveBeenCalled();
+      const headers = {
+        authorization: "Koed-Device owner-share:secret",
+        "x-koed-action-grant": "hrg_test_shared_memory_secret"
+      };
+      const accepted = await app.inject({
+        method: "POST",
+        url,
+        headers,
+        payload
+      });
+      expect(accepted.statusCode).toBe(200);
+      expect(jsonBody(accepted)).toEqual({ exclusion: restored });
+      expect(mutate).toHaveBeenCalledExactlyOnceWith(
+        { userId: fixture.ids.alice },
+        payload
+      );
+      mutate.mockResolvedValue({
+        ...restored,
+        state: "excluded",
+        restoredAt: null
+      });
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url,
+            headers,
+            payload: { ...payload, mutationId: randomUUID() }
+          })
+        ).statusCode
+      ).toBe(403);
+      expect(read).toHaveBeenCalledTimes(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("reviews and applies an exact owned Workspace exclusion and rejects Personal API Tokens", async () => {
+    const fixture = createFixture();
+    const input = {
+      logicalMemoryId: fixture.ids.logicalMemory,
+      teamId: fixture.ids.teamA,
+      teamWorkspaceId: fixture.ids.workspaceA
+    };
+    const scope = {
+      ...input,
+      ownerUserId: fixture.ids.alice,
+      expectedExclusionVersion: 0,
+      shareGrantId: fixture.ids.grant,
+      expectedGrantVersion: 1
+    };
+    const review = {
+      scope,
+      source: { logicalMemoryId: input.logicalMemoryId, title: "Conversation" },
+      team: { id: input.teamId, name: "Team" },
+      workspace: { id: input.teamWorkspaceId, name: "Workspace" },
+      exclusion: null
+    };
+    const read = vi.fn<
+      SharedMemoryRepository["getWorkspaceConversationExclusionReview"]
+    >(async (actor) => (actor.userId === fixture.ids.alice ? review : null));
+    fixture.repository.getWorkspaceConversationExclusionReview = read;
+    const exclusion = {
+      id: randomUUID(),
+      ...input,
+      ownerUserId: fixture.ids.alice,
+      version: 1,
+      state: "excluded" as const,
+      excludedAt: iso,
+      restoredAt: null,
+      updatedAt: iso
+    };
+    const mutate = vi.fn<
+      SharedMemoryRepository["excludeWorkspaceConversation"]
+    >(async () => exclusion);
+    fixture.repository.excludeWorkspaceConversation = mutate;
+    const app = await buildTestServer(fixture);
+    try {
+      const reviewed = await app.inject({
+        method: "POST",
+        url: "/v1/shared-memory/workspace-exclusions/review",
+        headers: sessionHeaders(fixture.ids.alice),
+        payload: input
+      });
+      expect(reviewed.statusCode).toBe(200);
+      expect(jsonBody(reviewed)).toEqual({ review });
+      const payload = {
+        mutationId: randomUUID(),
+        scope,
+        authority: authority()
+      };
+      const applied = await app.inject({
+        method: "POST",
+        url: "/v1/shared-memory/workspace-exclusions",
+        headers: sessionHeaders(fixture.ids.alice),
+        payload
+      });
+      expect(applied.statusCode).toBe(200);
+      expect(jsonBody(applied)).toEqual({ exclusion });
+      expect(mutate).toHaveBeenCalledExactlyOnceWith(
+        { userId: fixture.ids.alice },
+        {
+          ...payload,
+          authority: {
+            ...authority(),
+            referenceId: fixture.ids.sessionAuthority
+          }
+        }
+      );
+      for (const url of [
+        "/v1/shared-memory/workspace-exclusions/review",
+        "/v1/shared-memory/workspace-exclusions"
+      ]) {
+        const denied = await app.inject({
+          method: "POST",
+          url,
+          headers: { authorization: "Bearer personal-token" },
+          payload: {}
+        });
+        expect(denied.statusCode).toBe(403);
+      }
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(mutate).toHaveBeenCalledTimes(1);
+      mutate.mockResolvedValue({
+        ...exclusion,
+        teamWorkspaceId: fixture.ids.workspaceB
+      });
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: "/v1/shared-memory/workspace-exclusions",
+            headers: sessionHeaders(fixture.ids.alice),
+            payload: { ...payload, mutationId: randomUUID() }
+          })
+        ).statusCode
+      ).toBe(403);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("reviews rule detail for its owner and requires device approval for the exact amendment", async () => {
+    const fixture = createFixture(),
+      ruleId = randomUUID();
+    const review = sharingRuleDetailReviewSchema.parse({
+      ruleId,
+      teamId: fixture.ids.teamA,
+      teamWorkspaceId: fixture.ids.workspaceA,
+      selectorKind: "folder",
+      state: "paused",
+      maximumFidelity: "lcm_rollups",
+      includeCuratedMemory: false,
+      previousMaximumFidelity: "lcm_leaves",
+      previousIncludeCuratedMemory: false,
+      expectedAuthorityVersion: 3,
+      publisherFence: 1,
+      teamPolicyVersion: 1,
+      teamPolicyHash: hash,
+      workspacePolicyVersion: 1,
+      workspacePolicyHash: hash,
+      effectivePrivacyPolicyHash: hash,
+      policyBindingHash: hash,
+      memberBindingHash: hash,
+      memberCount: 2,
+      ownerPolicyExpansionCount: 0,
+      disclosureIncrease: false,
+      teamName: "Koed Team",
+      workspaceName: "Engineering",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      reviewHash: hash
+    });
+    const read = vi.fn<SharedMemoryRepository["getSharingRuleDetailReview"]>(
+      async (actor) => (actor.userId === fixture.ids.alice ? review : null)
+    );
+    fixture.repository.getSharingRuleDetailReview = read;
+    const mutationId = randomUUID(),
+      approvedAt = new Date().toISOString();
+    const result = {
+      mutationId,
+      approvedAt,
+      ruleId,
+      state: "paused" as const,
+      authorityVersion: 4,
+      publisherFence: 1,
+      maximumFidelity: "lcm_rollups" as const,
+      includeCuratedMemory: false,
+      memberCount: 2
+    };
+    const amend = vi.fn<SharedMemoryRepository["amendSharingRuleDetail"]>(
+      async () => result
+    );
+    fixture.repository.amendSharingRuleDetail = amend;
+    const app = await buildTestServer(fixture);
+    try {
+      const reviewInput = {
+        teamId: fixture.ids.teamA,
+        teamWorkspaceId: fixture.ids.workspaceA,
+        maximumFidelity: "lcm_rollups",
+        includeCuratedMemory: false
+      };
+      const reviewed = await app.inject({
+        method: "POST",
+        url: `/v1/shared-memory/sharing-rules/${ruleId}/detail-review`,
+        headers: sessionHeaders(fixture.ids.alice),
+        payload: reviewInput
+      });
+      expect(reviewed.statusCode).toBe(200);
+      expect(jsonBody(reviewed)).toEqual({ review });
+      expect(read).toHaveBeenCalledExactlyOnceWith(
+        { userId: fixture.ids.alice },
+        { ...reviewInput, ruleId }
+      );
+      const reviewUrl = `/v1/shared-memory/sharing-rules/${ruleId}/detail-review`;
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: reviewUrl,
+            headers: sessionHeaders(fixture.ids.bob),
+            payload: reviewInput
+          })
+        ).statusCode
+      ).toBe(409);
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: reviewUrl,
+            headers: { authorization: "Bearer personal-token" },
+            payload: reviewInput
+          })
+        ).statusCode
+      ).toBe(403);
+      const url = `/v1/shared-memory/sharing-rules/${ruleId}/detail`;
+      const authority = {
+        action: SHARED_MEMORY_AUTHORITY,
+        source: "device_action_grant" as const,
+        referenceId: fixture.ids.actionGrantAuthority
+      };
+      const payload = { mutationId, review, authority };
+      for (const headers of [
+        sessionHeaders(fixture.ids.alice),
+        { authorization: "Bearer personal-token" },
+        { authorization: "Koed-Device owner-share:secret" },
+        {
+          authorization: "Koed-Device reader:secret",
+          "x-koed-action-grant": "hrg_test_shared_memory_secret"
+        }
+      ]) {
+        const denied = await app.inject({
+          method: "POST",
+          url,
+          headers,
+          payload
+        });
+        expect(denied.statusCode).toBe("cookie" in headers ? 401 : 403);
+      }
+      const headers = {
+        authorization: "Koed-Device owner-share:secret",
+        "x-koed-action-grant": "hrg_test_shared_memory_secret"
+      };
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: `/v1/shared-memory/sharing-rules/${randomUUID()}/detail`,
+            headers,
+            payload
+          })
+        ).statusCode
+      ).toBe(403);
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url,
+            headers,
+            payload: { ...payload, maximumFidelity: "memory_events" }
+          })
+        ).statusCode
+      ).toBe(400);
+      expect(amend).not.toHaveBeenCalled();
+      const accepted = await app.inject({
+        method: "POST",
+        url,
+        headers,
+        payload
+      });
+      expect(accepted.statusCode).toBe(200);
+      expect(jsonBody(accepted)).toEqual({ detailAmendment: result });
+      expect(amend).toHaveBeenCalledExactlyOnceWith(
+        { userId: fixture.ids.alice },
+        { mutationId, review, authority }
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each(["pause", "resume", "stop", "retry"] as const)(
+    "routes reviewed sharing rule %s with exact destination and versions",
+    async (controlAction) => {
+      const fixture = createFixture();
+      const ruleId = randomUUID(),
+        reasonId = randomUUID();
+      const controlled = {
+        ruleId,
+        reasonId,
+        shareGrantId: fixture.ids.grant,
+        state:
+          controlAction === "pause"
+            ? ("paused" as const)
+            : controlAction === "stop"
+              ? ("stopped" as const)
+              : ("active" as const),
+        authorityVersion: 4,
+        consentVersion: 4,
+        grantVersion: 8,
+        publisherFence: 1,
+        catchUpState:
+          controlAction === "resume" || controlAction === "retry"
+            ? ("queued" as const)
+            : ("idle" as const)
+      };
+      const control = vi
+        .fn<SharedMemoryRepository["controlConversationSharingRule"]>()
+        .mockResolvedValue(controlled);
+      fixture.repository.controlConversationSharingRule = control;
+      const app = await buildTestServer(fixture);
+      const payload = {
+        mutationId: randomUUID(),
+        reasonId,
+        shareGrantId: fixture.ids.grant,
+        teamId: fixture.ids.teamA,
+        teamWorkspaceId: fixture.ids.workspaceA,
+        expectedAuthorityVersion: 3,
+        expectedGrantVersion: 7,
+        controlAction,
+        authority: authority()
+      };
+      const response = await app.inject({
+        method: "POST",
+        url: `/v1/shared-memory/sharing-rules/${ruleId}/control`,
+        headers: sessionHeaders(fixture.ids.alice),
+        payload
+      });
+      expect(response.statusCode).toBe(200);
+      expect(jsonBody(response)).toEqual({ control: controlled });
+      expect(control).toHaveBeenCalledExactlyOnceWith(
+        { userId: fixture.ids.alice },
+        {
+          ruleId,
+          reasonId,
+          shareGrantId: fixture.ids.grant,
+          mutationId: payload.mutationId,
+          expectedAuthorityVersion: 3,
+          expectedGrantVersion: 7,
+          action: controlAction,
+          destination: {
+            teamId: fixture.ids.teamA,
+            teamWorkspaceId: fixture.ids.workspaceA
+          },
+          authority: {
+            ...authority(),
+            referenceId: fixture.ids.sessionAuthority
+          }
+        }
+      );
+      await app.close();
+    }
+  );
+
+  it("rejects API Tokens, unapproved devices and malformed sharing rule controls before mutation", async () => {
+    const fixture = createFixture();
+    const control =
+      vi.fn<SharedMemoryRepository["controlConversationSharingRule"]>();
+    fixture.repository.controlConversationSharingRule = control;
+    const app = await buildTestServer(fixture);
+    const url = `/v1/shared-memory/sharing-rules/${randomUUID()}/control`;
+    const payload = {
+      mutationId: randomUUID(),
+      reasonId: randomUUID(),
+      shareGrantId: fixture.ids.grant,
+      teamId: fixture.ids.teamA,
+      teamWorkspaceId: fixture.ids.workspaceA,
+      expectedAuthorityVersion: 3,
+      expectedGrantVersion: 7,
+      controlAction: "stop",
+      authority: authority()
+    };
+    const bearer = await app.inject({
+      method: "POST",
+      url,
+      headers: { authorization: "Bearer personal-token" },
+      payload: {}
+    });
+    const malformed = await app.inject({
+      method: "POST",
+      url,
+      headers: sessionHeaders(fixture.ids.alice),
+      payload: { ...payload, expectedGrantVersion: 0 }
+    });
+    const extra = await app.inject({
+      method: "POST",
+      url,
+      headers: sessionHeaders(fixture.ids.alice),
+      payload: { ...payload, maximumFidelity: "memory_events" }
+    });
+    const devicePayload = {
+      ...payload,
+      authority: {
+        action: SHARED_MEMORY_AUTHORITY,
+        source: "device_action_grant",
+        referenceId: fixture.ids.actionGrantAuthority
+      }
+    };
+    const unapproved = await app.inject({
+      method: "POST",
+      url,
+      headers: { authorization: "Koed-Device owner-share:secret" },
+      payload: devicePayload
+    });
+    const wrongGrant = await app.inject({
+      method: "POST",
+      url,
+      headers: {
+        authorization: "Koed-Device owner-share:secret",
+        "x-koed-action-grant": "invalid-grant"
+      },
+      payload: devicePayload
+    });
+    const readOnly = await app.inject({
+      method: "POST",
+      url,
+      headers: {
+        authorization: "Koed-Device reader:secret",
+        "x-koed-action-grant": "hrg_test_shared_memory_secret"
+      },
+      payload: devicePayload
+    });
+    expect([
+      bearer.statusCode,
+      malformed.statusCode,
+      extra.statusCode,
+      unapproved.statusCode,
+      wrongGrant.statusCode,
+      readOnly.statusCode
+    ]).toEqual([403, 400, 400, 403, 403, 403]);
+    expect(control).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("reviews and explicitly updates an owned Project snapshot without accepting another Workspace", async () => {
+    const fixture = createFixture();
+    const app = await buildTestServer(fixture);
+    const url = `/v1/shared-memory/share-grants/${fixture.ids.grant}/repository-snapshot`;
+    const preview = await app.inject({
+      method: "GET",
+      url: `${url}/review`,
+      headers: sessionHeaders(fixture.ids.alice)
+    });
+    expect(preview.statusCode).toBe(200);
+    const review = teamRepositorySnapshotReviewSchema.parse(
+      jsonBody<{ review: unknown }>(preview).review
+    );
+    const payload = {
+      mutationId: randomUUID(),
+      teamId: fixture.ids.teamA,
+      teamWorkspaceId: fixture.ids.workspaceA,
+      expected: review,
+      authority: { action: SHARED_MEMORY_AUTHORITY, source: "browser_session" }
+    };
+    const before = fixture.repositoryCalls;
+    const wrong = await app.inject({
+      method: "POST",
+      url,
+      headers: sessionHeaders(fixture.ids.alice),
+      payload: { ...payload, teamWorkspaceId: fixture.ids.workspaceB }
+    });
+    expect(wrong.statusCode).toBe(409);
+    expect(fixture.repositoryCalls).toBe(before);
+    const update = await app.inject({
+      method: "POST",
+      url,
+      headers: sessionHeaders(fixture.ids.alice),
+      payload
+    });
+    expect(update.statusCode).toBe(200);
+    expect(
+      jsonBody<{
+        grant: { repositorySnapshot: unknown; grantVersion: number };
+      }>(update).grant
+    ).toMatchObject({
+      repositorySnapshot: review.currentSnapshot,
+      grantVersion: 2
+    });
+    const stale = await app.inject({
+      method: "POST",
+      url,
+      headers: sessionHeaders(fixture.ids.alice),
+      payload: { ...payload, mutationId: randomUUID() }
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `${url}/review`,
+          headers: sessionHeaders(fixture.ids.bob)
+        })
+      ).statusCode
+    ).toBe(403);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `${url}/review`,
+          headers: { authorization: "Bearer personal-api-token" }
+        })
+      ).statusCode
+    ).toBe(403);
+    await app.close();
+  });
+
   it("requires device-bound provenance for candidate admission", async () => {
     const fixture = createFixture();
     const app = await buildTestServer(fixture);

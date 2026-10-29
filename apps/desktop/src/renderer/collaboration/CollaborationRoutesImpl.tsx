@@ -1,4 +1,11 @@
+import { SharingRulePublisherReview } from "./SharingRulePublisherReview.js";
+import { RepositorySharingRules } from "./RepositorySharingRules.js";
+import { SnapshotConversionReview } from "./SnapshotConversionReview.js";
+import { SharingRuleDetailReview } from "./SharingRuleDetailReview.js";
 import {
+  type SharingRuleDelivery,
+  type ConversationSharingRuleControlIntent,
+  type OwnedSharingReason,
   type CollaborationSelection,
   type CollaborationSnapshot,
   type CollaborationThread,
@@ -14,6 +21,7 @@ import {
   type SharedMemorySourcePage
 } from "@koed/shared/collaboration";
 import type { PersonalDesktopNote } from "@koed/shared/personal-desktop";
+import type { DesktopProject } from "../../project-memory-ui.js";
 import {
   LcmSummaryFrame,
   MemoryEventFrame,
@@ -41,7 +49,6 @@ import {
   MessageSquare,
   Network,
   Pause,
-  Pencil,
   Play,
   RefreshCw,
   ToolCase,
@@ -56,11 +63,15 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState
 } from "react";
 
-import { type CollaborationRendererClient } from "../../collaboration/renderer-client.js";
+import {
+  CollaborationClientError,
+  type CollaborationRendererClient
+} from "../../collaboration/renderer-client.js";
 import { sharedMemoryConversationEvents } from "../../collaboration/shared-memory-conversation.js";
 import {
   ConversationRows,
@@ -86,12 +97,31 @@ import {
   utf8ByteLength
 } from "./collaboration-primitives.js";
 import { PeopleView } from "./PeopleView.js";
+import {
+  SharingDetailChoices,
+  SharingRow,
+  SharingMoreActions,
+  sharingDetailTitle
+} from "./SharingControls.js";
+import {
+  OwnedShareRules,
+  ownedSharingReasonChangePending,
+  ownedSharingRuleTitle
+} from "./OwnedShareRules.js";
+import { OwnedSharingReasons } from "./OwnedSharingReasons.js";
+import { SharingRuleDeliveryStatus } from "./SharingRuleDeliveryStatus.js";
+import { GitAnchorSharingReview } from "./GitAnchorSharingReview.js";
 import { type DraftAuthority } from "../state/drafts.js";
 import "../../collaboration.css";
 
 export { PeopleView };
 
 export type CollaborationModalState =
+  | {
+      kind: "review_git_anchor_sharing";
+      selectionTitle?: string;
+      target: import("@koed/shared/collaboration").GitAnchorSharingReviewInput["target"];
+    }
   | { kind: "create_or_join" }
   | { kind: "create_team" }
   | { kind: "join_team" }
@@ -144,6 +174,9 @@ export const modalIsAuthorized = (
       )
     );
   }
+  if (modal.kind === "review_git_anchor_sharing")
+    return snapshot.connection.state === "live";
+
   if (modal.kind === "share_personal_memory") {
     const snapshotEntry = snapshot.navigation.personal.memory.some(
       (entry) => entry.id === modal.sessionId
@@ -279,6 +312,20 @@ const pendingShareStageLabel = (stage: PendingShare["stage"]): string => {
   return "complete";
 };
 
+const pendingSharePrivacyProgressLabel = (share: PendingShare): string => {
+  const progress = share.privacyProgress;
+  if (!progress || share.state !== "preparing") return "";
+  const count =
+    progress.totalChunks === null
+      ? ""
+      : ` ${progress.completedChunks} of ${progress.totalChunks} chunks saved.`;
+  if (progress.state === "retrying")
+    return ` Waiting to retry Privacy filtering.${count}`;
+  if (progress.state === "queued")
+    return ` Queued for Privacy filtering.${count}`;
+  return ` Privacy filtering in progress.${count}`;
+};
+
 const liveStateLabel = (value: SharedMemorySession["liveState"]): string =>
   value === "live"
     ? "Live"
@@ -379,13 +426,52 @@ function PersonalMemoryProjectsView({
   );
 }
 
-type OwnedShareSection = "pending" | "active" | "revoked";
+type OwnedShareSection = "pending" | "active" | "revoked" | "excluded";
 
 const ownedShareRecord = (item: OwnedShareItem) =>
   item.kind === "pending" ? item.pendingShare : item.grant;
 
+const ownedShareGrantBinding = (item: OwnedShareItem) =>
+  item.kind === "grant"
+    ? { shareGrantId: item.grant.id, grantVersion: item.grant.grantVersion }
+    : item.pendingShare.grantId && item.pendingShare.grantVersion
+      ? {
+          shareGrantId: item.pendingShare.grantId,
+          grantVersion: item.pendingShare.grantVersion
+        }
+      : null;
+const loadOwnedSharePages = async (
+  client: CollaborationRendererClient,
+  history: boolean
+): Promise<OwnedShareItem[]> => {
+  const shares: OwnedShareItem[] = [];
+  let cursor: string | null = null;
+  for (let index = 0; index < 100; index += 1) {
+    const page = await client.listOwnedShares({ cursor, limit: 100, history });
+    shares.push(...page.shares);
+    if (!page.nextCursor) return shares;
+    cursor = page.nextCursor;
+  }
+  throw new Error("Owned Shares pagination exceeded its bounded page limit");
+};
+
 const ownedShareKey = (item: OwnedShareItem): string =>
   `${item.kind}:${ownedShareRecord(item).id}`;
+
+const ownerSharingOperationKey = (
+  intent: SharingRuleDelivery["intent"]
+): string =>
+  "scope" in intent
+    ? `workspace:${intent.scope.logicalMemoryId}:${intent.scope.teamWorkspaceId}`
+    : `rule:${intent.ruleId}`;
+const ownerSharingOperationGrant = (
+  intent: SharingRuleDelivery["intent"]
+): string | null =>
+  "scope" in intent
+    ? intent.scope.shareGrantId
+    : "shareGrantId" in intent
+      ? intent.shareGrantId
+      : null;
 
 const ownedShareRepresentation = (
   item: OwnedShareItem
@@ -395,6 +481,25 @@ const ownedShareRepresentation = (
     : item.grant.activationRepresentation;
 
 const ownedShareSection = (item: OwnedShareItem): OwnedShareSection => {
+  if (item.summary.workspaceExclusion?.state === "excluded") return "excluded";
+  if (
+    item.sourceAccess?.lifecycle !== "active" &&
+    item.summary.sharingReasons.length > 0 &&
+    item.summary.sharingReasons.every(
+      (reason) =>
+        reason.updateState === "stopped" || reason.updateState === "expired"
+    )
+  )
+    return "revoked";
+  if (
+    item.kind === "pending" &&
+    item.pendingShare.state === "revoked" &&
+    item.summary.workspaceContentAccess === "available" &&
+    item.summary.sharingReasons.some((reason) =>
+      ["active", "paused", "fixed_snapshot"].includes(reason.updateState)
+    )
+  )
+    return "active";
   if (
     (item.kind === "pending" && item.pendingShare.state === "revoked") ||
     (item.kind === "grant" &&
@@ -415,6 +520,47 @@ const ownedShareSection = (item: OwnedShareItem): OwnedShareSection => {
 };
 
 const ownedShareStatus = (item: OwnedShareItem): string => {
+  if (item.summary.workspaceExclusion?.state === "excluded")
+    return "Excluded from Workspace";
+  if (
+    item.kind === "pending" &&
+    item.pendingShare.redactedFailureCode === "workspace_restoring"
+  )
+    return "Preparing eligible sharing";
+  if (item.kind === "pending") {
+    if (["failed", "needs_attention"].includes(item.pendingShare.state))
+      return "Needs attention";
+    if (item.pendingShare.sourceUpdateState === "failed")
+      return "Update needs attention";
+    if (item.pendingShare.state === "preparing") {
+      const stage = pendingShareStageLabel(item.pendingShare.stage);
+      return stage[0]!.toUpperCase() + stage.slice(1);
+    }
+  }
+  const reasons = item.summary.sharingReasons;
+  if (reasons.some((reason) => reason.updateState === "active"))
+    return reasons.some(
+      (reason) => reason.rule?.catchUpState === "needs_attention"
+    )
+      ? "Update needs attention"
+      : "Sharing updates";
+  if (reasons.some((reason) => reason.updateState === "paused"))
+    return "Updates paused";
+  if (reasons.some((reason) => reason.updateState === "fixed_snapshot"))
+    return "Shared snapshot";
+  if (
+    reasons.length > 0 &&
+    reasons.every((reason) => reason.updateState === "expired")
+  )
+    return "Consent expired";
+  if (
+    reasons.length > 0 &&
+    reasons.every(
+      (reason) =>
+        reason.updateState === "stopped" || reason.updateState === "expired"
+    )
+  )
+    return "Sharing stopped";
   if (item.kind === "grant") {
     return item.grant.lifecycle === "active"
       ? item.summary.mode === "continuous"
@@ -437,91 +583,17 @@ const ownedShareStatus = (item: OwnedShareItem): string => {
 };
 
 const ownedShareHasError = (item: OwnedShareItem): boolean =>
+  item.summary.workspaceExclusion?.state !== "excluded" &&
   item.kind === "pending" &&
+  item.pendingShare.redactedFailureCode !== "workspace_restoring" &&
   (item.pendingShare.redactedFailureCode !== null ||
     item.pendingShare.state === "failed" ||
     item.pendingShare.state === "needs_attention" ||
     item.pendingShare.sourceUpdateState === "failed");
 
-function OwnedSharePreview({
-  markdownAdapters,
-  preview,
-  state,
-  authorizedRevision
-}: {
-  markdownAdapters: MarkdownPlatformAdapters;
-  preview: SharedMemoryPreview | SharedMemoryCandidatePreview | null;
-  state: "idle" | "loading" | "ready" | "failed";
-  authorizedRevision: number | null;
-}) {
-  if (state === "loading") {
-    return (
-      <StateView
-        icon={<LoaderCircle className="collab-spin" />}
-        title="Loading source preview"
-      />
-    );
-  }
-  if (state === "failed") {
-    return (
-      <StateView
-        icon={<CircleAlert />}
-        title="Source preview unavailable"
-        message="The share settings are still available from Modify."
-      />
-    );
-  }
-  if (!preview || preview.items.length === 0) {
-    return (
-      <StateView
-        icon={<BookOpen />}
-        title="Nothing to preview"
-        message="This shared representation does not currently contain previewable items."
-      />
-    );
-  }
-  const exact = "previewHash" in preview;
-  const revisionChanged =
-    !exact &&
-    authorizedRevision !== null &&
-    authorizedRevision !== preview.sourceRevision;
-  return (
-    <div className="collab-share-preview-body">
-      <p className="collab-share-preview-notice">
-        This owner-only view shows your Personal source. Team members receive a
-        separately privacy-filtered representation.
-      </p>
-      {revisionChanged ? (
-        <p className="collab-share-preview-notice" role="status">
-          This source is now at revision {preview.sourceRevision}. Revision{" "}
-          {authorizedRevision} was authorized for this share.
-        </p>
-      ) : null}
-      {preview.activationRepresentation === "memory_events" ? (
-        <div className="shared-conversation-preview">
-          <ConversationRows
-            events={sharedMemoryConversationEvents(preview.items)}
-            markdownAdapters={markdownAdapters}
-            scope="workspace"
-          />
-        </div>
-      ) : (
-        <ol className="collab-source-list collab-owned-share-preview-list">
-          {preview.items.map((item) => (
-            <SourceItemRow
-              item={item}
-              key={item.id}
-              markdownAdapters={markdownAdapters}
-            />
-          ))}
-        </ol>
-      )}
-    </div>
-  );
-}
-
 function OwnedSharesWorkspace({
   client,
+  localProjects,
   initialShareKey,
   markdownAdapters,
   onAvailabilityChange,
@@ -529,13 +601,21 @@ function OwnedSharesWorkspace({
   snapshot
 }: {
   client: CollaborationRendererClient;
+  localProjects?: readonly DesktopProject[];
   initialShareKey?: string;
   markdownAdapters: MarkdownPlatformAdapters;
   onAvailabilityChange?: (unavailable: boolean) => void;
   onSelectShare?: (shareKey: string) => void;
   snapshot: CollaborationSnapshot;
 }) {
+  const sourceAccessGroupName = useId();
   const [ownedShares, setOwnedShares] = useState<OwnedShareItem[]>([]);
+  const [ruleDeliveries, setRuleDeliveries] = useState<SharingRuleDelivery[]>(
+    []
+  );
+  const [ruleDeliveryRevision, setRuleDeliveryRevision] = useState(0);
+  const seenRuleAcknowledgments = useRef(new Set<string>());
+
   const [sharesState, setSharesState] = useState<
     "loading" | "ready" | "failed"
   >("loading");
@@ -550,10 +630,19 @@ function OwnedSharesWorkspace({
     Boolean(initialShareKey)
   );
   const [query, setQuery] = useState("");
+  const [sharesTab, setSharesTab] = useState<"conversations" | "rules">(
+    "conversations"
+  );
+  const [sourceAccessMode, setSourceAccessMode] = useState<
+    "none" | "snapshot" | "continuous"
+  >("none");
   const [shareAnnouncement, setShareAnnouncement] = useState("");
   const [shareEventRevision, setShareEventRevision] = useState(0);
   const [modifyShareKey, setModifyShareKey] = useState<string | null>(null);
   const [revokeShareKey, setRevokeShareKey] = useState<string | null>(null);
+  const [directStopConsentId, setDirectStopConsentId] = useState<string | null>(
+    null
+  );
   const revokeApprovalBaselineRef = useRef<ReadonlySet<string> | null>(null);
   const shareRowRefs = useRef(new Map<string, HTMLButtonElement>());
   const lastFocusedShareKeyRef = useRef<string | null>(null);
@@ -568,7 +657,6 @@ function OwnedSharesWorkspace({
   const [previewState, setPreviewState] = useState<
     "idle" | "loading" | "ready" | "failed"
   >("idle");
-  const [loadingMorePreview, setLoadingMorePreview] = useState(false);
   const [sourceSyncState, setSourceSyncState] = useState<
     PersonalMemoryEntry["syncState"] | null
   >(null);
@@ -583,57 +671,74 @@ function OwnedSharesWorkspace({
     promise: ReturnType<CollaborationRendererClient["getOwnedShare"]>;
   } | null>(null);
 
+  const acknowledgeRuleDelivery = useCallback(
+    (mutationId: string, shareGrantId: string | null) => {
+      if (seenRuleAcknowledgments.current.has(mutationId)) return;
+      seenRuleAcknowledgments.current.add(mutationId);
+      detailRequestRef.current = null;
+      setPreview(null);
+      setOwnedShares((current) =>
+        current.map((item) =>
+          ownedShareGrantBinding(item)?.shareGrantId === shareGrantId
+            ? { ...item, preview: null }
+            : item
+        )
+      );
+      setShareEventRevision((revision) => revision + 1);
+    },
+    []
+  );
+
+  const rememberShareFocus = useCallback(() => {
+    for (const [shareKey, row] of shareRowRefs.current) {
+      if (row === document.activeElement) {
+        shareFocusRestoreKeyRef.current = shareKey;
+        return;
+      }
+    }
+    if (
+      document.activeElement instanceof HTMLElement &&
+      document.activeElement.matches("[data-route-focus='main']")
+    ) {
+      shareFocusRestoreKeyRef.current = lastFocusedShareKeyRef.current;
+    }
+  }, []);
+
   useEffect(
     () =>
       client.subscribe((_next, update) => {
+        if (update.sharingRuleDeliveryAcknowledged)
+          acknowledgeRuleDelivery(
+            update.sharingRuleDeliveryAcknowledged.mutationId,
+            update.sharingRuleDeliveryAcknowledged.shareGrantId
+          );
         if (
           (update.kind === "realtime" &&
             update.realtimeUpdate?.type === "owned_share_status_changed") ||
           update.authoritativeRecovery === true
         ) {
-          for (const [shareKey, row] of shareRowRefs.current) {
-            if (row === document.activeElement) {
-              shareFocusRestoreKeyRef.current = shareKey;
-              break;
-            }
-          }
-          if (
-            !shareFocusRestoreKeyRef.current &&
-            document.activeElement instanceof HTMLElement &&
-            document.activeElement.matches("[data-route-focus='main']")
-          ) {
-            shareFocusRestoreKeyRef.current = lastFocusedShareKeyRef.current;
-          }
+          rememberShareFocus();
           setShareEventRevision((revision) => revision + 1);
         }
       }),
-    [client]
+    [client, acknowledgeRuleDelivery, rememberShareFocus]
   );
 
   useEffect(() => {
     let active = true;
-    const loadAllPages = async (history: boolean) => {
-      const shares: OwnedShareItem[] = [];
-      let cursor: string | null = null;
-      for (let pageIndex = 0; pageIndex < 100; pageIndex += 1) {
-        const page = await client.listOwnedShares({
-          cursor,
-          limit: 100,
-          history
-        });
-        shares.push(...page.shares);
-        if (!page.nextCursor) return shares;
-        cursor = page.nextCursor;
-      }
-      throw new Error(
-        "Owned Shares pagination exceeded its bounded page limit"
-      );
+    let refreshTimer: number | undefined;
+    let failures = 0;
+    const scheduleRefresh = (delayMs: number) => {
+      refreshTimer = window.setTimeout(() => {
+        rememberShareFocus();
+        void loadShares();
+      }, delayMs);
     };
     const loadShares = async () => {
       try {
         const [current, history] = await Promise.all([
-          loadAllPages(false),
-          loadAllPages(true)
+          loadOwnedSharePages(client, false),
+          loadOwnedSharePages(client, true)
         ]);
         if (!active) return;
         const nextShares = [
@@ -671,15 +776,46 @@ function OwnedSharesWorkspace({
           });
         });
         setSharesState("ready");
-      } catch {
-        if (active) setSharesState("failed");
+        failures = 0;
+        // A local Personal subscription cannot always receive the Team
+        // Backend's owner-only completion event. Follow pending and continuous work.
+        if (
+          nextShares.some(
+            (item) =>
+              (item.kind === "pending" &&
+                item.pendingShare.state === "preparing") ||
+              item.summary.sharingReasons.some(
+                (reason) => reason.updateState === "active"
+              )
+          )
+        ) {
+          scheduleRefresh(5_000);
+        }
+      } catch (error) {
+        if (!active) return;
+        setSharesState("failed");
+        if (error instanceof CollaborationClientError && error.retryable) {
+          scheduleRefresh(
+            Math.max(
+              Math.min(1_000 * 2 ** failures, 30_000),
+              error.retryAfterMs ?? 0
+            )
+          );
+          failures = Math.min(failures + 1, 5);
+        }
       }
     };
     void loadShares();
     return () => {
       active = false;
+      window.clearTimeout(refreshTimer);
     };
-  }, [client, shareEventRevision, snapshot.snapshotRevision]);
+  }, [
+    client,
+    shareEventRevision,
+    snapshot.snapshotRevision,
+    rememberShareFocus
+  ]);
 
   useEffect(() => {
     const shareKey = shareFocusRestoreKeyRef.current;
@@ -722,6 +858,57 @@ function OwnedSharesWorkspace({
   const selectedShare = ownedShares.find(
     (item) => ownedShareKey(item) === selectedShareKey
   );
+  const selectedRuleGrantId = selectedShare
+    ? ownedShareGrantBinding(selectedShare)?.shareGrantId
+    : undefined;
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      try {
+        const recent = await client.listSharingRuleDeliveries({});
+        const selected = selectedRuleGrantId
+          ? await client.listSharingRuleDeliveries({
+              shareGrantId: selectedRuleGrantId
+            })
+          : [];
+        if (!active) return;
+        const next = [
+          ...new Map(
+            [...recent, ...selected].map((delivery) => [
+              delivery.intent.mutationId,
+              delivery
+            ])
+          ).values()
+        ];
+        setRuleDeliveries((current) =>
+          JSON.stringify(current) === JSON.stringify(next) ? current : next
+        );
+        for (const delivery of next) {
+          if (delivery.state === "acknowledged")
+            acknowledgeRuleDelivery(
+              delivery.intent.mutationId,
+              ownerSharingOperationGrant(delivery.intent)
+            );
+        }
+        if (next.some((delivery) => delivery.state === "queued"))
+          timer = setTimeout(() => void poll(), 2000);
+      } catch {
+        if (active) timer = setTimeout(() => void poll(), 5000);
+      }
+    };
+    void poll();
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [
+    client,
+    selectedRuleGrantId,
+    ruleDeliveryRevision,
+    acknowledgeRuleDelivery
+  ]);
+
   const selectedSharePreviewRevision = selectedShare
     ? `${selectedShare.summary.authorizedPreview?.previewHash ?? "none"}:${ownedShareRecord(selectedShare).sourceRevision}`
     : "none";
@@ -751,7 +938,10 @@ function OwnedSharesWorkspace({
           )?.syncState ?? null)
         : null
     );
-    if (listedShare.summary.workspaceContentAccess === "unavailable") {
+    if (
+      listedShare.summary.workspaceContentAccess === "unavailable" ||
+      listedShare.summary.workspaceExclusion?.state === "excluded"
+    ) {
       setPreview(null);
       setPreviewState("ready");
       return;
@@ -775,20 +965,7 @@ function OwnedSharesWorkspace({
           setPreviewState("ready");
           return;
         }
-        const representation = ownedShareRepresentation(detail);
-        const record = ownedShareRecord(detail);
-        if (!record.source || !representation) {
-          setPreview(null);
-          setPreviewState("failed");
-          return;
-        }
-        const candidate = await client.previewSharedMemoryCandidate({
-          source: record.source,
-          activationRepresentation: representation,
-          mode: record.mode
-        });
-        if (!active) return;
-        setPreview(candidate);
+        setPreview(null);
         setPreviewState("ready");
       })
       .catch(() => {
@@ -808,7 +985,8 @@ function OwnedSharesWorkspace({
     client,
     selectedShareKey,
     selectedSharePreviewRevision,
-    snapshot.snapshotRevision
+    snapshot.snapshotRevision,
+    shareEventRevision
   ]);
 
   const runOperation = useCallback(async (operation: () => Promise<void>) => {
@@ -851,13 +1029,13 @@ function OwnedSharesWorkspace({
   }, [client]);
 
   const openSourceReview = useCallback(
-    async (sessionId: string) => {
+    async (sessionId: string, sourceTitle: string) => {
       await runOperation(async () => {
         const entry =
           snapshot.navigation.personal.memory.find(
             (candidate) => candidate.id === sessionId
           ) ?? (await client.prepareSharedMemorySource({ sessionId }));
-        setSourceReviewEntry(entry);
+        setSourceReviewEntry({ ...entry, title: sourceTitle });
         setModifyShareKey(null);
       });
     },
@@ -885,32 +1063,42 @@ function OwnedSharesWorkspace({
           snapshot.navigation.personal.memory.find(
             (candidate) => candidate.id === sessionId
           ) ?? (await client.prepareSharedMemorySource({ sessionId }));
-        setDetailChange({ entry, share });
+        setDetailChange({
+          entry: { ...entry, title: share.summary.sourceTitle },
+          share
+        });
         setModifyShareKey(null);
       });
     },
     [client, runOperation, snapshot.navigation.personal.memory]
   );
 
-  const loadMorePreview = useCallback(async () => {
-    if (!preview || !("previewHash" in preview) || !preview.nextCursor) return;
-    setLoadingMorePreview(true);
-    try {
-      const page = await client.loadSharedMemoryPreviewPage({
-        previewHash: preview.previewHash,
-        cursor: preview.nextCursor
-      });
-      const items = new Map(preview.items.map((item) => [item.id, item]));
-      for (const item of page.items) items.set(item.id, item);
-      setPreview({ ...page, items: [...items.values()] });
-    } catch (cause) {
-      setOperationError(
-        failureMessage(cause, "More shared preview items could not be loaded.")
-      );
-    } finally {
-      setLoadingMorePreview(false);
-    }
-  }, [client, preview]);
+  const refreshSharingReasons = useCallback(
+    async (item: OwnedShareItem) => {
+      try {
+        const detail = await client.getOwnedShare({
+          kind: item.kind,
+          id: ownedShareRecord(item).id
+        });
+        setOwnedShares((current) =>
+          current.map((entry) =>
+            ownedShareKey(entry) === ownedShareKey(item)
+              ? {
+                  ...entry,
+                  summary: detail.summary,
+                  sourceAccess: detail.sourceAccess
+                }
+              : entry
+          )
+        );
+      } catch {
+        setOperationError(
+          "Sharing changed, but its explanation could not be refreshed. Reload Shares."
+        );
+      }
+    },
+    [client]
+  );
 
   const controlConversationSource = useCallback(
     async (
@@ -1027,10 +1215,11 @@ function OwnedSharesWorkspace({
       setShareAnnouncement(
         `${item.summary.sourceTitle}: Workspace access revoked`
       );
+      await refreshSharingReasons(item);
       setModifyShareKey(null);
       setRevokeShareKey(null);
     },
-    [client]
+    [client, refreshSharingReasons]
   );
 
   const confirmRevokeShare = useCallback(
@@ -1048,6 +1237,132 @@ function OwnedSharesWorkspace({
     [client, revokeShare, runOperation]
   );
 
+  const controlRule = async (
+    reason: OwnedSharingReason,
+    controlAction: ConversationSharingRuleControlIntent["controlAction"]
+  ) => {
+    const binding = selectedShare
+      ? ownedShareGrantBinding(selectedShare)
+      : null;
+    if (!selectedShare || !binding || !reason.rule) return;
+    const record = ownedShareRecord(selectedShare);
+    await runOperation(async () => {
+      const delivery =
+        reason.rule!.selectorKind !== "captured_session"
+          ? await client.controlRepositoryRule({
+              selectorKind: "selection",
+              mutationId: crypto.randomUUID(),
+              teamId: record.teamId,
+              workspaceId: record.workspaceId,
+              ruleId: reason.rule!.id,
+              expectedAuthorityVersion: reason.rule!.authorityVersion,
+              publisherFence: reason.rule!.publisherFence,
+              controlAction
+            })
+          : await client.controlSharingRule({
+              mutationId: crypto.randomUUID(),
+              teamId: record.teamId,
+              workspaceId: record.workspaceId,
+              shareGrantId: binding.shareGrantId,
+              ruleId: reason.rule!.id,
+              reasonId: reason.id,
+              expectedAuthorityVersion: reason.rule!.authorityVersion,
+              expectedGrantVersion: binding.grantVersion,
+              controlAction
+            });
+      setRuleDeliveries((current) => [
+        ...current.filter(
+          (item) =>
+            ownerSharingOperationKey(item.intent) !==
+            ownerSharingOperationKey(delivery.intent)
+        ),
+        delivery
+      ]);
+      setRuleDeliveryRevision((revision) => revision + 1);
+      if (delivery.state === "acknowledged")
+        acknowledgeRuleDelivery(
+          delivery.intent.mutationId,
+          ownerSharingOperationGrant(delivery.intent)
+        );
+    });
+  };
+  const excludeConversation = async (item: OwnedShareItem) => {
+    const record = ownedShareRecord(item);
+    await runOperation(async () => {
+      const review = await client.reviewWorkspaceExclusion({
+        logicalMemoryId: item.summary.source.logicalMemoryId,
+        teamId: record.teamId,
+        teamWorkspaceId: record.workspaceId
+      });
+      const delivery = await client.excludeConversationFromWorkspace({
+        mutationId: crypto.randomUUID(),
+        scope: review.scope
+      });
+      setRuleDeliveries((current) => [
+        ...current.filter(
+          (entry) =>
+            ownerSharingOperationKey(entry.intent) !==
+            ownerSharingOperationKey(delivery.intent)
+        ),
+        delivery
+      ]);
+      setRuleDeliveryRevision((revision) => revision + 1);
+      if (delivery.state === "acknowledged")
+        acknowledgeRuleDelivery(
+          delivery.intent.mutationId,
+          ownerSharingOperationGrant(delivery.intent)
+        );
+      setShareAnnouncement(
+        delivery.state === "acknowledged"
+          ? `${item.summary.sourceTitle}: excluded from ${item.summary.workspaceName}`
+          : "Workspace exclusion requested. Waiting for Team acknowledgment; access may remain until acknowledged."
+      );
+    });
+  };
+  const restoreConversation = async (item: OwnedShareItem) => {
+    const record = ownedShareRecord(item);
+    await runOperation(async () => {
+      const restoration = await client.reviewWorkspaceRestoration({
+        logicalMemoryId: item.summary.source.logicalMemoryId,
+        teamId: record.teamId,
+        teamWorkspaceId: record.workspaceId
+      });
+      const delivery = await client.restoreConversationToWorkspace({
+        mutationId: crypto.randomUUID(),
+        scope: restoration.scope,
+        restoration
+      });
+      setRuleDeliveries((current) => [
+        ...current.filter(
+          (entry) =>
+            ownerSharingOperationKey(entry.intent) !==
+            ownerSharingOperationKey(delivery.intent)
+        ),
+        delivery
+      ]);
+      setRuleDeliveryRevision((revision) => revision + 1);
+      if (delivery.state === "acknowledged")
+        acknowledgeRuleDelivery(
+          delivery.intent.mutationId,
+          ownerSharingOperationGrant(delivery.intent)
+        );
+      setShareAnnouncement(
+        delivery.state === "acknowledged"
+          ? "Exclusion removed. Eligible active rules can catch up after current membership and policy checks."
+          : "Removing exclusion requested. Waiting for Team acknowledgment; the exclusion remains in effect until acknowledged."
+      );
+    });
+  };
+  const deliveryPanel = (
+    <SharingRuleDeliveryStatus
+      deliveries={ruleDeliveries}
+      onRefresh={() => {
+        setRuleDeliveryRevision((revision) => revision + 1);
+        setShareEventRevision((revision) => revision + 1);
+      }}
+    />
+  );
+
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const visibleShares = ownedShares.filter((item) => {
     if (!normalizedQuery) return true;
@@ -1063,8 +1378,8 @@ function OwnedSharesWorkspace({
   const sectionOrder = visibleShares.some(
     (item) => ownedShareSection(item) === "pending"
   )
-    ? (["pending", "active", "revoked"] as const)
-    : (["active", "pending", "revoked"] as const);
+    ? (["pending", "active", "excluded", "revoked"] as const)
+    : (["active", "pending", "excluded", "revoked"] as const);
   const sections = sectionOrder.map((section) => ({
     section,
     items: visibleShares.filter((item) => ownedShareSection(item) === section)
@@ -1088,617 +1403,967 @@ function OwnedSharesWorkspace({
     (selectedShare.kind === "grant" ||
       selectedShare.pendingShare.workspaceAccessState === "active");
 
+  const directUpdatesPanel =
+    selectedShare &&
+    (!selectedShare.summary.sharingReasons.some((reason) => reason.rule) ||
+      (selectedShare.kind === "pending" &&
+        ["failed", "needs_attention"].includes(
+          selectedShare.pendingShare.state
+        ))) ? (
+      <section className="collab-sharing-control-row">
+        <div>
+          <h3>Updates</h3>
+          <p>
+            {selectedShare.kind === "grant" && sourceSyncState === "paused"
+              ? "Updates paused"
+              : ownedShareStatus(selectedShare)}
+          </p>
+        </div>
+        {selectedShare.kind === "pending" &&
+        selectedShare.pendingShare.mode === "continuous" &&
+        selectedShare.pendingShare.state === "activated" ? (
+          <button
+            className="secondary"
+            disabled={
+              operationBusy ||
+              selectedSection === "excluded" ||
+              selectedSection === "revoked" ||
+              selectedShare.summary.workspaceContentAccess === "unavailable"
+            }
+            onClick={() => {
+              restoreUpdatesControlFocusRef.current = true;
+              void runOperation(async () => {
+                const updated = await client.controlPendingShare({
+                  pendingShareId: selectedShare.pendingShare.id,
+                  expectedOperationVersion:
+                    selectedShare.pendingShare.operationVersion,
+                  action:
+                    selectedShare.pendingShare.sourceUpdateState === "paused"
+                      ? "resume"
+                      : "pause"
+                });
+                setOwnedShares((current) =>
+                  current.map((item) =>
+                    item.kind === "pending" &&
+                    item.pendingShare.id === updated.id
+                      ? { ...item, pendingShare: updated }
+                      : item
+                  )
+                );
+                await refreshSharingReasons(selectedShare);
+              });
+            }}
+            ref={updatesControlRef}
+            type="button"
+          >
+            {selectedShare.pendingShare.sourceUpdateState === "paused" ? (
+              <Play aria-hidden="true" />
+            ) : (
+              <Pause aria-hidden="true" />
+            )}
+            {selectedShare.pendingShare.sourceUpdateState === "paused"
+              ? "Resume updates"
+              : "Pause updates"}
+          </button>
+        ) : selectedShare.kind === "grant" &&
+          !selectedShare.summary.sharingReasons.some(
+            (reason) => reason.kind === "rule"
+          ) &&
+          selectedShare.summary.mode === "continuous" &&
+          selectedShare.summary.sourceSessionId &&
+          sourceSyncState &&
+          sourceSyncState !== "revoked" ? (
+          <button
+            className="secondary"
+            disabled={
+              operationBusy ||
+              selectedSection === "excluded" ||
+              selectedSection === "revoked" ||
+              selectedShare.summary.workspaceContentAccess === "unavailable"
+            }
+            onClick={() => {
+              restoreUpdatesControlFocusRef.current = true;
+              void runOperation(async () => {
+                const updated =
+                  sourceSyncState === "paused"
+                    ? await client.resumeSharedMemorySync({
+                        sessionId: selectedShare.summary.sourceSessionId!
+                      })
+                    : await client.pauseSharedMemorySync({
+                        sessionId: selectedShare.summary.sourceSessionId!
+                      });
+                setSourceSyncState(updated.syncState);
+              });
+            }}
+            ref={updatesControlRef}
+            type="button"
+          >
+            {sourceSyncState === "paused" ? (
+              <Play aria-hidden="true" />
+            ) : (
+              <Pause aria-hidden="true" />
+            )}
+            {sourceSyncState === "paused" ? "Resume updates" : "Pause updates"}
+          </button>
+        ) : selectedShare.kind === "pending" &&
+          selectedShare.pendingShare.state === "failed" &&
+          selectedShare.pendingShare.redactedFailureCode ===
+            "candidate_source_advanced" &&
+          selectedShare.summary.sourceSessionId ? (
+          <button
+            className="secondary"
+            disabled={
+              operationBusy ||
+              selectedSection === "excluded" ||
+              selectedSection === "revoked" ||
+              selectedShare.summary.workspaceContentAccess === "unavailable"
+            }
+            onClick={() =>
+              void openSourceReview(
+                selectedShare.summary.sourceSessionId!,
+                selectedShare.summary.sourceTitle
+              )
+            }
+            type="button"
+          >
+            <RefreshCw aria-hidden="true" />
+            Review again
+          </button>
+        ) : selectedShare.kind === "pending" &&
+          ["failed", "needs_attention"].includes(
+            selectedShare.pendingShare.state
+          ) ? (
+          <button
+            className="secondary"
+            disabled={
+              operationBusy ||
+              selectedSection === "excluded" ||
+              selectedSection === "revoked" ||
+              selectedShare.summary.workspaceContentAccess === "unavailable"
+            }
+            onClick={() =>
+              void runOperation(async () => {
+                const updated = await client.controlPendingShare({
+                  pendingShareId: selectedShare.pendingShare.id,
+                  expectedOperationVersion:
+                    selectedShare.pendingShare.operationVersion,
+                  action: "retry"
+                });
+                setOwnedShares((current) =>
+                  current.map((item) =>
+                    item.kind === "pending" &&
+                    item.pendingShare.id === updated.id
+                      ? { ...item, pendingShare: updated }
+                      : item
+                  )
+                );
+                // A failed share has stopped polling. Restart status reads
+                // when Retry returns it to preparing.
+                setShareEventRevision((revision) => revision + 1);
+                await refreshSharingReasons(selectedShare);
+              })
+            }
+            type="button"
+          >
+            <RefreshCw aria-hidden="true" />
+            Retry
+          </button>
+        ) : null}
+      </section>
+    ) : null;
+  const recordRuleDelivery = (delivery: SharingRuleDelivery) => {
+    setRuleDeliveries((current) => [
+      ...current.filter(
+        (entry) =>
+          ownerSharingOperationKey(entry.intent) !==
+          ownerSharingOperationKey(delivery.intent)
+      ),
+      delivery
+    ]);
+    setRuleDeliveryRevision((revision) => revision + 1);
+    if (delivery.state === "acknowledged")
+      acknowledgeRuleDelivery(delivery.intent.mutationId, null);
+  };
+  const sharingRulesPanel = selectedShare ? (
+    <OwnedShareRules
+      workspaceExcluded={selectedSection === "excluded"}
+      reasons={selectedShare.summary.sharingReasons}
+      deliveries={ruleDeliveries}
+      busy={operationBusy}
+      onControl={(reason, action) => void controlRule(reason, action)}
+      detailReview={(reason, queued) => {
+        if (!reason.rule) {
+          const source = ownedShareRecord(selectedShare).source;
+          const binding = ownedShareGrantBinding(selectedShare);
+          const conversion =
+            reason.updateState === "fixed_snapshot" &&
+            source?.kind === "captured_session" &&
+            binding ? (
+              <SnapshotConversionReview
+                client={client}
+                source={source}
+                reason={reason}
+                grantVersion={binding.grantVersion}
+                teamId={ownedShareRecord(selectedShare).teamId}
+                workspaceId={ownedShareRecord(selectedShare).workspaceId}
+                disabled={
+                  operationBusy || queued || selectedSection === "excluded"
+                }
+                onDelivery={recordRuleDelivery}
+              />
+            ) : null;
+          const directPending = ownedShares.find(
+            (entry) =>
+              entry.kind === "pending" &&
+              entry.pendingShare.consentId === reason.consentId &&
+              entry.pendingShare.state === "activated" &&
+              entry.pendingShare.mode === "snapshot"
+          );
+          const independentRule = selectedShare.summary.sharingReasons.some(
+            (entry) =>
+              entry.rule &&
+              entry.rule.state !== "stopped" &&
+              !["stopped", "expired"].includes(entry.updateState)
+          );
+          if (
+            reason.updateState !== "fixed_snapshot" ||
+            !independentRule ||
+            directPending?.kind !== "pending" ||
+            selectedSection === "excluded"
+          )
+            return conversion;
+          return (
+            <>
+              {conversion}
+              {directStopConsentId === reason.consentId ? (
+                <div>
+                  <p>
+                    Stop only this fixed snapshot? Independent sharing rules
+                    keep their own approved access and updates.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={operationBusy}
+                    onClick={() => {
+                      void runOperation(async () => {
+                        const updated = await client.controlPendingShare({
+                          pendingShareId: directPending.pendingShare.id,
+                          expectedOperationVersion:
+                            directPending.pendingShare.operationVersion,
+                          action: "stop_direct"
+                        });
+                        setOwnedShares((current) =>
+                          current.map((entry) =>
+                            entry.kind === "pending" &&
+                            entry.pendingShare.id === updated.id
+                              ? { ...entry, pendingShare: updated }
+                              : entry
+                          )
+                        );
+                        setDirectStopConsentId(null);
+                        await refreshSharingReasons(selectedShare);
+                        setShareEventRevision((revision) => revision + 1);
+                      });
+                    }}
+                  >
+                    Confirm stop this snapshot
+                  </button>
+                  <button
+                    type="button"
+                    disabled={operationBusy}
+                    onClick={() => setDirectStopConsentId(null)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  disabled={operationBusy}
+                  onClick={() => setDirectStopConsentId(reason.consentId)}
+                >
+                  Stop this snapshot
+                </button>
+              )}
+            </>
+          );
+        }
+        return (
+          <>
+            <SharingRuleDetailReview
+              key={`${reason.rule.id}:detail:${reason.rule.authorityVersion}`}
+              trigger="row"
+              client={client}
+              ruleId={reason.rule.id}
+              teamId={ownedShareRecord(selectedShare).teamId}
+              workspaceId={ownedShareRecord(selectedShare).workspaceId}
+              maximumFidelity={reason.maximumFidelity}
+              includeCuratedMemory={reason.includeCuratedMemory}
+              disabled={
+                operationBusy || queued || selectedSection === "excluded"
+              }
+              onDelivery={recordRuleDelivery}
+            />
+          </>
+        );
+      }}
+    />
+  ) : null;
   if (sharesState === "loading") {
-    return <SharesStatusView state="loading" />;
+    return (
+      <>
+        {deliveryPanel}
+        <SharesStatusView state="loading" />
+      </>
+    );
   }
   if (sharesState === "failed") {
     return (
-      <SharesStatusView
-        actionLabel="Retry"
-        message="Koed could not load your Shares."
-        onAction={() => {
-          setSharesState("loading");
-          setShareEventRevision((revision) => revision + 1);
-        }}
-        state="unavailable"
-      />
+      <>
+        {deliveryPanel}
+        <SharesStatusView
+          actionLabel="Retry"
+          message="Koed could not load your Shares."
+          onAction={() => {
+            setSharesState("loading");
+            setShareEventRevision((revision) => revision + 1);
+          }}
+          state="unavailable"
+        />
+      </>
     );
   }
 
   return (
-    <section
-      className="collab-route-root collab-shares-workspace"
-      data-narrow-view={narrowDetailOpen ? "detail" : "list"}
-      data-responsive="master-detail-to-drilldown"
-    >
-      <aside className="collab-shares-pane" aria-label="Shares">
-        <header>
-          <h1 tabIndex={-1}>Shares</h1>
-          <span aria-label={`${ownedShares.length} Shares`}>
-            {ownedShares.length}
+    <>
+      {deliveryPanel}
+      <section
+        className="collab-route-root collab-shares-workspace collab-shares-overview"
+        data-narrow-view={narrowDetailOpen ? "detail" : "list"}
+        data-responsive="overview-with-dialog"
+      >
+        <aside className="collab-shares-pane" aria-label="Shares">
+          <header>
+            <h1 tabIndex={-1}>Shares</h1>
+          </header>
+          <div
+            className="collab-memory-tabs collab-sharing-tabs"
+            role="tablist"
+            aria-label="Shares"
+          >
+            <button
+              type="button"
+              role="tab"
+              id="owned-conversations-tab"
+              aria-controls="owned-conversations-panel"
+              aria-selected={sharesTab === "conversations"}
+              onClick={() => setSharesTab("conversations")}
+            >
+              Conversations <span>{ownedShares.length}</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="owned-rules-tab"
+              aria-controls="owned-rules-panel"
+              aria-selected={sharesTab === "rules"}
+              onClick={() => setSharesTab("rules")}
+            >
+              Sharing rules
+            </button>
+          </div>
+          <label className="collab-share-search">
+            <span className="collab-visually-hidden">Search Shares</span>
+            <input
+              onChange={(event) => setQuery(event.currentTarget.value)}
+              placeholder="Search Shares"
+              type="search"
+              value={query}
+            />
+          </label>
+          <span
+            className="collab-visually-hidden"
+            role="status"
+            aria-live="polite"
+          >
+            {shareAnnouncement}
           </span>
-        </header>
-        <label className="collab-share-search">
-          <span className="collab-visually-hidden">Search Shares</span>
-          <input
-            onChange={(event) => setQuery(event.currentTarget.value)}
-            placeholder="Search Shares"
-            type="search"
-            value={query}
-          />
-        </label>
-        <span
-          className="collab-visually-hidden"
-          role="status"
-          aria-live="polite"
-        >
-          {shareAnnouncement}
-        </span>
-        <div className="collab-shares-scroll">
-          {ownedShares.length === 0 ? (
-            <StateView icon={<Library />} title="No shares yet" />
-          ) : visibleShares.length === 0 ? (
-            <div className="collab-shares-empty" role="status">
-              No Shares match “{query}”.
-            </div>
-          ) : (
-            sections.map(({ section, items }) => (
-              <section
-                aria-labelledby={`collab-${section}-shares`}
-                className="collab-share-section"
-                data-empty={items.length === 0 ? "true" : undefined}
-                key={section}
-              >
-                <header>
-                  <h2 id={`collab-${section}-shares`}>
-                    {section[0]!.toUpperCase() + section.slice(1)}
-                  </h2>
-                  <span>{items.length}</span>
-                </header>
-                {items.map((item) => {
-                  const record = ownedShareRecord(item);
-                  return (
-                    <button
-                      aria-label={`${item.summary.sourceTitle}, ${item.summary.workspaceName}, ${ownedShareStatus(item)}`}
-                      aria-current={
-                        selectedShareKey === ownedShareKey(item)
-                          ? "page"
-                          : undefined
-                      }
-                      className="collab-share-row"
-                      key={ownedShareKey(item)}
-                      onClick={(event) => {
-                        event.currentTarget.focus();
-                        const shareKey = ownedShareKey(item);
-                        setSelectedShareKey(shareKey);
-                        setNarrowDetailOpen(true);
-                        onSelectShare?.(shareKey);
-                      }}
-                      onFocus={() => {
-                        lastFocusedShareKeyRef.current = ownedShareKey(item);
-                      }}
-                      ref={(row) => {
-                        const shareKey = ownedShareKey(item);
-                        if (row) shareRowRefs.current.set(shareKey, row);
-                        else shareRowRefs.current.delete(shareKey);
-                      }}
-                      type="button"
-                    >
-                      <span
-                        aria-hidden="true"
-                        className="desktop-team-disc collab-share-team-badge"
-                        data-swatch={teamDiscIndex(record.teamId)}
-                      >
-                        {teamInitials(item.summary.teamName)}
-                      </span>
-                      <span className="collab-share-row-copy">
-                        <span className="collab-share-row-title">
-                          <strong>{item.summary.sourceTitle}</strong>
-                          {ownedShareHasError(item) ? (
-                            <CircleAlert
-                              aria-hidden="true"
-                              className="collab-share-row-error"
-                            />
-                          ) : null}
-                        </span>
-                        <small>{item.summary.workspaceName}</small>
-                      </span>
-                      <time dateTime={record.updatedAt}>
-                        {formatShareListTime(record.updatedAt)}
-                      </time>
-                    </button>
-                  );
-                })}
-              </section>
-            ))
-          )}
-        </div>
-      </aside>
+          <div className="collab-shares-scroll">
+            <section
+              id="owned-rules-panel"
+              role="tabpanel"
+              aria-labelledby="owned-rules-tab"
+              hidden={sharesTab !== "rules"}
+            >
+              <RepositorySharingRules
+                key={`${snapshot.connection.backendId}:${snapshot.navigation.personalOwner.id}:${snapshot.navigation.teamPrincipal?.id ?? ""}`}
+                client={client}
+                localProjects={localProjects}
+                creation={null}
+                query={query}
+              />
+            </section>
+            <section
+              id="owned-conversations-panel"
+              role="tabpanel"
+              aria-labelledby="owned-conversations-tab"
+              hidden={sharesTab !== "conversations"}
+            >
+              {ownedShares.length === 0 ? (
+                <StateView
+                  icon={<Library />}
+                  title="No Conversation shares yet"
+                />
+              ) : visibleShares.length === 0 ? (
+                <div className="collab-shares-empty" role="status">
+                  No Shares match “{query}”.
+                </div>
+              ) : (
+                sections.map(({ section, items }) => (
+                  <section
+                    aria-labelledby={`collab-${section}-shares`}
+                    className="collab-share-section"
+                    data-empty={items.length === 0 ? "true" : undefined}
+                    key={section}
+                  >
+                    <header>
+                      <h2 id={`collab-${section}-shares`}>
+                        {section[0]!.toUpperCase() + section.slice(1)}
+                      </h2>
+                      <span>{items.length}</span>
+                    </header>
+                    {items.map((item) => {
+                      const record = ownedShareRecord(item);
+                      return (
+                        <button
+                          aria-label={`${item.summary.sourceTitle}, ${item.summary.workspaceName}, ${ownedShareStatus(item)}`}
+                          aria-current={
+                            selectedShareKey === ownedShareKey(item)
+                              ? "page"
+                              : undefined
+                          }
+                          className="collab-share-row"
+                          key={ownedShareKey(item)}
+                          onClick={(event) => {
+                            event.currentTarget.focus();
+                            const shareKey = ownedShareKey(item);
+                            setSelectedShareKey(shareKey);
+                            setNarrowDetailOpen(true);
+                            onSelectShare?.(shareKey);
+                          }}
+                          onFocus={() => {
+                            lastFocusedShareKeyRef.current =
+                              ownedShareKey(item);
+                          }}
+                          ref={(row) => {
+                            const shareKey = ownedShareKey(item);
+                            if (row) shareRowRefs.current.set(shareKey, row);
+                            else shareRowRefs.current.delete(shareKey);
+                          }}
+                          type="button"
+                        >
+                          <span
+                            aria-hidden="true"
+                            className="desktop-team-disc collab-share-team-badge"
+                            data-swatch={teamDiscIndex(record.teamId)}
+                          >
+                            {teamInitials(item.summary.teamName)}
+                          </span>
+                          <span className="collab-share-row-copy">
+                            <span className="collab-share-row-title">
+                              <strong>{item.summary.sourceTitle}</strong>
+                              {ownedShareHasError(item) ? (
+                                <CircleAlert
+                                  aria-hidden="true"
+                                  className="collab-share-row-error"
+                                />
+                              ) : null}
+                            </span>
+                            <small>
+                              {item.summary.workspaceName} ·{" "}
+                              {ownedShareRepresentation(item)
+                                ? sharingDetailTitle(
+                                    ownedShareRepresentation(item)!
+                                  )
+                                : "Preparing"}
+                            </small>
+                          </span>
+                          <span
+                            className={`collab-sharing-state ${ownedShareSection(item) === "active" ? "active" : ownedShareSection(item) === "pending" ? "pending" : ""}`}
+                          >
+                            {ownedShareStatus(item)}
+                          </span>
+                          <time dateTime={record.updatedAt}>
+                            {formatShareListTime(record.updatedAt)}
+                          </time>
+                        </button>
+                      );
+                    })}
+                  </section>
+                ))
+              )}
+            </section>
+          </div>
+        </aside>
 
-      {selectedShare ? (
-        <article
-          className="collab-share-detail-workspace"
-          aria-label={`Share details for ${selectedShare.summary.sourceTitle}`}
-        >
-          <header className="collab-share-detail-header">
-            <div>
-              <h2>{selectedShare.summary.sourceTitle}</h2>
-              <p>
-                {selectedShare.summary.teamName} ·{" "}
+        {selectedShare &&
+        narrowDetailOpen &&
+        !modifiedShare &&
+        !detailChange &&
+        !sourceReviewEntry &&
+        !sharePendingRevocation ? (
+          <Modal
+            className="collab-sharing-modal collab-manage-share-modal"
+            label={`Manage ${selectedShare.summary.sourceTitle}`}
+            onClose={() => setNarrowDetailOpen(false)}
+          >
+            <ModalHeader
+              title={selectedShare.summary.sourceTitle}
+              onClose={() => setNarrowDetailOpen(false)}
+            />
+            <div className="collab-form collab-sharing-form">
+              <p className="collab-form-context">
+                {selectedShare.summary.teamName} /{" "}
                 {selectedShare.summary.workspaceName}
               </p>
-            </div>
-            <div className="collab-share-header-actions">
-              <button
-                className="collab-share-modify-button"
-                disabled={
-                  selectedSection === "revoked" ||
-                  selectedShare.summary.workspaceContentAccess === "unavailable"
-                }
-                onClick={() => {
-                  setOperationError("");
-                  setModifyShareKey(ownedShareKey(selectedShare));
-                }}
-                type="button"
-              >
-                <Pencil aria-hidden="true" />
-                Modify
-              </button>
-              <button
-                className="danger-secondary collab-share-revoke-button"
-                disabled={selectedSection === "revoked" || operationBusy}
-                onClick={() => {
-                  setOperationError("");
-                  setRevokeShareKey(ownedShareKey(selectedShare));
-                }}
-                type="button"
-              >
-                <Trash2 aria-hidden="true" />
-                Revoke
-              </button>
-            </div>
-          </header>
-          <div className="collab-share-facts" aria-label="Share summary">
-            <span>
-              <strong>Status</strong>
-              <span className={`collab-share-state ${selectedSection}`}>
-                {selectedSection}
-              </span>
-            </span>
-            <span>
-              <strong>Shared detail</strong>
-              {activationRepresentation
-                ? representationLabel(activationRepresentation)
-                : "Unavailable"}
-            </span>
-            <span>
-              <strong>Updates</strong>
-              {selectedShare.kind === "grant" && sourceSyncState === "paused"
-                ? "Updates paused"
-                : ownedShareStatus(selectedShare)}
-            </span>
-            <span>
-              <strong>Source access</strong>
-              {selectedShare.sourceAccess?.lifecycle === "active"
-                ? selectedShare.sourceAccess.mode
-                : "Not allowed"}
-            </span>
-            <span>
-              <strong>Workspace access</strong>
-              {selectedShare.summary.workspaceContentAccess === "available"
-                ? "Available"
-                : "Unavailable"}
-            </span>
-          </div>
-          <section className="collab-share-preview">
-            {preview ? (
-              <header>
-                <p>
-                  {`${representationLabel(preview.activationRepresentation)} · ${preview.itemCount} ${preview.itemCount === 1 ? "item" : "items"} · Revision ${preview.sourceRevision}`}
+              {directUpdatesPanel}
+              {selectedSection === "excluded" ? (
+                <p role="status" className="collab-sharing-notice">
+                  Excluded from {selectedShare.summary.workspaceName} · All
+                  sharing routes
                 </p>
-              </header>
-            ) : null}
-            <div className="collab-share-preview-window">
-              {selectedShare.summary.workspaceContentAccess ===
-              "unavailable" ? (
-                <StateView
-                  icon={<CircleAlert />}
-                  title="Workspace content unavailable"
-                  message="You can manage or revoke this Share, but its Team content and discussion are no longer available to you."
-                />
-              ) : (
-                <OwnedSharePreview
-                  authorizedRevision={
-                    selectedShare.summary.authorizedPreview?.sourceRevision ??
-                    null
-                  }
-                  markdownAdapters={markdownAdapters}
-                  preview={preview}
-                  state={previewState}
-                />
-              )}
-              {preview && "previewHash" in preview && preview.nextCursor ? (
-                <button
-                  className="collab-share-preview-more secondary"
-                  disabled={loadingMorePreview}
-                  onClick={() => void loadMorePreview()}
-                  type="button"
-                >
-                  {loadingMorePreview ? "Loading…" : "Load more"}
-                </button>
+              ) : selectedShare.summary.workspaceContentAccess ===
+                "unavailable" ? (
+                <p role="status" className="collab-sharing-notice">
+                  Workspace content unavailable
+                </p>
               ) : null}
-            </div>
-          </section>
-        </article>
-      ) : (
-        <section className="collab-share-empty-detail">
-          <StateView
-            icon={<Library />}
-            title={sharesState === "ready" ? "Select a Share" : "Shares"}
-            message="Choose a Share to inspect exactly what the Workspace can access."
-          />
-        </section>
-      )}
-
-      {modifiedShare ? (
-        <Modal
-          className="collab-modify-share-modal"
-          label={`Modify ${modifiedShare.summary.sourceTitle}`}
-          onClose={() => setModifyShareKey(null)}
-        >
-          <ModalHeader
-            onClose={() => setModifyShareKey(null)}
-            title={modifiedShare.summary.sourceTitle}
-          />
-          <div className="collab-form collab-modify-share-form">
-            <div className="collab-modify-share-context">
-              <span>
-                {modifiedShare.summary.teamName} ·{" "}
-                {modifiedShare.summary.workspaceName}
-              </span>
-            </div>
-            <section>
-              <div>
-                <h3>Updates</h3>
-                <p>
-                  {modifiedShare.kind === "grant" &&
-                  sourceSyncState === "paused"
-                    ? "Updates paused"
-                    : ownedShareStatus(modifiedShare)}
-                </p>
-              </div>
-              {modifiedShare.kind === "pending" &&
-              modifiedShare.pendingShare.mode === "continuous" &&
-              modifiedShare.pendingShare.state === "activated" ? (
-                <button
-                  className="secondary"
-                  disabled={operationBusy}
-                  onClick={() => {
-                    restoreUpdatesControlFocusRef.current = true;
-                    void runOperation(async () => {
-                      const updated = await client.controlPendingShare({
-                        pendingShareId: modifiedShare.pendingShare.id,
-                        expectedOperationVersion:
-                          modifiedShare.pendingShare.operationVersion,
-                        action:
-                          modifiedShare.pendingShare.sourceUpdateState ===
-                          "paused"
-                            ? "resume"
-                            : "pause"
-                      });
-                      setOwnedShares((current) =>
-                        current.map((item) =>
-                          item.kind === "pending" &&
-                          item.pendingShare.id === updated.id
-                            ? { ...item, pendingShare: updated }
-                            : item
-                        )
-                      );
-                    });
-                  }}
-                  ref={updatesControlRef}
-                  type="button"
-                >
-                  {modifiedShare.pendingShare.sourceUpdateState === "paused" ? (
-                    <Play aria-hidden="true" />
-                  ) : (
-                    <Pause aria-hidden="true" />
-                  )}
-                  {modifiedShare.pendingShare.sourceUpdateState === "paused"
-                    ? "Resume updates"
-                    : "Pause updates"}
-                </button>
-              ) : modifiedShare.kind === "grant" &&
-                modifiedShare.summary.mode === "continuous" &&
-                modifiedShare.summary.sourceSessionId &&
-                sourceSyncState &&
-                sourceSyncState !== "revoked" ? (
-                <button
-                  className="secondary"
-                  disabled={operationBusy}
-                  onClick={() => {
-                    restoreUpdatesControlFocusRef.current = true;
-                    void runOperation(async () => {
-                      const updated =
-                        sourceSyncState === "paused"
-                          ? await client.resumeSharedMemorySync({
-                              sessionId: modifiedShare.summary.sourceSessionId!
-                            })
-                          : await client.pauseSharedMemorySync({
-                              sessionId: modifiedShare.summary.sourceSessionId!
-                            });
-                      setSourceSyncState(updated.syncState);
-                    });
-                  }}
-                  ref={updatesControlRef}
-                  type="button"
-                >
-                  {sourceSyncState === "paused" ? (
-                    <Play aria-hidden="true" />
-                  ) : (
-                    <Pause aria-hidden="true" />
-                  )}
-                  {sourceSyncState === "paused"
-                    ? "Resume updates"
-                    : "Pause updates"}
-                </button>
-              ) : modifiedShare.kind === "pending" &&
-                modifiedShare.pendingShare.state === "failed" &&
-                modifiedShare.pendingShare.redactedFailureCode ===
-                  "candidate_source_advanced" &&
-                modifiedShare.summary.sourceSessionId ? (
-                <button
-                  className="secondary"
-                  disabled={operationBusy}
-                  onClick={() =>
-                    void openSourceReview(
-                      modifiedShare.summary.sourceSessionId!
-                    )
+              {sharingRulesPanel}
+              {selectedShare.summary.sourceSessionId &&
+              selectedShare.summary.sharingReasons.some(
+                (reason) => reason.kind === "direct"
+              ) &&
+              (selectedShare.kind === "grant" ||
+                selectedShare.pendingShare.grantId) ? (
+                <SharingRow
+                  label="Shared detail"
+                  value={
+                    activationRepresentation
+                      ? representationLabel(activationRepresentation)
+                      : "Unavailable"
                   }
-                  type="button"
-                >
-                  <RefreshCw aria-hidden="true" />
-                  Review again
-                </button>
-              ) : modifiedShare.kind === "pending" &&
-                ["failed", "needs_attention"].includes(
-                  modifiedShare.pendingShare.state
-                ) ? (
+                  disabled={
+                    operationBusy ||
+                    selectedSection === "excluded" ||
+                    selectedSection === "revoked" ||
+                    selectedShare.summary.workspaceContentAccess ===
+                      "unavailable"
+                  }
+                  onClick={() => void openDetailChange(selectedShare)}
+                />
+              ) : null}
+              {selectedActive ? (
+                <SharingRow
+                  label="Source access"
+                  value={
+                    selectedShare.sourceAccess?.lifecycle === "active"
+                      ? selectedShare.sourceAccess.mode
+                      : "Not allowed"
+                  }
+                  disabled={operationBusy}
+                  onClick={() => {
+                    setOperationError("");
+                    setSourceAccessMode(
+                      selectedShare.sourceAccess?.lifecycle === "active"
+                        ? selectedShare.sourceAccess.mode
+                        : "none"
+                    );
+                    setModifyShareKey(ownedShareKey(selectedShare));
+                  }}
+                />
+              ) : null}
+              {selectedShare.kind === "pending" &&
+              !["activated", "revoked"].includes(
+                selectedShare.pendingShare.state
+              ) ? (
+                <p role="status">
+                  Preparation stage:{" "}
+                  {pendingShareStageLabel(selectedShare.pendingShare.stage)}.
+                  {pendingSharePrivacyProgressLabel(selectedShare.pendingShare)}
+                  {ownedShareHasError(selectedShare)
+                    ? " Needs attention; retry or review the failed operation above."
+                    : " Waiting for Team publication."}
+                  {selectedShare.summary.sharingReasons.some((reason) =>
+                    ["active", "paused", "fixed_snapshot"].includes(
+                      reason.updateState
+                    )
+                  )
+                    ? " Independent sharing reasons may still provide access under their own consent."
+                    : ""}
+                </p>
+              ) : null}
+
+              <details className="collab-sharing-disclosure">
+                <summary>
+                  Sharing reasons ·{" "}
+                  {selectedShare.summary.sharingReasons.length}
+                </summary>
+                <OwnedSharingReasons
+                  workspaceExcluded={selectedSection === "excluded"}
+                  reasons={selectedShare.summary.sharingReasons}
+                  pending={selectedSection === "pending"}
+                  representationLabel={representationLabel}
+                  deliveries={ruleDeliveries}
+                  busy={operationBusy}
+                />
+              </details>
+              <details className="collab-sharing-disclosure">
+                <summary>Diagnostics</summary>
+                <SharingRow
+                  label="Latest published revision"
+                  value={selectedShare.summary.lastReadyRevision ?? "None"}
+                />
+                <SharingRow
+                  label="Workspace access"
+                  value={
+                    selectedShare.summary.workspaceContentAccess === "available"
+                      ? "Available"
+                      : "Unavailable"
+                  }
+                />
+                <SharingRow
+                  label="Published items"
+                  value={
+                    preview
+                      ? `${preview.itemCount} ${sharingDetailTitle(preview.activationRepresentation)}`
+                      : previewState === "loading"
+                        ? "Loading…"
+                        : "Unavailable"
+                  }
+                />
+                {selectedShare.summary.sharingReasons.map((reason) =>
+                  reason.rule?.selectorKind === "captured_session" &&
+                  reason.rule.state !== "stopped" ? (
+                    <div key={reason.id}>
+                      <SharingRulePublisherReview
+                        client={client}
+                        ruleId={reason.rule.id}
+                        teamId={ownedShareRecord(selectedShare).teamId}
+                        workspaceId={
+                          ownedShareRecord(selectedShare).workspaceId
+                        }
+                        authorityVersion={reason.rule.authorityVersion}
+                        publisherFence={reason.rule.publisherFence}
+                        maximumFidelity={reason.maximumFidelity}
+                        sourceChoices={snapshot.navigation.personal.memory.map(
+                          (entry) => ({
+                            sessionId: entry.id,
+                            title: entry.title
+                          })
+                        )}
+                        disabled={
+                          operationBusy ||
+                          ownedSharingReasonChangePending(
+                            reason,
+                            ruleDeliveries
+                          ) ||
+                          selectedSection === "excluded"
+                        }
+                        onDelivery={recordRuleDelivery}
+                      />
+                    </div>
+                  ) : null
+                )}
+              </details>
+              {operationError && !modifyShareKey && !revokeShareKey ? (
+                <p role="alert" className="collab-form-error">
+                  {operationError}
+                </p>
+              ) : null}
+              <footer className="collab-modal-actions collab-sharing-footer">
+                <SharingMoreActions
+                  actions={[
+                    ...selectedShare.summary.sharingReasons
+                      .filter(
+                        (reason) =>
+                          reason.rule && reason.rule.state !== "stopped"
+                      )
+                      .map((reason, index, reasons) => ({
+                        label:
+                          reasons.length === 1
+                            ? "Stop this rule"
+                            : `Stop ${ownedSharingRuleTitle(reason).toLocaleLowerCase()} ${index + 1}`,
+                        disabled:
+                          operationBusy ||
+                          ownedSharingReasonChangePending(
+                            reason,
+                            ruleDeliveries
+                          ),
+                        onClick: () => void controlRule(reason, "stop")
+                      })),
+                    ...(selectedShare.summary.source.kind === "captured_session"
+                      ? [
+                          {
+                            label:
+                              selectedSection === "excluded"
+                                ? "Remove exclusion"
+                                : "Exclude from Workspace",
+                            disabled:
+                              operationBusy ||
+                              ruleDeliveries.some(
+                                (delivery) =>
+                                  delivery.state === "queued" &&
+                                  "scope" in delivery.intent &&
+                                  delivery.intent.scope.logicalMemoryId ===
+                                    selectedShare.summary.source
+                                      .logicalMemoryId &&
+                                  delivery.intent.scope.teamWorkspaceId ===
+                                    ownedShareRecord(selectedShare).workspaceId
+                              ),
+                            onClick: () =>
+                              void (selectedSection === "excluded"
+                                ? restoreConversation(selectedShare)
+                                : excludeConversation(selectedShare))
+                          }
+                        ]
+                      : []),
+                    {
+                      label: selectedShare.summary.sharingReasons.some(
+                        (reason) => reason.kind === "rule"
+                      )
+                        ? "Revoke all sharing"
+                        : "Revoke",
+                      disabled: selectedSection === "revoked" || operationBusy,
+                      onClick: () => {
+                        setOperationError("");
+                        setRevokeShareKey(ownedShareKey(selectedShare));
+                      }
+                    }
+                  ]}
+                />
                 <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setNarrowDetailOpen(false)}
+                >
+                  Close
+                </button>
+              </footer>
+            </div>
+          </Modal>
+        ) : null}
+
+        {modifiedShare ? (
+          <Modal
+            className="collab-sharing-modal collab-source-access-modal"
+            label={`Source access for ${modifiedShare.summary.sourceTitle}`}
+            onClose={() => setModifyShareKey(null)}
+          >
+            <ModalHeader
+              title="Source access"
+              onClose={() => setModifyShareKey(null)}
+            />
+            <div className="collab-form collab-sharing-form">
+              <p className="collab-form-context">
+                {modifiedShare.summary.sourceTitle} ·{" "}
+                {modifiedShare.summary.workspaceName}
+              </p>
+              <p>
+                Allow members in {modifiedShare.summary.workspaceName} to read
+                prompts, responses and tool activity.
+              </p>
+              <fieldset className="collab-sharing-choices">
+                <legend className="collab-visually-hidden">
+                  Conversation Source Access
+                </legend>
+                {(
+                  [
+                    ["none", "Not allowed", ""],
+                    ["snapshot", "Snapshot", "Current source records"],
+                    [
+                      "continuous",
+                      "Continuous",
+                      "Current & future source records"
+                    ]
+                  ] as const
+                ).map(([value, title, description]) => (
+                  <label key={value} className="collab-sharing-choice">
+                    <input
+                      type="radio"
+                      name={sourceAccessGroupName}
+                      checked={sourceAccessMode === value}
+                      disabled={operationBusy}
+                      onChange={() => setSourceAccessMode(value)}
+                    />
+                    <span>
+                      <strong>{title}</strong>
+                      {description ? <small>{description}</small> : null}
+                    </span>
+                  </label>
+                ))}
+              </fieldset>
+              {operationError ? (
+                <p role="alert" className="collab-form-error">
+                  {operationError}
+                </p>
+              ) : null}
+              <footer className="collab-modal-actions">
+                <button
+                  type="button"
                   className="secondary"
                   disabled={operationBusy}
+                  onClick={() => setModifyShareKey(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    operationBusy ||
+                    !selectedActive ||
+                    ownedShareKey(modifiedShare) !== selectedShareKey ||
+                    sourceAccessMode ===
+                      (modifiedShare.sourceAccess?.lifecycle === "active"
+                        ? modifiedShare.sourceAccess.mode
+                        : "none")
+                  }
                   onClick={() =>
                     void runOperation(async () => {
-                      const updated = await client.controlPendingShare({
-                        pendingShareId: modifiedShare.pendingShare.id,
-                        expectedOperationVersion:
-                          modifiedShare.pendingShare.operationVersion,
-                        action: "retry"
-                      });
-                      setOwnedShares((current) =>
-                        current.map((item) =>
-                          item.kind === "pending" &&
-                          item.pendingShare.id === updated.id
-                            ? { ...item, pendingShare: updated }
-                            : item
-                        )
+                      await controlConversationSource(
+                        modifiedShare,
+                        sourceAccessMode === "none"
+                          ? "revoke"
+                          : sourceAccessMode
                       );
+                      setModifyShareKey(null);
                     })
                   }
-                  type="button"
                 >
-                  <RefreshCw aria-hidden="true" />
-                  Retry
+                  {operationBusy
+                    ? "Waiting for approval…"
+                    : "Review source access"}
                 </button>
-              ) : null}
-            </section>
-            <section>
-              <div>
-                <h3>Shared detail</h3>
-                <p>
-                  {ownedShareRepresentation(modifiedShare)
-                    ? representationLabel(
-                        ownedShareRepresentation(modifiedShare)!
+              </footer>
+            </div>
+          </Modal>
+        ) : null}
+        {sharePendingRevocation ? (
+          <Modal
+            className="collab-revoke-share-modal"
+            label={`Revoke ${sharePendingRevocation.summary.sourceTitle}`}
+            onClose={() => setRevokeShareKey(null)}
+          >
+            <ModalHeader
+              title={
+                sharePendingRevocation.kind === "pending" &&
+                !sharePendingRevocation.pendingShare.grantId
+                  ? "Stop Pending Share"
+                  : sharePendingRevocation.summary.sharingReasons.some(
+                        (reason) => reason.kind === "rule"
                       )
-                    : "Unavailable"}
+                    ? "Revoke all sharing"
+                    : "Revoke Share"
+              }
+              onClose={() => setRevokeShareKey(null)}
+            />
+            <div className="collab-form">
+              <p>
+                {sharePendingRevocation.kind === "pending" &&
+                !sharePendingRevocation.pendingShare.grantId
+                  ? "Stop this Pending Share and move it to Revoked?"
+                  : sharePendingRevocation.summary.sharingReasons.some(
+                        (reason) => reason.kind === "rule"
+                      )
+                    ? "Stop every sharing reason for this Conversation in this Workspace? Attached Conversation Source Access will also be revoked."
+                    : "Revoke this Share and remove Workspace access?"}{" "}
+                Your Personal Memory will not be deleted.
+              </p>
+              {operationError ? (
+                <p className="collab-form-error" role="alert">
+                  {operationError}
                 </p>
-              </div>
-              {modifiedShare.summary.sourceSessionId &&
-              (modifiedShare.kind === "grant" ||
-                modifiedShare.pendingShare.grantId) ? (
+              ) : null}
+              <footer className="collab-modal-actions">
                 <button
                   className="secondary"
                   disabled={operationBusy}
-                  onClick={() => void openDetailChange(modifiedShare)}
+                  onClick={() => setRevokeShareKey(null)}
                   type="button"
                 >
-                  Change detail
+                  Cancel
                 </button>
-              ) : null}
-            </section>
-            {selectedActive &&
-            ownedShareKey(modifiedShare) === selectedShareKey ? (
-              <section>
-                <div>
-                  <h3>Source access</h3>
-                  <p>
-                    {modifiedShare.sourceAccess?.lifecycle === "active"
-                      ? `${modifiedShare.sourceAccess.mode} access allowed`
-                      : "Not allowed"}
-                  </p>
-                </div>
-                {modifiedShare.sourceAccess?.lifecycle === "active" ? (
-                  <button
-                    className="secondary"
-                    disabled={operationBusy}
-                    onClick={() =>
-                      void runOperation(() =>
-                        controlConversationSource(modifiedShare, "revoke")
-                      )
-                    }
-                    type="button"
-                  >
-                    Revoke source access
-                  </button>
-                ) : (
-                  <div className="collab-modify-source-actions">
-                    <button
-                      className="secondary"
-                      disabled={operationBusy}
-                      onClick={() =>
-                        void runOperation(() =>
-                          controlConversationSource(modifiedShare, "snapshot")
-                        )
-                      }
-                      type="button"
-                    >
-                      Allow snapshot
-                    </button>
-                    <button
-                      className="secondary"
-                      disabled={operationBusy}
-                      onClick={() =>
-                        void runOperation(() =>
-                          controlConversationSource(modifiedShare, "continuous")
-                        )
-                      }
-                      type="button"
-                    >
-                      Allow continuous
-                    </button>
-                  </div>
-                )}
-              </section>
-            ) : null}
-            <p className="collab-modify-source-note">
-              Source access can include prompts, tool calls, tool results,
-              Approval Activity, and other records that are not Memory.
-            </p>
-            {operationError ? (
-              <p className="collab-form-error" role="alert">
-                {operationError}
-              </p>
-            ) : null}
-            <footer className="collab-modal-actions">
-              <button
-                className="secondary"
-                disabled={operationBusy}
-                onClick={() => setModifyShareKey(null)}
-                type="button"
-              >
-                Done
-              </button>
-            </footer>
-          </div>
-        </Modal>
-      ) : null}
-      {sharePendingRevocation ? (
-        <Modal
-          className="collab-revoke-share-modal"
-          label={`Revoke ${sharePendingRevocation.summary.sourceTitle}`}
-          onClose={() => setRevokeShareKey(null)}
-        >
-          <ModalHeader
-            title={
-              sharePendingRevocation.kind === "pending" &&
-              !sharePendingRevocation.pendingShare.grantId
-                ? "Stop Pending Share"
-                : "Revoke Share"
-            }
-            onClose={() => setRevokeShareKey(null)}
+                <button
+                  className="danger-secondary"
+                  disabled={operationBusy}
+                  onClick={() => confirmRevokeShare(sharePendingRevocation)}
+                  type="button"
+                >
+                  <Trash2 aria-hidden="true" />
+                  {operationBusy
+                    ? "Revoking…"
+                    : sharePendingRevocation.kind === "pending" &&
+                        !sharePendingRevocation.pendingShare.grantId
+                      ? "Stop Share"
+                      : "Revoke Share"}
+                </button>
+              </footer>
+            </div>
+          </Modal>
+        ) : null}
+        {sourceReviewEntry ? (
+          <SharedMemoryOwnerModal
+            client={client}
+            entry={sourceReviewEntry}
+            markdownAdapters={markdownAdapters}
+            onClose={() => setSourceReviewEntry(null)}
+            onViewShare={(shareKey) => {
+              setSourceReviewEntry(null);
+              setSelectedShareKey(shareKey);
+              setNarrowDetailOpen(true);
+              onSelectShare?.(shareKey);
+            }}
+            snapshot={snapshot}
           />
-          <div className="collab-form">
-            <p>
-              {sharePendingRevocation.kind === "pending" &&
-              !sharePendingRevocation.pendingShare.grantId
-                ? "Stop this Pending Share and move it to Revoked?"
-                : "Revoke this Share and remove Workspace access?"}{" "}
-              Your Personal Memory will not be deleted.
-            </p>
-            {operationError ? (
-              <p className="collab-form-error" role="alert">
-                {operationError}
-              </p>
-            ) : null}
-            <footer className="collab-modal-actions">
-              <button
-                className="secondary"
-                disabled={operationBusy}
-                onClick={() => setRevokeShareKey(null)}
-                type="button"
-              >
-                Cancel
-              </button>
-              <button
-                className="danger-secondary"
-                disabled={operationBusy}
-                onClick={() => confirmRevokeShare(sharePendingRevocation)}
-                type="button"
-              >
-                <Trash2 aria-hidden="true" />
-                {operationBusy
-                  ? "Revoking…"
-                  : sharePendingRevocation.kind === "pending" &&
-                      !sharePendingRevocation.pendingShare.grantId
-                    ? "Stop Share"
-                    : "Revoke Share"}
-              </button>
-            </footer>
-          </div>
-        </Modal>
-      ) : null}
-      {sourceReviewEntry ? (
-        <SharedMemoryOwnerModal
-          client={client}
-          entry={sourceReviewEntry}
-          markdownAdapters={markdownAdapters}
-          onClose={() => setSourceReviewEntry(null)}
-          onViewShare={(shareKey) => {
-            setSourceReviewEntry(null);
-            setSelectedShareKey(shareKey);
-            setNarrowDetailOpen(true);
-            onSelectShare?.(shareKey);
-          }}
-          snapshot={snapshot}
-        />
-      ) : null}
-      {detailChange ? (
-        <SharedMemoryOwnerModal
-          client={client}
-          detailChange={{
-            grantId:
-              detailChange.share.kind === "grant"
-                ? detailChange.share.grant.id
-                : detailChange.share.pendingShare.grantId!,
-            logicalMemoryId: ownedShareRecord(detailChange.share)
-              .logicalMemoryId,
-            mode: detailChange.share.summary.mode,
-            maximumFidelity: ownedShareRecord(detailChange.share)
-              .maximumFidelity,
-            includeCuratedMemory: ownedShareRecord(detailChange.share)
-              .includeCuratedMemory,
-            teamId: ownedShareRecord(detailChange.share).teamId,
-            workspaceId: ownedShareRecord(detailChange.share).workspaceId
-          }}
-          entry={detailChange.entry}
-          markdownAdapters={markdownAdapters}
-          onClose={() => setDetailChange(null)}
-          onDetailChangeQueued={() => {
-            setShareAnnouncement(
-              `${detailChange.share.summary.sourceTitle}: Detail change is being prepared`
-            );
-            setShareEventRevision((revision) => revision + 1);
-          }}
-          onViewShare={() => undefined}
-          snapshot={snapshot}
-        />
-      ) : null}
-    </section>
+        ) : null}
+        {detailChange ? (
+          <SharedMemoryOwnerModal
+            client={client}
+            detailChange={{
+              grantId:
+                detailChange.share.kind === "grant"
+                  ? detailChange.share.grant.id
+                  : detailChange.share.pendingShare.grantId!,
+              logicalMemoryId: ownedShareRecord(detailChange.share)
+                .logicalMemoryId,
+              mode: detailChange.share.summary.mode,
+              maximumFidelity: ownedShareRecord(detailChange.share)
+                .maximumFidelity,
+              includeCuratedMemory: ownedShareRecord(detailChange.share)
+                .includeCuratedMemory,
+              teamId: ownedShareRecord(detailChange.share).teamId,
+              workspaceId: ownedShareRecord(detailChange.share).workspaceId
+            }}
+            entry={detailChange.entry}
+            markdownAdapters={markdownAdapters}
+            onClose={() => setDetailChange(null)}
+            onDetailChangeQueued={() => {
+              setShareAnnouncement(
+                `${detailChange.share.summary.sourceTitle}: Detail change is being prepared`
+              );
+              setShareEventRevision((revision) => revision + 1);
+            }}
+            onViewShare={() => undefined}
+            snapshot={snapshot}
+          />
+        ) : null}
+      </section>
+    </>
   );
 }
 
 export function PersonalMemoryView({
   client,
+  localProjects,
   initialSection = "projects",
   initialShareKey,
   markdownAdapters,
@@ -1708,6 +2373,7 @@ export function PersonalMemoryView({
   snapshot
 }: {
   client: CollaborationRendererClient;
+  localProjects?: readonly DesktopProject[];
   initialSection?: "projects" | "shares" | "history";
   initialShareKey?: string;
   markdownAdapters?: MarkdownPlatformAdapters;
@@ -1721,6 +2387,7 @@ export function PersonalMemoryView({
     return (
       <OwnedSharesWorkspace
         client={client}
+        localProjects={localProjects}
         initialShareKey={initialShareKey}
         markdownAdapters={markdownAdapters}
         onAvailabilityChange={onAvailabilityChange}
@@ -2289,12 +2956,6 @@ export function SharedSessionView({
   );
 }
 
-const SHARED_MEMORY_FIDELITIES = [
-  "memory_events",
-  "lcm_leaves",
-  "lcm_rollups"
-] as const satisfies readonly SharedMemoryFidelityCeiling[];
-
 const sharedMemoryPreparationCopy = (
   syncState: PersonalMemoryEntry["syncState"]
 ): { detail: string; label: string; title: string } => {
@@ -2349,7 +3010,6 @@ function SharedMemoryOwnerModal({
   client,
   detailChange,
   entry,
-  markdownAdapters,
   onDetailChangeQueued,
   onViewShare,
   snapshot,
@@ -2372,6 +3032,7 @@ function SharedMemoryOwnerModal({
   snapshot: CollaborationSnapshot;
   onClose: () => void;
 }) {
+  const updatesGroupName = useId();
   const focusedDetailChange = Boolean(detailChange);
   const detailChangeGrantId = detailChange?.grantId;
   const detailChangeMode = detailChange?.mode;
@@ -2414,6 +3075,15 @@ function SharedMemoryOwnerModal({
   const [currentEntry, setCurrentEntry] = useState(entry);
   const shareTitle = entry.title;
   const [ownerGrants, setOwnerGrants] = useState<SharedMemoryGrant[]>([]);
+  const [ownerRuleGrantIds, setOwnerRuleGrantIds] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [ownerLiveRuleGrantIds, setOwnerLiveRuleGrantIds] = useState<
+    Set<string>
+  >(() => new Set());
+  const [ownerDirectGrantIds, setOwnerDirectGrantIds] = useState<Set<string>>(
+    () => new Set()
+  );
   const [ownerPendingShares, setOwnerPendingShares] = useState<PendingShare[]>(
     []
   );
@@ -2435,7 +3105,53 @@ function SharedMemoryOwnerModal({
     key: string;
     title: string;
     workspaceName: string;
+    pending: boolean;
+    ruleMutationId: string | null;
+    deliveryState: SharingRuleDelivery["state"] | null;
   } | null>(null);
+  useEffect(() => {
+    if (
+      !completedShare?.ruleMutationId ||
+      completedShare.deliveryState !== "queued"
+    )
+      return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const mutationId = completedShare.ruleMutationId;
+    const poll = async () => {
+      try {
+        const records = await client.listSharingRuleDeliveries({ mutationId });
+        if (!active) return;
+        const record = records.find(
+          (item) => item.intent.mutationId === mutationId
+        );
+        if (record && record.state !== "queued") {
+          setCompletedShare((current) =>
+            current?.ruleMutationId === mutationId
+              ? {
+                  ...current,
+                  deliveryState: record.state,
+                  pending: record.state === "acknowledged",
+                  key:
+                    record.creation && "pendingShareId" in record.creation
+                      ? `pending:${record.creation.pendingShareId}`
+                      : current.key
+                }
+              : current
+          );
+          return;
+        }
+      } catch {
+        /* The journal retains the request while the local API is unavailable. */
+      }
+      if (active) timer = setTimeout(() => void poll(), 2000);
+    };
+    void poll();
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [client, completedShare?.ruleMutationId, completedShare?.deliveryState]);
   const selectedTeam =
     availableTeams.find((team) => team.id === teamId) ?? null;
   const workspaces =
@@ -2455,14 +3171,25 @@ function SharedMemoryOwnerModal({
     (share) =>
       share.teamId === teamId &&
       share.workspaceId === workspaceId &&
+      share.state !== "activated" &&
       share.state !== "revoked" &&
       !(
         share.state === "failed" &&
         share.redactedFailureCode === "candidate_source_advanced"
       )
   );
-  const consentActionLabel =
-    workflow?.kind === "change"
+  const creatingConversationRule =
+    workflow?.kind === "new" && mode === "continuous";
+  const addingFixedSnapshot =
+    workflow?.kind === "new" &&
+    mode === "snapshot" &&
+    selectedDestinationGrant?.lifecycle === "active" &&
+    selectedDestinationGrant.source.kind === "captured_session" &&
+    ownerRuleGrantIds.has(selectedDestinationGrant.id) &&
+    !ownerDirectGrantIds.has(selectedDestinationGrant.id);
+  const consentActionLabel = creatingConversationRule
+    ? "Start continuous sharing"
+    : workflow?.kind === "change"
       ? "Apply change"
       : selectedDestinationGrant?.lifecycle === "revoked"
         ? "Consent and restore"
@@ -2501,11 +3228,11 @@ function SharedMemoryOwnerModal({
       client.listOwnedSharedMemoryGrants({
         logicalMemoryId: ownerLogicalMemoryId
       }),
-      client.listOwnedShares({ cursor: null, limit: 100, history: false })
+      loadOwnedSharePages(client, false)
     ])
-      .then(([grants, page]) => {
+      .then(([grants, shares]) => {
         if (!active) return;
-        const pendingShares = page.shares.flatMap((item) =>
+        const pendingShares = shares.flatMap((item) =>
           item.kind === "pending" &&
           item.pendingShare.logicalMemoryId === ownerLogicalMemoryId &&
           item.pendingShare.state !== "revoked" &&
@@ -2518,6 +3245,45 @@ function SharedMemoryOwnerModal({
             : []
         );
         setOwnerGrants(grants);
+        setOwnerRuleGrantIds(
+          new Set(
+            shares.flatMap((item) =>
+              ownedShareGrantBinding(item) &&
+              item.summary.sharingReasons.some(
+                (reason) => reason.kind === "rule"
+              )
+                ? [ownedShareGrantBinding(item)!.shareGrantId]
+                : []
+            )
+          )
+        );
+        setOwnerLiveRuleGrantIds(
+          new Set(
+            shares.flatMap((item) =>
+              ownedShareGrantBinding(item) &&
+              item.summary.sharingReasons.some(
+                (reason) =>
+                  reason.kind === "rule" &&
+                  reason.rule?.state !== "stopped" &&
+                  reason.updateState !== "expired"
+              )
+                ? [ownedShareGrantBinding(item)!.shareGrantId]
+                : []
+            )
+          )
+        );
+        setOwnerDirectGrantIds(
+          new Set(
+            shares.flatMap((item) =>
+              ownedShareGrantBinding(item) &&
+              item.summary.sharingReasons.some(
+                (reason) => reason.kind === "direct"
+              )
+                ? [ownedShareGrantBinding(item)!.shareGrantId]
+                : []
+            )
+          )
+        );
         setOwnerPendingShares(pendingShares);
         if (
           detailChangeGrantId &&
@@ -2706,15 +3472,52 @@ function SharedMemoryOwnerModal({
   ]);
 
   const beginNewShare = () => {
+    const unsharedDestination = availableTeams
+      .flatMap((team) =>
+        team.workspaces
+          .filter(
+            (workspace) =>
+              workspace.lifecycle === "active" && workspace.access === "write"
+          )
+          .map((workspace) => ({ team, workspace }))
+      )
+      .find(
+        ({ team, workspace }) =>
+          !ownerGrants.some(
+            (grant) =>
+              grant.teamId === team.id && grant.workspaceId === workspace.id
+          ) &&
+          !ownerPendingShares.some(
+            (share) =>
+              share.teamId === team.id && share.workspaceId === workspace.id
+          )
+      );
     const team =
+      unsharedDestination?.team ??
       availableTeams.find((candidate) => firstWritableWorkspace(candidate)) ??
       availableTeams[0] ??
       null;
-    const workspace = firstWritableWorkspace(team);
+    const workspace =
+      unsharedDestination?.workspace ?? firstWritableWorkspace(team);
     setTeamId(team?.id ?? "");
     setWorkspaceId(workspace?.id ?? "");
     setMaximumFidelity("memory_events");
     setIncludeCuratedMemory(false);
+    setMode("continuous");
+    setPreview(null);
+    setCandidate(null);
+    setPreparingPreview(false);
+    setRevokingGrantId(null);
+    setWorkflow({ kind: "new" });
+    setError("");
+  };
+
+  const beginContinuousRule = (grant: SharedMemoryGrant) => {
+    setTeamId(grant.teamId);
+    setWorkspaceId(grant.workspaceId);
+    setMaximumFidelity(grant.maximumFidelity);
+    setIncludeCuratedMemory(grant.includeCuratedMemory);
+    setMode("continuous");
     setPreview(null);
     setCandidate(null);
     setPreparingPreview(false);
@@ -2744,6 +3547,26 @@ function SharedMemoryOwnerModal({
       setPreparingPreview(true);
     }
   };
+
+  const updateSharedProject = (grant: SharedMemoryGrant) =>
+    run(async () => {
+      const target = {
+        teamId: grant.teamId,
+        workspaceId: grant.workspaceId,
+        shareGrantId: grant.id
+      };
+      const expected = await client.reviewSharedProjectSnapshot(target);
+      const updated = await client.updateSharedProjectSnapshot({
+        ...target,
+        mutationId: crypto.randomUUID(),
+        expected
+      });
+      setOwnerGrants((current) =>
+        current.map((item) =>
+          item.id === updated.id ? { ...item, ...updated } : item
+        )
+      );
+    });
 
   const stopSharing = (grant: SharedMemoryGrant) =>
     run(async () => {
@@ -2787,27 +3610,57 @@ function SharedMemoryOwnerModal({
       setStoppingSync(false);
     });
 
-  const loadMore = () =>
-    run(async () => {
-      if (!preview?.nextCursor) return;
-      const page = await client.loadSharedMemoryPreviewPage({
-        previewHash: preview.previewHash,
-        cursor: preview.nextCursor
-      });
-      const items = new Map(preview.items.map((item) => [item.id, item]));
-      for (const item of page.items) items.set(item.id, item);
-      setPreview({ ...page, items: [...items.values()] });
-    });
-
   const confirmShare = () =>
     run(async () => {
       if (!preview || !candidate || !workflow) return;
       requireDestination();
       const consentId = crypto.randomUUID();
       let completedShareKey: string;
+      let ruleDelivery: SharingRuleDelivery | null = null;
       const targetGrant =
         workflow.kind === "change" ? workflow.grant : selectedDestinationGrant;
-      if (targetGrant) {
+      if (
+        workflow.kind === "new" &&
+        mode === "continuous" &&
+        candidate.source.kind === "captured_session"
+      ) {
+        const review = await client.reviewConversationRuleCreation({
+          previewHash: preview.previewHash,
+          previewRevision: preview.previewRevision,
+          logicalMemoryId: candidate.logicalMemoryId,
+          teamId,
+          workspaceId
+        });
+        const shared = await client.createConversationRule({
+          mutationId: crypto.randomUUID(),
+          ruleId: crypto.randomUUID(),
+          consentId,
+          logicalGrantId: review.logicalGrantId,
+          expectedGrantVersion: review.expectedGrantVersion,
+          effectivePrivacyPolicyHash: review.effectivePrivacyPolicyHash,
+          ...(review.sourceIdentity
+            ? { sourceIdentity: review.sourceIdentity }
+            : {}),
+          source: review.source,
+          sourceCapabilities: review.sourceCapabilities,
+          activationRepresentation: review.activationRepresentation,
+          logicalMemoryId: review.logicalMemoryId,
+          teamId: review.teamId,
+          workspaceId: review.teamWorkspaceId,
+          mode: "continuous",
+          maximumFidelity: review.maximumFidelity,
+          includeCuratedMemory: review.includeCuratedMemory,
+          previewId: review.previewId,
+          previewHash: review.previewHash,
+          previewRevision: review.previewRevision,
+          expiresAt: review.expiresAt
+        });
+        ruleDelivery = shared;
+        completedShareKey =
+          shared.creation && "pendingShareId" in shared.creation
+            ? `pending:${shared.creation.pendingShareId}`
+            : ownerSharingOperationKey(shared.intent);
+      } else if (targetGrant && ownerDirectGrantIds.has(targetGrant.id)) {
         const refreshedGrants = await client.listOwnedSharedMemoryGrants({
           logicalMemoryId: candidate.logicalMemoryId
         });
@@ -2860,7 +3713,8 @@ function SharedMemoryOwnerModal({
           sourceCapabilities: candidate.sourceCapabilities,
           activationRepresentation: candidate.activationRepresentation,
           mutationId: crypto.randomUUID(),
-          logicalGrantId: crypto.randomUUID(),
+          logicalGrantId: targetGrant?.logicalGrantId ?? crypto.randomUUID(),
+          expectedGrantVersion: targetGrant?.grantVersion ?? null,
           consentId,
           logicalMemoryId: candidate.logicalMemoryId,
           teamId,
@@ -2888,7 +3742,10 @@ function SharedMemoryOwnerModal({
       setCompletedShare({
         key: completedShareKey,
         title: shareTitle,
-        workspaceName: selectedWorkspace?.name ?? "the selected Workspace"
+        workspaceName: selectedWorkspace?.name ?? "the selected Workspace",
+        pending: completedShareKey.startsWith("pending:"),
+        ruleMutationId: ruleDelivery?.intent.mutationId ?? null,
+        deliveryState: ruleDelivery?.state ?? null
       });
     });
 
@@ -2909,7 +3766,7 @@ function SharedMemoryOwnerModal({
 
   return (
     <Modal
-      className={`collab-share-memory-modal${focusedDetailChange ? " collab-change-detail-modal" : ""}`}
+      className={`collab-share-memory-modal collab-sharing-modal${focusedDetailChange ? " collab-change-detail-modal" : ""}`}
       label={
         focusedDetailChange
           ? `Change shared detail for ${entry.title}`
@@ -2918,11 +3775,19 @@ function SharedMemoryOwnerModal({
       onClose={onClose}
     >
       <ModalHeader
-        title={focusedDetailChange ? "Change shared detail" : shareTitle}
+        title={
+          focusedDetailChange
+            ? "Change shared detail"
+            : preview || candidate
+              ? "Review sharing"
+              : workflow
+                ? "Share memory"
+                : shareTitle
+        }
         onClose={onClose}
       />
       <div
-        className={`collab-form collab-share-memory-form${focusedDetailChange ? " collab-change-detail-form" : ""}`}
+        className={`collab-form collab-sharing-form collab-share-memory-form${focusedDetailChange ? " collab-change-detail-form" : ""}`}
       >
         {completedShare ? (
           <div
@@ -2933,10 +3798,39 @@ function SharedMemoryOwnerModal({
             <span className="collab-share-complete-icon" aria-hidden="true">
               <CircleCheck />
             </span>
-            <strong>Share complete</strong>
+            <strong>
+              {completedShare.deliveryState === "queued"
+                ? "Waiting for Team acknowledgment"
+                : completedShare.deliveryState === "needs_review"
+                  ? "Sharing acknowledgment needs review"
+                  : completedShare.pending
+                    ? "Sharing accepted"
+                    : "Share complete"}
+            </strong>
             <p>
-              “{completedShare.title}” is being shared with{" "}
-              {completedShare.workspaceName}.
+              {completedShare.deliveryState === "queued" ? (
+                <>
+                  Continuous sharing of “{completedShare.title}” was requested
+                  here for {completedShare.workspaceName}. Team acceptance is
+                  not confirmed yet.
+                </>
+              ) : completedShare.deliveryState === "needs_review" ? (
+                <>
+                  Team acceptance could not be confirmed. Open Personal Memory →
+                  Shares to review the current state.
+                </>
+              ) : completedShare.pending ? (
+                <>
+                  Preparing eligible Memory from “{completedShare.title}” for{" "}
+                  {completedShare.workspaceName}. Track publication in Personal
+                  Memory → Shares.
+                </>
+              ) : (
+                <>
+                  “{completedShare.title}” is being shared with{" "}
+                  {completedShare.workspaceName}.
+                </>
+              )}
             </p>
           </div>
         ) : preparingPreview && !candidate ? (
@@ -2967,12 +3861,9 @@ function SharedMemoryOwnerModal({
           </div>
         ) : workflow === null ? (
           <>
-            <p className="collab-form-context">
-              Manage where this Personal Memory is shared and which level of
-              detail each Workspace receives.
-            </p>
             {currentEntry.logicalMemoryId &&
-            currentEntry.syncState !== "not_started" ? (
+            currentEntry.syncState !== "not_started" &&
+            ownerRuleGrantIds.size === 0 ? (
               <div className="collab-sync-control">
                 <span>
                   Updates:{" "}
@@ -3055,6 +3946,7 @@ function SharedMemoryOwnerModal({
                         <small>
                           {share.state.replaceAll("_", " ")} ·{" "}
                           {pendingShareStageLabel(share.stage)}
+                          {pendingSharePrivacyProgressLabel(share)}
                         </small>
                       </div>
                     </li>
@@ -3082,14 +3974,65 @@ function SharedMemoryOwnerModal({
                       </div>
                       {active || recoverable ? (
                         <div className="collab-owner-grant-actions">
-                          <button
-                            type="button"
-                            className="secondary"
-                            disabled={busy}
-                            onClick={() => beginFidelityChange(grant)}
-                          >
-                            {recoverable ? "Review detail" : "Change detail"}
-                          </button>
+                          {active &&
+                          grant.source.kind === "captured_session" &&
+                          !ownerDirectGrantIds.has(grant.id) ? (
+                            <button
+                              type="button"
+                              className="secondary"
+                              disabled={busy}
+                              onClick={() => {
+                                setTeamId(grant.teamId);
+                                setWorkspaceId(grant.workspaceId);
+                                setMode("snapshot");
+                                setMaximumFidelity(grant.maximumFidelity);
+                                setIncludeCuratedMemory(
+                                  grant.includeCuratedMemory
+                                );
+                                setPreview(null);
+                                setCandidate(null);
+                                setWorkflow({ kind: "new" });
+                                setError("");
+                              }}
+                            >
+                              Add fixed snapshot
+                            </button>
+                          ) : null}
+                          {active &&
+                          grant.source.kind === "captured_session" &&
+                          !ownerLiveRuleGrantIds.has(grant.id) ? (
+                            <button
+                              type="button"
+                              className="secondary"
+                              disabled={busy}
+                              onClick={() => beginContinuousRule(grant)}
+                            >
+                              Add continuous rule
+                            </button>
+                          ) : null}
+                          {active &&
+                          grant.source.kind === "captured_session" ? (
+                            <button
+                              type="button"
+                              className="secondary"
+                              disabled={busy}
+                              title="Review the latest synced source Project before updating this share."
+                              onClick={() => void updateSharedProject(grant)}
+                            >
+                              Update Project
+                            </button>
+                          ) : null}
+                          {!ownerRuleGrantIds.has(grant.id) ||
+                          ownerDirectGrantIds.has(grant.id) ? (
+                            <button
+                              type="button"
+                              className="secondary"
+                              disabled={busy}
+                              onClick={() => beginFidelityChange(grant)}
+                            >
+                              {recoverable ? "Review detail" : "Change detail"}
+                            </button>
+                          ) : null}
                           {revokingGrantId === grant.id ? (
                             <>
                               <button
@@ -3106,7 +4049,9 @@ function SharedMemoryOwnerModal({
                                 disabled={busy}
                                 onClick={() => void stopSharing(grant)}
                               >
-                                Confirm stop
+                                {ownerRuleGrantIds.has(grant.id)
+                                  ? "Confirm revoke all sharing"
+                                  : "Confirm stop"}
                               </button>
                             </>
                           ) : (
@@ -3116,7 +4061,9 @@ function SharedMemoryOwnerModal({
                               disabled={busy}
                               onClick={() => setRevokingGrantId(grant.id)}
                             >
-                              Stop sharing
+                              {ownerRuleGrantIds.has(grant.id)
+                                ? "Revoke all sharing"
+                                : "Stop sharing"}
                             </button>
                           )}
                         </div>
@@ -3129,11 +4076,32 @@ function SharedMemoryOwnerModal({
           </>
         ) : preview || candidate ? (
           <>
-            <p className="collab-share-preview-notice">
-              This is your private Personal source preview. Privacy filtering
-              completes before any Team member can access the shared
-              representation.
-            </p>
+            <div>
+              <SharingRow
+                label="Share with"
+                value={`${selectedTeam?.name ?? "Team"} / ${selectedWorkspace?.name ?? "Workspace"}`}
+              />
+              <SharingRow
+                label="Who can recall"
+                value="Members with Workspace Access"
+              />
+              <SharingRow
+                label="Shared detail"
+                value={sharingDetailTitle(maximumFidelity)}
+              />
+              <SharingRow
+                label="Updates"
+                value={
+                  mode === "continuous"
+                    ? "This Conversation & later turns"
+                    : "Current revision only"
+                }
+              />
+              <SharingRow
+                label="Source access"
+                value="Separate authorization"
+              />
+            </div>
             {focusedDetailChange ? (
               <div className="collab-change-detail-comparison">
                 <span>
@@ -3148,72 +4116,28 @@ function SharedMemoryOwnerModal({
                   <strong>{fidelityLabel(maximumFidelity)}</strong>
                 </span>
               </div>
-            ) : (
-              <div className="collab-share-summary">
-                <strong>
-                  {representationLabel(
-                    (preview ?? candidate)!.activationRepresentation
-                  )}
-                </strong>
-                <span>
-                  {(preview ?? candidate)!.itemCount}{" "}
-                  {(preview ?? candidate)!.itemCount === 1 ? "item" : "items"}
-                </span>
-              </div>
-            )}
-            {(preview ?? candidate)!.activationRepresentation ===
-            "memory_events" ? (
-              <div className="collab-preview-list shared-conversation-preview">
-                <ConversationRows
-                  events={sharedMemoryConversationEvents(
-                    (preview ?? candidate)!.items
-                  )}
-                  markdownAdapters={markdownAdapters}
-                  scope="workspace"
-                />
-              </div>
-            ) : (
-              <ol className="collab-source-list collab-preview-list">
-                {(preview ?? candidate)!.items.map((item) => (
-                  <SourceItemRow
-                    key={item.id}
-                    item={item}
-                    markdownAdapters={markdownAdapters}
-                  />
-                ))}
-              </ol>
-            )}
-            {preview?.nextCursor ? (
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => void loadMore()}
-                disabled={busy}
+            ) : null}
+            <div className="collab-sharing-readiness">
+              <strong>1 Conversation</strong>
+              <span>{(preview ?? candidate)!.itemCount} items</span>
+              <span
+                className={`collab-sharing-state ${preview ? "active" : "pending"}`}
               >
-                Load more
-              </button>
-            ) : null}
-            {!focusedDetailChange ? (
-              <fieldset>
-                <legend>Updates</legend>
-                <label className="collab-check">
-                  <input
-                    type="radio"
-                    checked={mode === "continuous"}
-                    onChange={() => selectMode("continuous")}
-                  />
-                  Keep this shared source up to date
-                </label>
-                <label className="collab-check">
-                  <input
-                    type="radio"
-                    checked={mode === "snapshot"}
-                    onChange={() => selectMode("snapshot")}
-                  />
-                  Share only this revision
-                </label>
-              </fieldset>
-            ) : null}
+                {preview ? "Ready" : "Preparing"}
+              </span>
+            </div>
+            <p className="collab-sharing-notice">
+              Available after Privacy processing.
+            </p>
+            <details className="collab-sharing-disclosure">
+              <summary>Privacy & technical details</summary>
+              <SharingRow
+                label="Source revision"
+                value={(preview ?? candidate)!.sourceRevision}
+              />
+              <SharingRow label="Preview" value="Personal source · Only you" />
+              <SharingRow label="Privacy" value="Required categories hidden" />
+            </details>
           </>
         ) : (
           <>
@@ -3282,8 +4206,14 @@ function SharedMemoryOwnerModal({
                     </label>
                     {selectedDestinationGrant?.lifecycle === "active" ? (
                       <p className="collab-form-error" role="alert">
-                        This Workspace already has this Shared Memory. Manage
-                        its detail from the shared destinations list.
+                        {addingFixedSnapshot
+                          ? "This adds a fixed snapshot. Existing sharing reasons keep their own consent and updates."
+                          : creatingConversationRule &&
+                              !ownerLiveRuleGrantIds.has(
+                                selectedDestinationGrant.id
+                              )
+                            ? "This adds a continuous rule. Existing sharing reasons keep their own consent and snapshots."
+                            : "This Workspace already has this Shared Memory. Manage its rules and detail from Personal Memory → Shares."}
                       </p>
                     ) : selectedDestinationGrant?.lifecycle === "revoked" ? (
                       <p className="collab-form-context">
@@ -3298,55 +4228,59 @@ function SharedMemoryOwnerModal({
                     ) : null}
                   </>
                 ) : null}
-                <fieldset
-                  className={
-                    focusedDetailChange
-                      ? "collab-change-detail-options"
-                      : undefined
-                  }
-                >
-                  <legend>
-                    {focusedDetailChange ? "New detail" : "Shared detail"}
-                  </legend>
-                  {SHARED_MEMORY_FIDELITIES.map((value) => (
-                    <label key={value} className="collab-check">
+                <SharingDetailChoices
+                  value={maximumFidelity}
+                  onChange={(value) => {
+                    setMaximumFidelity(value);
+                    setPreview(null);
+                    setCandidate(null);
+                  }}
+                  disabled={busy}
+                />
+                <label className="collab-check">
+                  <input
+                    type="checkbox"
+                    checked={includeCuratedMemory}
+                    disabled={busy}
+                    onChange={(event) => {
+                      setIncludeCuratedMemory(event.currentTarget.checked);
+                      setPreview(null);
+                      setCandidate(null);
+                    }}
+                  />
+                  Include Curated Memory
+                </label>
+                {!focusedDetailChange ? (
+                  <fieldset className="collab-sharing-choices">
+                    <legend>Updates</legend>
+                    <label className="collab-sharing-choice">
                       <input
                         type="radio"
-                        aria-label={fidelityLabel(value)}
-                        checked={maximumFidelity === value}
-                        disabled={
-                          workflow.kind === "change" &&
-                          workflow.grant.maximumFidelity === value &&
-                          workflow.grant.includeCuratedMemory ===
-                            includeCuratedMemory
-                        }
-                        onChange={() => {
-                          setMaximumFidelity(value);
-                          setPreview(null);
-                          setCandidate(null);
-                        }}
+                        name={updatesGroupName}
+                        checked={mode === "continuous"}
+                        onChange={() => selectMode("continuous")}
+                        disabled={busy}
                       />
                       <span>
-                        <strong>{fidelityLabel(value)}</strong>
-                        {focusedDetailChange &&
-                        detailChange!.maximumFidelity === value ? (
-                          <small>Current</small>
-                        ) : null}
+                        <strong>Continuous</strong>
+                        <small>This Conversation & later turns</small>
                       </span>
                     </label>
-                  ))}
-                  <label className="collab-check">
-                    <input
-                      type="checkbox"
-                      checked={includeCuratedMemory}
-                      onChange={(event) => {
-                        setIncludeCuratedMemory(event.currentTarget.checked);
-                        setPreview(null);
-                      }}
-                    />
-                    Include Curated Memory
-                  </label>
-                </fieldset>
+                    <label className="collab-sharing-choice">
+                      <input
+                        type="radio"
+                        name={updatesGroupName}
+                        checked={mode === "snapshot"}
+                        onChange={() => selectMode("snapshot")}
+                        disabled={busy}
+                      />
+                      <span>
+                        <strong>Snapshot</strong>
+                        <small>Current revision only</small>
+                      </span>
+                    </label>
+                  </fieldset>
+                ) : null}
               </>
             )}
           </>
@@ -3388,7 +4322,12 @@ function SharedMemoryOwnerModal({
                 type="button"
                 className="secondary collab-share-cancel-action"
                 onClick={() => {
-                  if (focusedDetailChange) {
+                  if (!focusedDetailChange && (preview || candidate)) {
+                    setPreview(null);
+                    setCandidate(null);
+                    setPreparingPreview(false);
+                    setError("");
+                  } else if (focusedDetailChange) {
                     onClose();
                   } else if (ownerGrants.length > 0) {
                     setPreview(null);
@@ -3403,9 +4342,11 @@ function SharedMemoryOwnerModal({
               >
                 {focusedDetailChange
                   ? "Cancel"
-                  : ownerGrants.length > 0
+                  : preview || candidate
                     ? "Back"
-                    : "Cancel"}
+                    : ownerGrants.length > 0
+                      ? "Back"
+                      : "Cancel"}
               </button>
               <button
                 className="collab-consent-action"
@@ -3417,7 +4358,14 @@ function SharedMemoryOwnerModal({
                   !workspaceId ||
                   availableTeams.length === 0 ||
                   (workflow.kind === "new" &&
-                    selectedDestinationGrant?.lifecycle === "active") ||
+                    selectedDestinationGrant?.lifecycle === "active" &&
+                    !addingFixedSnapshot &&
+                    (!creatingConversationRule ||
+                      ownerLiveRuleGrantIds.has(
+                        selectedDestinationGrant.id
+                      ))) ||
+                  (creatingConversationRule &&
+                    selectedDestinationGrant?.lifecycle === "revoked") ||
                   (workflow.kind === "new" &&
                     Boolean(selectedDestinationPendingShare)) ||
                   (workflow.kind === "change" &&
@@ -3836,6 +4784,17 @@ function ModalLayer({
       {error}
     </p>
   ) : null;
+
+  if (modal.kind === "review_git_anchor_sharing")
+    return (
+      <GitAnchorSharingReview
+        client={client}
+        target={modal.target}
+        selectionTitle={modal.selectionTitle}
+        availableTeams={snapshot.navigation.teams}
+        onClose={onClose}
+      />
+    );
 
   if (modal.kind === "share_personal_memory") {
     const entry =

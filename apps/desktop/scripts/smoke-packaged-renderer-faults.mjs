@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { loadRendererValidation } from "./renderer-validation-assets.mjs";
 
 const delay = (ms) =>
   new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
@@ -257,6 +258,7 @@ export const smokePackagedRendererFaults = async ({
     childExit = { code, signal };
   });
   let cdp;
+  let validationAssets;
   try {
     const target = await waitForRendererTarget({
       debuggingPort,
@@ -333,9 +335,10 @@ export const smokePackagedRendererFaults = async ({
         `message channel${suffix}`
       );
     };
-    const validationUrl =
-      "koed://app/browser-validation.html?view=collaboration-interactions&actor=alice";
-    await cdp.call("Page.navigate", { url: validationUrl });
+    validationAssets = await loadRendererValidation(cdp, {
+      view: "collaboration-interactions",
+      actor: "alice"
+    });
     console.error("[packaged-renderer] collaboration fixture started");
     await waitFor(
       evaluate,
@@ -356,7 +359,7 @@ export const smokePackagedRendererFaults = async ({
       `document.body.innerText.includes(${JSON.stringify(replayBody)}) && window.__koedCollaborationInteractions.commands().some((item) => item.command === "collaboration.acknowledge_delivery")`,
       "application before suspended acknowledgement"
     );
-    await cdp.call("Page.reload", { ignoreCache: true });
+    await validationAssets.reload();
     await waitFor(
       evaluate,
       `document.documentElement.dataset.browserValidationReady === "true" && Boolean(window.__koedCollaborationInteractions)`,
@@ -387,11 +390,12 @@ export const smokePackagedRendererFaults = async ({
     );
     await waitFor(
       evaluate,
-      `Boolean(document.querySelector('.personal-memory-workspace [data-project-id="browser-project"]'))`,
-      "Personal Memory Projects surface"
+      `Boolean(document.querySelector('.personal-memory-workspace [data-project-id="00000000-0000-4000-8000-000000000500"]'))`,
+      "Personal Memory Projects surface",
+      `({body: document.body.innerText.slice(0, 2000), projects: [...document.querySelectorAll('[data-project-id]')].map(item => item.dataset.projectId)})`
     );
     await evaluate(
-      `document.querySelector('[data-project-id="browser-project"]')?.click()`
+      `document.querySelector('[data-project-id="00000000-0000-4000-8000-000000000500"]')?.click()`
     );
     await waitFor(
       evaluate,
@@ -403,8 +407,9 @@ export const smokePackagedRendererFaults = async ({
     );
     await waitFor(
       evaluate,
-      `document.querySelectorAll('.native-event-wrap').length > 0 && document.body.innerText.includes('Browser validation Memory Event')`,
-      "Personal Memory Captured Session timeline"
+      `document.querySelectorAll('.native-event-wrap').length > 0 && document.querySelector('.native-event-content h1')?.textContent === 'Formatting parity'`,
+      "Personal Memory Captured Session timeline",
+      `({body: document.body.innerText.slice(0, 3000), events: document.querySelectorAll('.native-event-wrap').length})`
     );
     console.error("[packaged-renderer] Personal Memory navigation finished");
     await evaluate(
@@ -428,16 +433,13 @@ export const smokePackagedRendererFaults = async ({
     );
     await waitFor(
       evaluate,
-      `document.querySelector('.collab-share-detail-workspace')?.textContent?.includes('Packaged asynchronous sharing')`,
+      `document.querySelector('.collab-manage-share-modal')?.textContent?.includes('Packaged asynchronous sharing')`,
       "continuous Share selection"
-    );
-    await evaluate(
-      `(() => { const button = document.querySelector('.collab-share-detail-workspace .collab-share-modify-button'); button?.focus(); button?.click(); })()`
     );
     await waitFor(
       evaluate,
       `[...document.querySelectorAll('button')].some((item) => item.textContent?.trim() === 'Pause updates')`,
-      "Shares Modify controls"
+      "Shares management controls"
     );
     await trustedClick({
       cdp,
@@ -446,13 +448,13 @@ export const smokePackagedRendererFaults = async ({
     });
     await waitFor(
       evaluate,
-      `[...document.querySelectorAll('button')].some((item) => item.textContent?.trim() === 'Resume updates') && document.querySelector('.collab-share-detail-workspace')?.textContent?.includes('Packaged asynchronous sharing')`,
+      `[...document.querySelectorAll('button')].some((item) => item.textContent?.trim() === 'Resume updates') && document.querySelector('.collab-manage-share-modal')?.textContent?.includes('Packaged asynchronous sharing')`,
       "Shares pause state",
       `(() => ({
         activeElement: document.activeElement?.outerHTML ?? null,
         pauseButton: [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Pause updates')?.outerHTML ?? null,
         resumeButton: [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Resume updates')?.outerHTML ?? null,
-        detailText: document.querySelector('.collab-share-detail-workspace')?.textContent ?? null
+        detailText: document.querySelector('.collab-manage-share-modal')?.textContent ?? null
       }))()`
     );
     await waitFor(
@@ -467,14 +469,14 @@ export const smokePackagedRendererFaults = async ({
       }))()`
     );
     await evaluate(
-      `[...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Done')?.click()`
+      `[...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Close')?.click()`
     );
     await evaluate(
       `(() => { const card = [...document.querySelectorAll('.collab-share-row')].find((item) => item.textContent?.includes('Packaged revocation fixture')); card?.focus(); card?.click(); window.__koedCollaborationInteractions.emitPendingShareNeedsAttention(); })()`
     );
     await waitFor(
       evaluate,
-      `document.activeElement?.textContent?.includes('Packaged revocation fixture') && document.querySelector('.collab-share-detail-workspace')?.textContent?.includes('Packaged revocation fixture') && [...document.querySelectorAll('[role="status"][aria-live="polite"]')].some((item) => item.textContent?.includes('Packaged asynchronous sharing: Update needs attention'))`,
+      `document.querySelector('.collab-manage-share-modal')?.contains(document.activeElement) && document.querySelector('.collab-manage-share-modal')?.textContent?.includes('Packaged revocation fixture') && [...document.querySelectorAll('[role="status"][aria-live="polite"]')].some((item) => item.textContent?.includes('Packaged asynchronous sharing: Needs attention'))`,
       "packaged Shares live announcement"
     );
     await cdp.call("Emulation.setEmulatedMedia", {
@@ -486,9 +488,21 @@ export const smokePackagedRendererFaults = async ({
       `matchMedia('(prefers-reduced-motion: reduce)').matches && Number.parseFloat(getComputedStyle(document.querySelector('.collab-share-row')).transitionDuration) <= 0.001`,
       "packaged Shares reduced motion"
     );
-    await evaluate(
-      `[...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Revoke')?.click()`
+    await trustedClick({
+      cdp,
+      evaluate,
+      locator: `document.querySelector('.collab-sharing-footer [aria-label="More sharing actions"]')`
+    });
+    await waitFor(
+      evaluate,
+      `[...document.querySelectorAll('[role="menuitem"]')].some((item) => item.textContent?.trim() === 'Revoke')`,
+      "Share revocation menu"
     );
+    await trustedClick({
+      cdp,
+      evaluate,
+      locator: `[...document.querySelectorAll('[role="menuitem"]')].find((item) => item.textContent?.trim() === 'Revoke')`
+    });
     await waitFor(
       evaluate,
       `document.body.innerText.includes('Your Personal Memory will not be deleted.')`,
@@ -502,9 +516,21 @@ export const smokePackagedRendererFaults = async ({
       `!document.body.innerText.includes('Your Personal Memory will not be deleted.') && !window.__koedCollaborationInteractions.commands().some((item) => item.command === 'collaboration.revoke_shared_memory')`,
       "packaged Shares canceled destructive confirmation"
     );
-    await evaluate(
-      `[...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Revoke')?.click()`
+    await trustedClick({
+      cdp,
+      evaluate,
+      locator: `document.querySelector('.collab-sharing-footer [aria-label="More sharing actions"]')`
+    });
+    await waitFor(
+      evaluate,
+      `[...document.querySelectorAll('[role="menuitem"]')].some((item) => item.textContent?.trim() === 'Revoke')`,
+      "Share revocation menu"
     );
+    await trustedClick({
+      cdp,
+      evaluate,
+      locator: `[...document.querySelectorAll('[role="menuitem"]')].find((item) => item.textContent?.trim() === 'Revoke')`
+    });
     await evaluate(
       `[...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Revoke Share')?.click()`
     );
@@ -512,6 +538,14 @@ export const smokePackagedRendererFaults = async ({
       evaluate,
       `[...document.querySelectorAll('.collab-share-section')].some((item) => item.querySelector('h2')?.textContent?.trim() === 'Revoked' && item.textContent?.includes('Packaged revocation fixture')) && window.__koedCollaborationInteractions.commands().some((item) => item.command === 'collaboration.revoke_shared_memory')`,
       "packaged Shares confirmed revocation"
+    );
+    await evaluate(
+      `[...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === 'Close')?.click()`
+    );
+    await waitFor(
+      evaluate,
+      `!document.querySelector('.collab-manage-share-modal')`,
+      "closed Share management"
     );
     console.error("[packaged-renderer] Personal Shares finished");
     await openProductChannel(" after Shares validation");
@@ -649,6 +683,7 @@ export const smokePackagedRendererFaults = async ({
       ]
     };
   } finally {
+    await validationAssets?.dispose().catch(() => {});
     cdp?.close();
     await terminateChild(child);
     // Electron's own helper/GPU processes can briefly outlive the main

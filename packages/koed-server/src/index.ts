@@ -86,7 +86,14 @@ export {
 export type { KoedServerPaths } from "./paths.js";
 export {
   discoverProjectMetadata,
-  listProjectMetadata
+  historicalFolderRepositoryIdentity,
+  setProjectAssociationLookup,
+  refreshProjectAssociations,
+  setProjectRepositoryAnchor,
+  listProjectMetadata,
+  listNamedProjects,
+  createNamedProject,
+  type NamedProject
 } from "./project-metadata.js";
 export { loadRepoEnv } from "./env-file.js";
 export {
@@ -179,3 +186,23 @@ export {
   parseDeviceRequestLink
 } from "./personal-device-request.js";
 export type { DeviceRequestView } from "./personal-device-request.js";
+
+export { createGitProjectProbe, probeGitProject } from "./git-project-probe.js";
+export type {
+  GitProjectProbeInput,
+  GitProjectProbeResult,
+  GitProjectProbeDeps
+} from "./git-project-probe.js";
+
+export { resolveRepositoryIdentity } from "./repository-identity.js";
+export {
+  observeCaptureFolder,
+  pinSourceFolderObservation,
+  readSourceFolderObservation,
+  readCurrentSourceFolderObservation
+} from "./folder-context.js";
+
+export {
+  listPendingRepositoryChanges,
+  acknowledgeRepositoryChange
+} from "./project-metadata.js";

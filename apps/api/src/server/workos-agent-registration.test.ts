@@ -150,6 +150,7 @@ describe.skipIf(!databaseUrl)(
           input: {
             query: "Team decisions",
             search_domain: "global",
+            repository_context: null,
             ...(workspace
               ? { team_workspace_id: workspace, team_backend_id: "remote" }
               : {})
@@ -451,7 +452,8 @@ describe.skipIf(!databaseUrl)(
 
     it("retains Personal task access and requires explicit Team consent", async () => {
       const personal = await issue(false);
-      expect((await accept(personal)).statusCode).toBe(200);
+      const accepted = await accept(personal);
+      expect(accepted.statusCode, accepted.body).toBe(200);
       expect((await accept(personal, workspaceId)).statusCode).toBe(403);
       expect((await request(personal, "/v1/team-context")).statusCode).toBe(
         403
@@ -827,6 +829,7 @@ describe.skipIf(!databaseUrl)(
     it("withdraws Personal, Team, task and MCP access from old and replacement credentials until owner reapproval", async () => {
       const token = await issue(true, true);
       const personal = await accept(token);
+      expect(personal.statusCode, personal.body).toBe(200);
       const personalTaskId = personal.json().task.id;
       const team = await accept(token, workspaceId);
       const teamTaskId = team.json().task.id;

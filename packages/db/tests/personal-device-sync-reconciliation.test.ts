@@ -137,6 +137,47 @@ describeDb("Personal Device Sync local reconciliation", () => {
       ]);
 
       const packageId = `package-${randomUUID()}`;
+      const configurationPackageId = `configuration-${randomUUID()}`;
+      await localRepository.receivePdsInbox({
+        userId,
+        groupId,
+        packageId: configurationPackageId,
+        sourceManifestHash: `configuration-hash-${randomUUID()}`
+      });
+      const configurationWorker = `configuration-worker-${randomUUID()}`;
+      const configurationInbox = (
+        await localRepository.claimPdsInbox({
+          workerId: configurationWorker,
+          limit: 100
+        })
+      ).find((entry) => entry.packageId === configurationPackageId)!;
+      const completion = {
+        workerId: configurationWorker,
+        inboxId: configurationInbox.id,
+        state: "ready" as const
+      };
+      await expect(localRepository.completePdsInbox(completion)).resolves.toBe(
+        false
+      );
+      await expect(
+        localRepository.completePdsInbox({
+          ...completion,
+          workerId: `wrong-${randomUUID()}`,
+          verifiedNonSource: true
+        })
+      ).resolves.toBe(false);
+      await expect(
+        localRepository.completePdsInbox({
+          ...completion,
+          verifiedNonSource: true
+        })
+      ).resolves.toBe(true);
+      await expect(
+        localRepository.completePdsInbox({
+          ...completion,
+          verifiedNonSource: true
+        })
+      ).resolves.toBe(false);
       const sourceManifestHash = `manifest-${randomUUID()}`;
       await expect(
         localRepository.receivePdsInbox({
@@ -193,19 +234,22 @@ describeDb("Personal Device Sync local reconciliation", () => {
           `pds-item-${randomUUID()}`
         ]
       );
+      const originDeploymentId = `deployment-${randomUUID()}`;
+      const sourceFingerprint = `fingerprint-${randomUUID()}`;
+      const closureHash = `closure-${randomUUID()}`;
       const retained = await localRepository.retainPdsInboundPackage({
         userId,
         groupId,
         inboxId: inbox!.id,
         packageId,
         sourceManifestHash,
-        originDeploymentId: `deployment-${randomUUID()}`,
+        originDeploymentId,
         originDeviceId: deviceId,
         sourceSequence: "1",
         logicalMemoryId: `memory-${randomUUID()}`,
         deletionFloorToken: `floor-${randomUUID()}`,
-        sourceFingerprint: `fingerprint-${randomUUID()}`,
-        sourceClosureHash: `closure-${randomUUID()}`,
+        sourceFingerprint,
+        sourceClosureHash: closureHash,
         encryptedEnvelope: { ciphertext: "opaque" }
       });
 
@@ -217,9 +261,9 @@ describeDb("Personal Device Sync local reconciliation", () => {
           groupId,
           retainedPackageId: retained.retainedPackageId,
           localSessionId: localSession.rows[0]!.id,
-          sourceFingerprint: `fingerprint-materialized-${randomUUID()}`,
-          closureHash: `closure-materialized-${randomUUID()}`,
-          originDeploymentId: `deployment-${randomUUID()}`,
+          sourceFingerprint,
+          closureHash,
+          originDeploymentId,
           originDeviceId: deviceId,
           sourceSequence: "1",
           sourceClosedAt: new Date(),
@@ -279,6 +323,10 @@ describeDb("Personal Device Sync local reconciliation", () => {
         [userId]
       );
       await pool.query("delete from sessions where owner_user_id=$1", [userId]);
+      await pool.query(
+        "delete from personal_project_default_reconciliation where owner_user_id=$1",
+        [userId]
+      );
       await pool.query("delete from users where id=$1", [userId]);
     }
   });

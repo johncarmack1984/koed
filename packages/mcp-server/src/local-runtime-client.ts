@@ -346,6 +346,9 @@ export class LocalAiRuntimeClient {
 
   async askDesktop(
     input: {
+      namedProjectId?: string;
+      folderSelection?: import("@koed/shared").PersonalFolderReference;
+      repositorySelection?: import("@koed/shared").PersonalGitContext;
       askThreadId?: string;
       idempotencyKey: string;
       query: string;

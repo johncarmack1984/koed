@@ -936,13 +936,6 @@ export const routeIdentityContracts = [
   ),
   route(
     "PATCH",
-    "/v1/memory/graph/sessions/{sessionId}/project",
-    "session_or_api_token",
-    "personal_memory",
-    "Move a personal Captured Session to a Personal Project or reset automatic placement."
-  ),
-  route(
-    "PATCH",
     "/v1/memory/graph/sessions/{sessionId}/presentation",
     "session_or_api_token",
     "personal_memory",
@@ -1721,6 +1714,16 @@ export const routeIdentityContracts = [
     teamDeploymentModes
   ),
   route(
+    "GET",
+    "/v1/shared-memory/teams/{teamId}/workspaces/{teamWorkspaceId}/sharing-review",
+    "session_or_device_credential",
+    "shared_memory",
+    "Review current sharing authority and destination policy without publishing Memory.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
     "POST",
     "/v1/shared-memory/previews",
     "session_or_device_credential",
@@ -1736,6 +1739,186 @@ export const routeIdentityContracts = [
     "device_credential",
     "shared_memory",
     "Create a reviewed Shared Memory candidate preview.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/conversation-rules/review",
+    "session_or_device_credential",
+    "shared_memory",
+    "Review exact Conversation rule creation and existing destination authority.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/repository-rules/review",
+    "session_or_device_credential",
+    "shared_memory",
+    "Review Git Anchor future-member authority and current destination policies.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/repository-rules",
+    "device_credential",
+    "shared_memory",
+    "Create a reviewed Git Anchor rule bound to one publisher; source publication requires separate eligible membership admission.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/repository-rules/{ruleId}/members",
+    "device_credential",
+    "shared_memory",
+    "Admit an eligible owned Conversation through Pending Share under the current Git Anchor rule publisher authority.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/repository-rules/{ruleId}/control",
+    "device_credential",
+    "shared_memory",
+    "Control one reviewed Git Anchor rule across its existing and future memberships, preserving independent reasons.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/repository-rules/owned",
+    "session_or_device_credential",
+    "shared_memory",
+    "List the owner's rules for one exact Git Anchor, including empty and stopped rules, without exposing Personal paths.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/sharing-rules/{ruleId}/publisher-review",
+    "device_credential",
+    "shared_memory",
+    "Review an exact owner-authorized transfer to a different publisher using an existing verified source identity and unchanged rule scope.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/sharing-rules/{ruleId}/publisher",
+    "device_credential",
+    "shared_memory",
+    "Transfer the rule publisher under an exact receiving-device native Action Grant, advancing its authority and publisher fence while retaining consent and state.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/repository-rules/{ruleId}/members/inventory",
+    "device_credential",
+    "shared_memory",
+    "Read at most 100 owner-private existing member origins under the exact current publisher authority and fence, without creating source or sharing authority.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/repository-rules/{ruleId}/members/resolve",
+    "device_credential",
+    "shared_memory",
+    "Resolve one exact owner-private Personal origin under the current rule publisher without creating source or sharing authority.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/repository-rules/{ruleId}/members/inspect",
+    "device_credential",
+    "shared_memory",
+    "Inspect owner-private member and grant versions for at most 100 exact sources under one publisher.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/repository-rules/{ruleId}/members/readmit",
+    "device_credential",
+    "shared_memory",
+    "Re-admit an existing native-bound source under the current publisher and unchanged future rule scope, without a receiving source upload.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/repository-rules/{ruleId}/members/cancel-mutation",
+    "device_credential",
+    "shared_memory",
+    "Settle one exact ambiguous member mutation by recovering its accepted receipt or preventing its late execution.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/repository-rules/{ruleId}/members/{membershipId}/context",
+    "device_credential",
+    "shared_memory",
+    "Refresh matching member eligibility evidence without changing its consent.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/repository-rules/{ruleId}/members/{membershipId}/remove",
+    "device_credential",
+    "shared_memory",
+    "Remove one rule's reason with current publisher and member versions, including while paused.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/sharing-rules/{ruleId}/publisher/receipt",
+    "device_credential",
+    "shared_memory",
+    "Read an exact committed publisher-transfer receipt without executing or consuming a fresh Action Grant.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/conversation-rules/receipt",
+    "device_credential",
+    "shared_memory",
+    "Read an exact committed Conversation rule creation receipt without executing or consuming a fresh Action Grant.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/conversation-rules",
+    "device_credential",
+    "shared_memory",
+    "Accept an explicitly reviewed continuous Conversation rule through Pending Share processing.",
     "request_time_shared_memory_owner",
     "implemented",
     teamDeploymentModes
@@ -1776,6 +1959,56 @@ export const routeIdentityContracts = [
     "session_or_device_credential",
     "shared_memory",
     "Queue a reviewed fidelity replacement through the durable Pending Share workflow.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/sharing-rules/{ruleId}/control",
+    "session_or_device_credential",
+    "shared_memory",
+    "Control one continuous Conversation sharing rule.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/sharing-rules/{ruleId}/detail-review",
+    "session_or_device_credential",
+    "shared_memory",
+    "Review one rule's proposed detail against current member and policy authority.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/sharing-rules/{ruleId}/detail",
+    "device_credential",
+    "shared_memory",
+    "Apply a native-approved detail amendment without changing rule lifecycle.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/sharing-rules/{ruleId}/content-policy-review",
+    "session_or_device_credential",
+    "shared_memory",
+    "Review one rule's proposed content policy against current member and policy authority.",
+    "request_time_shared_memory_owner",
+    "implemented",
+    teamDeploymentModes
+  ),
+  route(
+    "POST",
+    "/v1/shared-memory/sharing-rules/{ruleId}/content-policy",
+    "device_credential",
+    "shared_memory",
+    "Apply a native-approved content-policy amendment without changing rule lifecycle.",
     "request_time_shared_memory_owner",
     "implemented",
     teamDeploymentModes

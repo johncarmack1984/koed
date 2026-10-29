@@ -703,7 +703,8 @@ export const createFixtureRuntime = async (
     ownerProvider,
     teamProvider,
     collaborationRepository: db.createCollaborationRepository(pool, {
-      envelopeEncryptionProvider: teamProvider
+      envelopeEncryptionProvider: personalProvider,
+      teamEnvelopeEncryptionProvider: teamProvider
     }),
     teamConversationSourceRepository:
       db.createTeamConversationSourceRepository(pool),
@@ -1327,6 +1328,13 @@ const seedSharedMemoryTopology = async (client, runtime, memory) => {
       workspacePolicyId: workspacePolicy.policyId,
       workspacePolicyVersion: 1
     },
+    selection: {
+      maximumFidelity,
+      includeCuratedMemory,
+      sourceCapabilities: [memory.representation],
+      activationRepresentation: memory.representation,
+      mode: "continuous"
+    },
     manifest,
     manifestHash,
     items: [item],
@@ -1880,10 +1888,10 @@ const seedSharedMemoryTopology = async (client, runtime, memory) => {
        fidelity_policy_revision, content_policy_version,
        classifier_version, record_version, state, chunk_count,
        freshness_evaluated_at, available_at, invalidated_at,
-       invalidation_reason_code
+       invalidation_reason_code,display_title
      ) values (
        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,1,$17,$18,
-       $19,1,$20,1,$21,1,1,1,$22,1,$23,1,$24,$24,$25,$26
+       $19,1,$20,1,$21,1,1,1,$22,1,$23,1,$24,$24,$25,$26,$27
      )`,
     [
       memory.representationId,
@@ -1911,8 +1919,35 @@ const seedSharedMemoryTopology = async (client, runtime, memory) => {
       revoked ? "invalidated" : "available",
       memory.capturedAt,
       revoked ? memory.capturedAt : null,
-      revoked ? "share_revoked" : null
+      revoked ? "share_revoked" : null,
+      "[koed encrypted Shared Memory title]"
     ]
+  );
+  await runtime.upsertEncryptedFieldPayloadWithClient(
+    client,
+    { userId: owner.id },
+    runtime.teamProvider,
+    {
+      sourceTable: "team_memory_representations",
+      sourceId: memory.representationId,
+      sourceColumn: `display_title:${sourceRevisionHash}`,
+      plaintext: semanticPayload.displayTitle,
+      visibility: "team",
+      teamId: fixtureTeam.id,
+      teamWorkspaceId: workspace.id,
+      rowFamily: "shared_memory_representation_title",
+      scope: {
+        teamId: fixtureTeam.id,
+        workspaceId: workspace.id,
+        objectClass: "shared_memory_representation"
+      },
+      aad: {
+        shareGrantId: memory.shareGrantId,
+        consentId: memory.consentId,
+        sourceRevision: 1,
+        sourceRevisionHash
+      }
+    }
   );
   const chunkAad = {
     chunkFormatVersion: 1,
@@ -2282,7 +2317,7 @@ const seedConversationSourceFixture = async (client, runtime) => {
          origin_public_key, redacted_source_label, finalized_at
        ) values (
          $1,$2,$3,$4,$5,'main','primary',null,'jsonl','origin_local',
-         'codex','codex',$6,$7,'jsonl',1,'codex-transcript-v1','finalized',
+         'codex','codex',$6,$7,'codex_rollout_jsonl',1,'codex-transcript-v1','finalized',
          0,0,0,0,$8,$9,$8,$10,$11,$11,'envelope_db',$12,
          $13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,
          'Fixture Codex session',$19

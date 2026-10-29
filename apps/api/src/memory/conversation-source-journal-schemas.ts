@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  repositoryIdentitySchema,
+  personalFolderObservationSchema
+} from "@koed/shared";
 
 const boundedOffset = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const boundedLine = z.number().int().min(0).max(2_147_483_647);
@@ -22,6 +26,9 @@ export const conversationSourceArtifactSchema = z
         idempotencyKey: z.string().min(1).max(2048),
         sourceHash: digest.optional(),
         metadata: z.record(z.string(), z.unknown()),
+        repositoryIdentity: repositoryIdentitySchema.optional(),
+        folderObservation: personalFolderObservationSchema.optional(),
+        currentFolderObservation: personalFolderObservationSchema.optional(),
         detectedProjects: z
           .array(
             z

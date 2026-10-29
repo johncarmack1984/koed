@@ -1491,15 +1491,22 @@ const run = async () => {
     );
     const rendererFaults = options.skipRendererFaults
       ? { skipped: true, reason: "explicit local acceptance option" }
-      : await measurePhase(timings, "renderer fault checks", async () =>
-          smokePackagedRendererFaults({
+      : await measurePhase(timings, "renderer fault checks", async () => {
+          const validationBuild = spawnSync("pnpm", ["build:validation"], {
+            cwd: desktopRoot,
+            stdio: "inherit"
+          });
+          if (validationBuild.error) throw validationBuild.error;
+          if (validationBuild.status !== 0)
+            throw new Error("Renderer validation build failed");
+          return smokePackagedRendererFaults({
             executable: layout.executable,
             env: createSmokeEnv(koedHome, {
               ELECTRON_RUN_AS_NODE: undefined
             }),
             koedHome
-          })
-        );
+          });
+        });
     desktop = launchPackagedDesktop({
       executable: layout.executable,
       env: createSmokeEnv(koedHome),

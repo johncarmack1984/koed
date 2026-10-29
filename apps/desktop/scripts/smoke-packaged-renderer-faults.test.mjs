@@ -1,14 +1,104 @@
-/* global process */
+/* global process, fetch */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { loadRendererValidation } from "./renderer-validation-assets.mjs";
 import {
   terminateChild,
   trustedClick,
   waitForRendererTarget
 } from "./smoke-packaged-renderer-faults.mjs";
+
+test("packaged fault fixtures preserve the trusted renderer origin and serve only their separate assets", async (t) => {
+  const scratch = resolve(import.meta.dirname, "../../../scratch");
+  mkdirSync(scratch, { recursive: true });
+  const root = mkdtempSync(resolve(scratch, "renderer-fixture-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(resolve(root, "assets"));
+  writeFileSync(
+    resolve(root, "browser-validation.html"),
+    '<head><script type="module" src="./assets/fixture.js"></script></head><main id="root"></main>'
+  );
+  writeFileSync(
+    resolve(root, "assets/fixture.js"),
+    "globalThis.fixture = true;"
+  );
+  const calls = [];
+  let reloading = false;
+  let reloadFrameReads = 0;
+  const cdp = {
+    call: async (method, params) => {
+      calls.push({ method, params });
+      if (method === "Page.reload") reloading = true;
+      return method === "Page.getFrameTree"
+        ? {
+            frameTree: {
+              frame: {
+                id: "package-frame",
+                loaderId:
+                  reloading && reloadFrameReads++ > 0
+                    ? "reloaded-document"
+                    : "original-document"
+              }
+            }
+          }
+        : { result: { value: true } };
+    }
+  };
+  const fixture = await loadRendererValidation(
+    cdp,
+    { view: "chat", actor: "alice" },
+    root
+  );
+  try {
+    assert.match(
+      calls.find(({ method }) => method === "Page.navigate").params.url,
+      /koed:\/\/app\/\?view=chat&actor=alice/
+    );
+    const document = calls.find(
+      ({ method }) => method === "Page.setDocumentContent"
+    ).params;
+    assert.equal(document.frameId, "package-frame");
+    const base = document.html.match(
+      /src="(http:[^"]+\/)assets\/fixture.js"/
+    )[1];
+    const script = await fetch(`${base}assets/fixture.js`);
+    assert.equal(await script.text(), "globalThis.fixture = true;");
+    assert.equal(script.headers.get("content-type"), "text/javascript");
+    assert.equal(
+      script.headers.get("access-control-allow-origin"),
+      "koed://app"
+    );
+    assert.equal((await fetch(`${base}assets/missing.js`)).status, 404);
+    assert.equal(
+      (await fetch(`${base}assets/%2F..%2F..%2Foutside.js`)).status,
+      403
+    );
+    await fixture.reload();
+    const afterReload = calls.slice(
+      calls.findIndex(({ method }) => method === "Page.reload") + 1
+    );
+    assert.deepEqual(
+      afterReload.slice(0, 3).map(({ method }) => method),
+      ["Page.getFrameTree", "Page.getFrameTree", "Runtime.evaluate"]
+    );
+    const documents = calls.filter(
+      ({ method }) => method === "Page.setDocumentContent"
+    );
+    assert.equal(documents.length, 2);
+    assert.deepEqual(documents[1].params, document);
+    assert.equal(
+      calls.filter(({ method }) => method === "Page.navigate").length,
+      1
+    );
+  } finally {
+    await fixture.dispose();
+  }
+});
 
 test("trusted renderer clicks foreground the page and dispatch real mouse input", async () => {
   const calls = [];

@@ -3,8 +3,12 @@ node_modules
 .pnpm-store
 .venv
 
+# Temporary local work and dependent worktrees
+scratch/
+
 # Build output and caches
 dist
+dist-validation
 coverage
 .turbo
 apps/desktop/dist-electron

@@ -1,4 +1,5 @@
 import type { KeyObject } from "node:crypto";
+import { registerPersonalProjectSelectionRoutes } from "./project-selection-routes.js";
 import { pdsSessionPackageDigest } from "@koed/shared";
 import { pdsConversationItemsForClosure } from "./local-source.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -770,6 +771,8 @@ export const registerPersonalDeviceSyncRoutes = (
     return context.auth.authenticateSession(request);
   };
   const repo = context.requireRepository;
+
+  registerPersonalProjectSelectionRoutes(app, context, sessionUser);
 
   app.post(
     "/v1/personal-device-sync/local-group-reconciliation",
@@ -1724,7 +1727,16 @@ export const registerPersonalDeviceSyncRoutes = (
       });
       if (!keyContext)
         throw pdsError("PDS secure key context is unavailable", 503);
+      if (keyContext.sourceContextVersion === "1")
+        await keyContext.prepareSourceContextPublication?.();
       const closure = await repo().closePdsSourceSession({
+        ...(keyContext.sourceContextVersion === "1"
+          ? {
+              includeSourceContext: true,
+              expectedEpoch: keyContext.configurationAuthority?.epoch,
+              expectedAuthorityHead: keyContext.configurationAuthority?.head
+            }
+          : {}),
         userId: user.id,
         groupId: input.groupId,
         sessionId: input.sessionId,

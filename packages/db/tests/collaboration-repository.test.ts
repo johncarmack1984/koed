@@ -237,10 +237,15 @@ describeDb("Collaboration repository", () => {
         maximum_fidelity text not null,
         include_curated_memory boolean not null,
         expires_at timestamptz,
-        revoked_at timestamptz
+        revoked_at timestamptz,
+        maximum_authorized_source_revision bigint,
+        fidelity_policy_revision integer not null default 1,
+        content_policy_version integer not null default 1,
+        classifier_version integer not null default 1
       );
       create temp table team_memory_share_grants (
         id uuid primary key,
+        owner_user_id uuid,
         logical_memory_id uuid not null,
         remote_replica_id uuid not null,
         owner_principal_id uuid not null,
@@ -262,6 +267,20 @@ describeDb("Collaboration repository", () => {
         revoked_at timestamptz,
         tombstoned_at timestamptz,
         purge_completed_at timestamptz
+      );
+      create temp table team_memory_share_reasons(
+        id uuid primary key default gen_random_uuid(),
+        share_grant_id uuid not null,consent_id uuid not null,
+        kind text not null default 'direct',rule_id uuid,membership_id uuid
+      );
+      create temp table team_memory_reason_publications(
+        reason_id uuid not null,share_grant_id uuid not null,consent_id uuid not null,
+        representation_id uuid not null,rule_version integer,publisher_fence bigint
+      );
+      create temp table team_memory_sharing_rules(
+        id uuid primary key,state text,owner_user_id uuid,logical_memory_id uuid,selector_kind text,
+        team_id uuid,team_workspace_id uuid,authority_version integer,publisher_fence bigint,
+        effective_privacy_policy_hash text,maximum_fidelity text,include_curated_memory boolean
       );
       create temp table collaboration_threads (
         id uuid primary key,
@@ -307,6 +326,8 @@ describeDb("Collaboration repository", () => {
       );
       create temp table team_memory_representations (
         id uuid primary key,
+        source_revision bigint not null default 1,
+        effective_privacy_policy_hash text not null default repeat('a',64),
         share_grant_id uuid not null,
         consent_id uuid not null,
         team_id uuid not null,
@@ -326,6 +347,22 @@ describeDb("Collaboration repository", () => {
         invalidated_at timestamptz,
         curated_expires_at timestamptz
       );
+      -- Keep this direct-publication fixture on the temporary relations. The
+      -- public view is bound to public tables and cannot see these test rows.
+      create temp view team_memory_publication_grant_records as
+        select grant_row.*, representation.id as publication_representation_id
+        from team_memory_share_grants grant_row
+        join team_memory_share_reasons reason
+          on reason.share_grant_id=grant_row.id and reason.consent_id=grant_row.consent_id
+          and reason.kind='direct' and reason.rule_id is null
+        join team_memory_reason_publications publication
+          on publication.reason_id=reason.id and publication.share_grant_id=grant_row.id
+          and publication.consent_id=grant_row.consent_id
+        join team_memory_representations representation
+          on representation.id=publication.representation_id
+          and representation.share_grant_id=grant_row.id and representation.consent_id=grant_row.consent_id
+          and representation.logical_memory_id=grant_row.logical_memory_id
+          and representation.team_id=grant_row.team_id and representation.team_workspace_id=grant_row.team_workspace_id;
       create temp table collaboration_outbox (
         id uuid primary key,
         cursor bigint not null,
@@ -480,6 +517,10 @@ describeDb("Collaboration repository", () => {
         ]
       );
       await authorizationPool.query(
+        `insert into team_memory_share_reasons(share_grant_id,consent_id) values($1,$2)`,
+        [scope.shareGrantId, scope.consentId]
+      );
+      await authorizationPool.query(
         `insert into collaboration_threads (
            id,logical_id,scope,kind,team_id,team_workspace_id,
            shared_logical_memory_id,share_grant_id,created_by_user_id,
@@ -626,6 +667,11 @@ describeDb("Collaboration repository", () => {
         ]
       );
       await authorizationPool.query(
+        `insert into team_memory_reason_publications(reason_id,share_grant_id,consent_id,representation_id)
+        select id,share_grant_id,consent_id,$2 from team_memory_share_reasons where share_grant_id=$1`,
+        [scope.shareGrantId, representationId]
+      );
+      await authorizationPool.query(
         `insert into collaboration_outbox (
            id,cursor,protocol_version,family,scope,team_id,team_workspace_id,
            share_grant_id,logical_memory_id,resource_type,resource_id,
@@ -647,6 +693,17 @@ describeDb("Collaboration repository", () => {
           randomUUID()
         ]
       );
+      // Autovacuum cannot analyze temporary relations. Give the planner the
+      // actual tiny fixture cardinalities before exercising its joins.
+      await authorizationPool.query(`analyze
+        pg_temp.users, pg_temp.teams, pg_temp.team_memberships,
+        pg_temp.team_workspaces, pg_temp.team_workspace_access_grants,
+        pg_temp.source_owner_representation_policies,
+        pg_temp.team_representation_policies, pg_temp.workspace_representation_policies,
+        pg_temp.source_owner_representation_consents,
+        pg_temp.team_memory_share_grants, pg_temp.team_memory_share_reasons,
+        pg_temp.team_memory_reason_publications, pg_temp.team_memory_representations,
+        pg_temp.collaboration_outbox`);
       return { eventId, cursor, family, representationId };
     };
 
@@ -802,6 +859,22 @@ describeDb("Collaboration repository", () => {
           )
         );
       }
+      // An active grant and consent are insufficient without an exact durable publication.
+      await harness.pool.query(
+        `delete from team_memory_reason_publications where share_grant_id=$1`,
+        [scope.shareGrantId]
+      );
+      await expect(isAuthorized(events.lcm_rollups)).resolves.toBe(false);
+      await expect(
+        harness.repository.getThread(actor(harness.actorUserId), {
+          threadId: scope.threadId
+        })
+      ).resolves.toBeNull();
+      const withoutPublications = await harness.repository.replayEvents(
+        actor(harness.actorUserId),
+        { scope: "team", teamId: harness.teamId, afterCursor: 0 }
+      );
+      expect(withoutPublications?.events).toEqual([]);
     } finally {
       await harness.pool.end();
     }

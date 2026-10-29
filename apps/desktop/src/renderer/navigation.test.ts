@@ -4,6 +4,7 @@ import {
   currentNavigationEntry,
   navigationReducer,
   routePath,
+  sessionProjectRoute,
   type NavigationEntry
 } from "./navigation.js";
 
@@ -41,6 +42,78 @@ describe("navigationReducer", () => {
 
     state = navigationReducer(state, { type: "forward" });
     expect(currentNavigationEntry(state)).toEqual(teamChannel);
+  });
+
+  it("returns from a Conversation to its filtered Project list", () => {
+    const sourceFilter = {
+      kind: "folder" as const,
+      key: "full-folder-identity",
+      gitKey: "anchor-identity"
+    };
+    expect(
+      sessionProjectRoute({
+        kind: "personal-memory-session",
+        projectId: "git-anchor",
+        sessionId: "logical-session",
+        sourceFilter
+      })
+    ).toEqual({
+      kind: "personal-memory-project",
+      projectId: "git-anchor",
+      sourceFilter
+    });
+    expect(
+      sessionProjectRoute({
+        kind: "personal-memory-session",
+        projectId: "git-anchor",
+        sessionId: "logical-session"
+      })
+    ).toEqual({ kind: "personal-memory-project", projectId: "git-anchor" });
+  });
+
+  it("retains an exact nested source filter and context through Conversation back/forward navigation", () => {
+    const entry: NavigationEntry = {
+      ...personal,
+      route: {
+        kind: "personal-memory-project",
+        projectId: "named-project",
+
+        sourceFilter: {
+          kind: "folder",
+          key: "full-folder-identity",
+          gitKey: "anchor-identity"
+        }
+      }
+    };
+    const session: NavigationEntry = {
+      ...entry,
+      route: {
+        ...entry.route,
+        kind: "personal-memory-session",
+        projectId: "named-project",
+        sessionId: "logical-session",
+
+        sourceFilter: {
+          kind: "folder",
+          key: "full-folder-identity",
+          gitKey: "anchor-identity"
+        }
+      }
+    };
+    let state = navigationReducer(createNavigationState(entry), {
+      type: "push",
+      entry: session
+    });
+    state = navigationReducer(state, { type: "back" });
+    expect(currentNavigationEntry(state)).toEqual(entry);
+    const query = new URLSearchParams(routePath(entry.route).split("?")[1]);
+    expect(JSON.parse(query.get("source")!)).toEqual({
+      kind: "folder",
+      key: "full-folder-identity",
+      gitKey: "anchor-identity"
+    });
+    state = navigationReducer(state, { type: "forward" });
+    expect(currentNavigationEntry(state)).toEqual(session);
   });
 
   it("drops forward history when a new route is pushed", () => {

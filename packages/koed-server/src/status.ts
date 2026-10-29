@@ -1367,6 +1367,7 @@ const inspectCaptureHook = async (
     return authenticatedRuntimeUnavailable();
   }
   const requiredEvents = [
+    "PreToolUse",
     "SessionStart",
     "UserPromptSubmit",
     "PostToolUse",

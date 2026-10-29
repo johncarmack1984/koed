@@ -91,6 +91,55 @@ const collect = (client: Client, id: string) =>
   client.callTool({ name: "memory_answer_result", arguments: { task_id: id } });
 
 describe("ordinary MCP non-blocking Memory Answer", () => {
+  it.each(["blocking", "non_blocking"] as const)(
+    "transports an explicit Personal Project in %s mode without requiring a caller directory",
+    async (delivery_mode) => {
+      const { client, runtime } = await connect();
+      const recall_target = {
+        kind: "project",
+        project: { ownerUserId: randomUUID(), projectId: randomUUID() }
+      };
+      const result = await client.callTool({
+        name: "memory_answer",
+        arguments: { query: "Decision", recall_target, delivery_mode }
+      });
+      expect(result.isError).not.toBe(true);
+      if (delivery_mode === "non_blocking") {
+        expect(runtime.startMemoryAnswerTask).toHaveBeenCalledWith(
+          expect.objectContaining({ recall_target }),
+          expect.any(Object),
+          expect.any(String),
+          expect.any(AbortSignal)
+        );
+      } else {
+        expect(runtime.callTool).toHaveBeenCalledWith(
+          "memory_answer",
+          expect.objectContaining({ recall_target }),
+          expect.any(Object),
+          expect.any(AbortSignal),
+          expect.any(String)
+        );
+      }
+    }
+  );
+  it("passes the per-call Conversation directory to task acceptance and leaves collection independent", async () => {
+    const { client, runtime, current } = await connect();
+    await submit(client, { conversation_cwd: "/work/current-conversation" });
+    const [submitted] = vi.mocked(runtime.startMemoryAnswerTask).mock.calls;
+    expect(submitted?.[0]).not.toHaveProperty("conversation_cwd");
+    expect(runtime.startMemoryAnswerTask).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ cwd: "/work/current-conversation" }),
+      expect.any(String),
+      expect.any(AbortSignal)
+    );
+    await collect(client, current.id);
+    expect(runtime.startMemoryAnswerTask).toHaveBeenCalledTimes(1);
+    expect(runtime.getMemoryAnswerTask).toHaveBeenCalledWith(
+      current.id,
+      expect.any(AbortSignal)
+    );
+  });
   it("accepts before a gated worker finishes, and collection never waits", async () => {
     let finish!: () => void;
     const workerGate = new Promise<void>((resolve) => {

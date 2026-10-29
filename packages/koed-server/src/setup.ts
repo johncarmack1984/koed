@@ -226,11 +226,14 @@ const configureCodexIntegration = ({
     nodeCommand,
     runtime.captureHook,
     "--koed-home",
-    paths.koedHome
+    paths.koedHome,
+    "--memory-tool",
+    `mcp__${mcpName}__memory_answer`
   ]
     .map(tomlString)
     .join(" ");
   const hookEvents = [
+    ["PreToolUse", 10],
     ["SessionStart", 10],
     ["UserPromptSubmit", 10],
     ["PostToolUse", 10],
@@ -241,7 +244,7 @@ const configureCodexIntegration = ({
   const hookBlocks = hookEvents
     .map(
       ([eventName, timeout]) => `[[hooks.${eventName}]]
-[[hooks.${eventName}.hooks]]
+${eventName === "PreToolUse" ? `matcher = ${tomlString(`mcp__${mcpName}__memory_answer`)}\n` : ""}[[hooks.${eventName}.hooks]]
 type = "command"
 command = ${tomlString(hookCommand)}
 timeout = ${timeout}`

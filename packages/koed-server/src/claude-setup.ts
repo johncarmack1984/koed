@@ -72,6 +72,7 @@ export const resolveClaudeExecutablePath = (
 
 export const MINIMUM_CLAUDE_CODE_VERSION = "2.1.227";
 export const CLAUDE_HOOK_EVENTS = [
+  "PreToolUse",
   "SessionStart",
   "UserPromptSubmit",
   "PostToolUse",
@@ -573,7 +574,9 @@ export const setupClaude = async (
       "--source",
       "claude",
       "--koed-home",
-      paths.koedHome
+      paths.koedHome,
+      "--memory-tool",
+      `mcp__${mcpName}__memory_answer`
     ]
       .map((value) => JSON.stringify(value))
       .join(" ");
@@ -664,6 +667,9 @@ export const setupClaude = async (
       settings.hooks[eventName] = [
         ...withoutKoedHook(settings.hooks[eventName], runtime.captureHook),
         {
+          ...(eventName === "PreToolUse"
+            ? { matcher: `mcp__${mcpName}__memory_answer` }
+            : {}),
           hooks: [{ type: "command", command: hookCommand, timeout: 3 }]
         }
       ];

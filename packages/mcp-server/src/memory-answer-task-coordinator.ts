@@ -1,7 +1,13 @@
+import {
+  pinRepositoryRecallContext,
+  resolveVerifiedProjectRoot
+} from "./repository-recall-context.js";
 import os from "node:os";
 import path from "node:path";
 import {
   isTeamMemoryAnswerTaskCapability,
+  personalSelectionFromTaskRequest,
+  requirePortableTeamRepositoryContext,
   readLocalEdgeClientCredentialAuthorization,
   readLocalEdgeUpstreamRegistry,
   type ClaimedMemoryAnswerTask,
@@ -9,6 +15,7 @@ import {
   type MemoryAnswerTaskExecutionAuthority
 } from "@koed/shared";
 import { MemoryApiClient } from "./index.js";
+import { pinPersonalRecallRequest } from "./personal-recall-request.js";
 import type { MemoryAnswerRetrievalClient } from "./answer-worker.js";
 import type {
   MemoryAnswerTaskApi,
@@ -307,6 +314,11 @@ class ScopedTeamRetrievalClient implements MemoryAnswerRetrievalClient {
     nodeId: string,
     input: Parameters<MemoryAnswerRetrievalClient["expand"]>[1] = {}
   ) {
+    if (input?.personalSelection)
+      throw unavailable(
+        "Personal selections are not supported for Team Memory",
+        400
+      );
     return this.client.teamMemoryExpand(
       this.backendId,
       nodeId,
@@ -422,16 +434,80 @@ export const createMemoryAnswerTaskCoordinator = (
   return new MemoryAnswerTaskCoordinator({
     backends,
     resolveStart: async (request) => {
+      if (
+        (request.request.input as Record<string, unknown>)?.recall_target !==
+        undefined
+      ) {
+        if (
+          request.request.selection !== undefined ||
+          request.request.requestVersion !== undefined
+        )
+          throw unavailable(
+            "Recall target cannot replace an accepted selection",
+            400
+          );
+        const pinned = await pinPersonalRecallRequest(
+          request.request.input,
+          client
+        );
+        request = {
+          ...request,
+          request: {
+            ...request.request,
+            input: pinned.input,
+            requestVersion: 1,
+            selection: pinned.selection
+          }
+        };
+      }
+      const selection = personalSelectionFromTaskRequest({
+        ...request.request,
+        input: request.request.input
+      });
+      if (
+        selection?.version === 1 &&
+        (selection.target.kind === "project" ||
+          selection.target.kind === "folder")
+      ) {
+        const raw = request.request.input as Record<string, unknown>;
+        const pinned = memoryAnswerInputSchema.parse({
+          ...raw,
+          repository_context: undefined
+        });
+        if (pinned.team_workspace_id || pinned.team_backend_id)
+          throw unavailable(
+            "Personal selections cannot route to Team Memory",
+            400
+          );
+        return {
+          backendId: "personal",
+          input: {
+            ...request,
+            request: {
+              ...request.request,
+              input: { ...pinned, repository_context: null }
+            }
+          }
+        };
+      }
       const input = memoryAnswerInputSchema.parse(request.request.input);
       const caller = request.request.caller as { cwd?: string } | undefined;
-      const projectRoot =
-        input.search_domain === "project"
-          ? input.project_id &&
-            (path.isAbsolute(input.project_id) ||
-              path.win32.isAbsolute(input.project_id))
-            ? input.project_id
-            : path.resolve(caller?.cwd ?? "")
-          : undefined;
+      // Verify the checkout's identity before its path can select a route. An
+      // unverifiable checkout selects no Team route; pinning reports its error
+      // after route authorization, as before.
+      const verified = await resolveVerifiedProjectRoot(
+        input,
+        { cwd: caller?.cwd ?? "" },
+        environment
+      ).catch(() => undefined);
+      const projectRoot = verified?.projectRoot;
+      const pin = async () =>
+        verified?.pinned ??
+        (await pinRepositoryRecallContext(
+          input,
+          { cwd: caller?.cwd ?? "" },
+          environment
+        ));
       const route = resolveProjectTeamWorkspaceRoute({
         projectRoot,
         requestedTeamWorkspaceId: input.team_workspace_id,
@@ -443,7 +519,13 @@ export const createMemoryAnswerTaskCoordinator = (
             "A Team Workspace is required for Team recall",
             400
           );
-        return { backendId: "personal", input: request };
+        return {
+          backendId: "personal",
+          input: {
+            ...request,
+            request: { ...request.request, input: await pin() }
+          }
+        };
       }
       let backendId = "remote-team";
       if (!allowTeamRuntime) {
@@ -485,10 +567,15 @@ export const createMemoryAnswerTaskCoordinator = (
         )
           throw unavailable("Team Workspace route is not currently authorized");
         backendId = `upstream:${selected}`;
-      } else if (input.team_backend_id && input.team_backend_id !== "remote") {
-        throw unavailable("Requested Team backend is not available");
+      } else {
+        if (!supportsTeamMemoryAnswerTasks(await client.capabilities()))
+          throw unavailable("Team Memory Answer tasks are not available");
+        if (input.team_backend_id && input.team_backend_id !== "remote")
+          throw unavailable("Requested Team backend is not available");
       }
-      const normalized = { ...input };
+      const normalized = { ...(await pin()) };
+      if (normalized.search_domain === "project")
+        requirePortableTeamRepositoryContext(normalized.repository_context);
       delete normalized.team_backend_id;
       return {
         backendId,
@@ -498,8 +585,7 @@ export const createMemoryAnswerTaskCoordinator = (
             ...request.request,
             input: {
               ...normalized,
-              team_workspace_id: route.teamWorkspaceId,
-              ...(projectRoot ? { project_id: projectRoot } : {})
+              team_workspace_id: route.teamWorkspaceId
             }
           }
         }

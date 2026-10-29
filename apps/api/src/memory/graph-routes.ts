@@ -1,8 +1,11 @@
+import { registerPersonalSelectionConsumerRoutes } from "./personal-selection-consumer-routes.js";
+import { registerPersonalSourceContextRoutes } from "./personal-source-context-routes.js";
+import { registerPersonalFolderRoutes } from "./personal-folder-routes.js";
+import { registerPersonalSourceInventoryRoutes } from "./personal-source-inventory-routes.js";
+import { registerPersonalProjectRoutes } from "./personal-project-routes.js";
+import { registerRepositoryReviewRoutes } from "./repository-review-routes.js";
 import type { FastifyInstance } from "fastify";
-import {
-  createEncryptedJsonPackage,
-  crossIdentitySyncDeterministicUuid
-} from "@koed/shared";
+import { createEncryptedJsonPackage } from "@koed/shared";
 import { ConversationPresentationVersionConflictError } from "@koed/db";
 import { z } from "zod";
 import { actorForAuthenticatedRequest } from "../auth/session.js";
@@ -22,7 +25,6 @@ import {
   graphThreadIndexResponseSchema,
   graphSessionParamsSchema,
   graphSessionPresentationPatchSchema,
-  graphSessionProjectPatchSchema,
   graphSessionTitlePatchSchema,
   graphNodesQuerySchema,
   graphQuerySchema,
@@ -69,6 +71,12 @@ export const registerGraphRoutes = (
   app: FastifyInstance,
   context: ApiRouteContext
 ) => {
+  registerRepositoryReviewRoutes(app, context);
+  registerPersonalProjectRoutes(app, context);
+  registerPersonalSelectionConsumerRoutes(app, context);
+  registerPersonalFolderRoutes(app, context);
+  registerPersonalSourceInventoryRoutes(app, context);
+  registerPersonalSourceContextRoutes(app, context);
   const {
     requireRepository,
     config,
@@ -77,7 +85,7 @@ export const registerGraphRoutes = (
       authenticateApiToken,
       authenticateSessionOrDeviceCredential
     },
-    graph: { cacheProvider, graphCacheTtlSeconds, hashCacheKey },
+    graph: { cacheProvider },
     encryption: { envelopeEncryptionProvider },
     rateLimit: {
       memoryRead: memoryReadRateLimit,
@@ -148,17 +156,11 @@ export const registerGraphRoutes = (
     async (request) => {
       const repo = requireRepository();
       const user = await authenticate(request);
-      const cacheKey = `koed:graph:overview:${user.id}`;
-      const cached = await cacheProvider.getJson<{ overview: unknown }>(
-        cacheKey
-      );
-      if (cached) {
-        return cached;
-      }
+      const query = graphQuerySchema.parse(request.query);
+      rejectUnavailableTeamSharedMemorySurface(query.teamWorkspaceId, "graph");
       const response = {
-        overview: await repo.getLcmGraphOverview({ userId: user.id })
+        overview: await repo.getLcmGraphOverview({ userId: user.id }, query)
       };
-      await cacheProvider.setJson(cacheKey, response, graphCacheTtlSeconds);
       return response;
     }
   );
@@ -199,7 +201,11 @@ export const registerGraphRoutes = (
         { userId: user.id },
         params.nodeId,
         {
-          includeInvalidated: query.includeInvalidated
+          includeInvalidated: query.includeInvalidated,
+          personalSelection: query.personalSelection,
+          projectId: query.projectId,
+          sessionId: query.sessionId,
+          threadId: query.threadId
         }
       );
       return node
@@ -239,19 +245,10 @@ export const registerGraphRoutes = (
       rejectUnavailableTeamSharedMemorySurface(query.teamWorkspaceId, "graph");
       const personalQuery = { ...query };
       delete personalQuery.teamWorkspaceId;
-      const cacheKey = `koed:graph:threads:${user.id}:${hashCacheKey(
-        JSON.stringify(personalQuery)
-      )}`;
-      const cached = await cacheProvider.getJson<{ projects: unknown }>(
-        cacheKey
+      const projects = await repo.listLcmGraphThreads(
+        { userId: user.id },
+        personalQuery
       );
-      if (cached) {
-        return cached;
-      }
-      const [projects, localDeployment] = await Promise.all([
-        repo.listLcmGraphThreads({ userId: user.id }, personalQuery),
-        repo.getLocalSyncDeployment()
-      ]);
       const sessionIds = projects.flatMap((project) =>
         project.threads.flatMap((thread) =>
           thread.sessionId ? [thread.sessionId] : []
@@ -270,16 +267,7 @@ export const registerGraphRoutes = (
           ...project,
           threads: project.threads.map((thread) => ({
             ...thread,
-            logicalMemoryId:
-              thread.sessionId && localDeployment
-                ? crossIdentitySyncDeterministicUuid({
-                    protocol: "koed.captured-session-sync/v1",
-                    sourceDeploymentId: localDeployment.protocolDeploymentId,
-                    sourceUserId: user.id,
-                    originSessionId: thread.sessionId,
-                    identity: "logical-memory"
-                  })
-                : null,
+            logicalMemoryId: thread.logicalMemoryId ?? null,
             presentation: thread.sessionId
               ? presentations.has(thread.sessionId)
                 ? publicConversationPresentation(
@@ -291,7 +279,6 @@ export const registerGraphRoutes = (
         }))
       };
       const response = graphThreadIndexResponseSchema.parse(graphResponseInput);
-      await cacheProvider.setJson(cacheKey, response, graphCacheTtlSeconds);
       return response;
     }
   );
@@ -354,35 +341,6 @@ export const registerGraphRoutes = (
         params.sessionId,
         input
       );
-      if (!session) {
-        return reply
-          .status(404)
-          .send({ error: "Captured session not found or not visible" });
-      }
-      await cacheProvider.deleteByPrefix("koed:graph:");
-      return { session };
-    }
-  );
-
-  app.patch(
-    "/v1/memory/graph/sessions/:sessionId/project",
-    { preHandler: memoryWriteRateLimit },
-    async (request, reply) => {
-      const repo = requireRepository();
-      const user = await authenticate(request);
-      const params = graphSessionParamsSchema.parse(request.params);
-      const input = graphSessionProjectPatchSchema.parse(request.body);
-      const session =
-        input.action === "move"
-          ? await repo.moveCapturedSessionToProject(
-              { userId: user.id },
-              params.sessionId,
-              input.project
-            )
-          : await repo.resetCapturedSessionProject(
-              { userId: user.id },
-              params.sessionId
-            );
       if (!session) {
         return reply
           .status(404)
@@ -528,9 +486,12 @@ export const registerGraphRoutes = (
       const repo = requireRepository();
       const user = await authenticateApiToken(request);
       const params = nodeIdParamsSchema.parse(request.params);
+      const query = graphEventDetailQuerySchema.parse(request.query);
+      rejectUnavailableTeamSharedMemorySurface(query.teamWorkspaceId, "graph");
       const node = await repo.getLcmGraphNode(
         { userId: user.id },
-        params.nodeId
+        params.nodeId,
+        query
       );
 
       return node
@@ -686,6 +647,7 @@ export const registerGraphRoutes = (
           searchDomain: query.search_domain,
           sessionId: query.session_id,
           projectId: query.project_id,
+          personalSelection: query.personal_selection,
           recentDays: query.recent_days,
           sourceAfter: query.source_after?.toISOString(),
           sourceBefore: query.source_before?.toISOString()

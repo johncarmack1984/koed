@@ -2,6 +2,7 @@ import {
   PERSONAL_DESKTOP_CONTRACT_VERSION,
   type PersonalDesktopResult
 } from "@koed/shared";
+import { createProjectSourceFixture } from "../project-source-fixture.js";
 import { describe, expect, it, vi } from "vitest";
 
 import { createPersonalMemoryPreloadApi } from "./personal-memory-preload.js";
@@ -26,6 +27,154 @@ describe("Personal Memory preload bridge", () => {
     removeListener: vi.fn()
   });
 
+  it("prepares only a validated opaque native identity and rejects renderer paths", async () => {
+    const folder = createProjectSourceFixture().localFolders[0]!;
+    const invoke = vi.fn(async () =>
+      success("personal.folders.local.prepare", { folder })
+    );
+    const bridge = createPersonalMemoryPreloadApi(invoke, events());
+    await expect(
+      bridge.prepareLocalFolder!({ localProjectId: "lp_fixture_local" })
+    ).resolves.toEqual(folder);
+    expect(invoke).toHaveBeenCalledWith(personalMemoryCommandChannel, {
+      contractVersion: PERSONAL_DESKTOP_CONTRACT_VERSION,
+      operation: "personal.folders.local.prepare",
+      input: { localProjectId: "lp_fixture_local" }
+    });
+    invoke.mockClear();
+    await expect(
+      bridge.prepareLocalFolder!({
+        localProjectId: "lp_fixture_local",
+        path: "/arbitrary"
+      } as never)
+    ).rejects.toThrow();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("validates Project sync reviews before IPC and rejects caller-supplied apply changes", async () => {
+    const projectId = "00000000-0000-4000-8000-000000000081";
+    const state = {
+      project: {
+        projectId,
+        name: "Planning",
+        version: 1,
+        headRevisionId: "00000000-0000-4000-8000-000000000082",
+        deletedAt: null,
+        createdAt: "2026-10-19T12:00:00.000Z",
+        updatedAt: "2026-10-19T12:00:00.000Z"
+      },
+      projectIdentity: projectId,
+      catalog: null,
+      memberships: [],
+      nextEntityId: null
+    };
+    const invoke = vi
+      .fn()
+      .mockResolvedValue(success("personal.projects.sync", { state }));
+    const api = createPersonalMemoryPreloadApi(invoke, events());
+    await expect(
+      api.manageMembershipSync!({ action: "list", projectId })
+    ).resolves.toEqual({ state });
+    expect(invoke).toHaveBeenLastCalledWith(personalMemoryCommandChannel, {
+      contractVersion: PERSONAL_DESKTOP_CONTRACT_VERSION,
+      operation: "personal.projects.sync",
+      input: { action: "list", projectId }
+    });
+    for (const input of [
+      {
+        action: "apply",
+        projectId,
+        reviewId: projectId,
+        expectedVersion: 1,
+        change: { kind: "delete_project" }
+      },
+      {
+        action: "preview",
+        projectId,
+        review: {
+          entityId: projectId,
+          expectedVersion: 1,
+          expectedHeads: ["same", "same"],
+          change: { kind: "delete_project" }
+        }
+      },
+      { action: "list", projectId, url: "https://untrusted.test" }
+    ])
+      await expect(api.manageMembershipSync!(input as never)).rejects.toThrow();
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+  it("validates separate source-context commands before IPC", async () => {
+    const sessionId = "00000000-0000-4000-8000-000000000073";
+    const context = {
+      sessionId,
+      logicalSessionId: sessionId,
+      git: {
+        revision: 1,
+        original: { state: "unresolved", reason: "historical_unresolved" },
+        correction: { state: "original" }
+      },
+      folder: {
+        revision: 1,
+        original: { state: "unresolved", reason: "historical_unresolved" },
+        correction: { state: "original" }
+      }
+    };
+    const invoke = vi
+      .fn()
+      .mockResolvedValue(success("personal.sources.manage", { context }));
+    const api = createPersonalMemoryPreloadApi(invoke, events());
+    expect(
+      await api.manageSourceContext!({ action: "get", sessionId })
+    ).toEqual({ context });
+    expect(invoke.mock.calls[0]![1]).toEqual({
+      contractVersion: PERSONAL_DESKTOP_CONTRACT_VERSION,
+      operation: "personal.sources.manage",
+      input: { action: "get", sessionId }
+    });
+    for (const input of [
+      {
+        action: "preview",
+        sessionId,
+        correction: {
+          axis: "git",
+          action: "set",
+          projectId: sessionId,
+          expectedVersion: 1
+        }
+      },
+      {
+        action: "apply",
+        sessionId,
+        reviewId: sessionId,
+        expectedVersion: 1,
+        patch: {}
+      },
+      { action: "get", sessionId, url: "https://untrusted.test" }
+    ])
+      await expect(api.manageSourceContext!(input as never)).rejects.toThrow();
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+  it("validates named creation before IPC", async () => {
+    const invoke = vi
+      .fn()
+      .mockResolvedValue(
+        success("personal.projects.create", { projectId: "project_new" })
+      );
+    const api = createPersonalMemoryPreloadApi(invoke, events());
+    await expect(api.createProject!({ name: "  Planning  " })).resolves.toEqual(
+      { projectId: "project_new" }
+    );
+    expect(invoke.mock.calls[0]?.[1]).toMatchObject({
+      operation: "personal.projects.create",
+      input: { name: "Planning" }
+    });
+    await expect(api.createProject!({ name: "" })).rejects.toThrow();
+    await expect(
+      api.createProject!({ name: "Planning", path: "/unexpected" } as never)
+    ).rejects.toThrow();
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
   it("exposes exact methods and constructs the IPC request internally", async () => {
     const invoke = vi
       .fn()
@@ -34,9 +183,11 @@ describe("Personal Memory preload bridge", () => {
 
     await expect(api.listProjects()).resolves.toEqual([]);
     expect(Object.keys(api).sort()).toEqual([
-      "assignSessionProject",
       "createNote",
+      "createProject",
       "listAskThreads",
+      "listLocalFolders",
+      "listNamedProjects",
       "listNotes",
       "listProjectMetadata",
       "listProjects",
@@ -44,6 +195,11 @@ describe("Personal Memory preload bridge", () => {
       "loadAskThread",
       "loadEventPage",
       "loadNote",
+      "manageMembershipSync",
+      "manageProject",
+      "manageSourceContext",
+      "prepareLocalFolder",
+      "projectStatus",
       "renameNote",
       "submitAsk",
       "subscribe",
@@ -56,6 +212,24 @@ describe("Personal Memory preload bridge", () => {
       operation: "personal.projects.list",
       input: {}
     });
+  });
+
+  it("requests the initial named Project inventory without enumerating source history", async () => {
+    const invoke = vi
+      .fn()
+      .mockResolvedValue(
+        success("personal.projects.named.list", { projects: [] })
+      );
+    const api = createPersonalMemoryPreloadApi(invoke, events());
+    await expect(api.listNamedProjects!()).resolves.toEqual([]);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith(
+      personalMemoryCommandChannel,
+      {
+        contractVersion: PERSONAL_DESKTOP_CONTRACT_VERSION,
+        operation: "personal.projects.named.list",
+        input: {}
+      }
+    );
   });
 
   it("requests bounded recent Conversations without renderer transport authority", async () => {

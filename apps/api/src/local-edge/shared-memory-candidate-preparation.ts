@@ -20,25 +20,42 @@ export const prepareLocalLcmCandidateRepresentation = async (input: {
   ownerUserId: string;
   sessionId: string;
   representation: LocalLcmRepresentation;
-}): Promise<void> => {
-  for (let attempt = 0; attempt < 1_000; attempt += 1) {
-    const compaction = await input.repository.createLcmNodes(
-      { userId: input.ownerUserId },
-      {
-        visibility: "personal",
-        sessionId: input.sessionId,
-        force: true,
-        requestedRepresentation: input.representation
+}): Promise<boolean> => {
+  let remaining = 1_000;
+  let createdNodes = false;
+  for (const workClass of [
+    "live_capture_projection",
+    "normal_embedding_lcm",
+    "historical_import_backfill"
+  ] as const) {
+    let exhausted = false;
+    while (remaining > 0) {
+      remaining -= 1;
+      const compaction = await input.repository.createLcmNodes(
+        { userId: input.ownerUserId },
+        {
+          visibility: "personal",
+          sessionId: input.sessionId,
+          workClass,
+          force: true,
+          requestedRepresentation: input.representation
+        }
+      );
+      if (
+        compaction.leafNodeIds.length === 0 &&
+        compaction.rollupNodeId === null
+      ) {
+        exhausted = true;
+        break;
       }
-    );
-    if (
-      compaction.leafNodeIds.length === 0 &&
-      compaction.rollupNodeId === null
-    ) {
-      return;
+      createdNodes = true;
     }
+    if (!exhausted)
+      throw new Error(
+        "Share-bound LCM compaction exceeded its bounded work limit"
+      );
   }
-  throw new Error("Share-bound LCM compaction exceeded its bounded work limit");
+  return createdNodes;
 };
 
 type CandidateRepository = Pick<
@@ -102,20 +119,28 @@ export const createLocalSharedMemoryCandidatePreparation = (options: {
     sessionId: string;
     representation: SharedMemoryRepresentation;
     mode: "snapshot" | "continuous";
+    prepareLcm?: boolean;
   }): Promise<SharedMemoryCandidatePreview | null> => {
     const projects = await options.repository.listLcmGraphThreads(
       { userId: input.localOwnerUserId },
-      { limit: 500, includeInvalidated: false }
+      {
+        sessionId: input.sessionId,
+        groupBySession: true,
+        limit: 1,
+        includeInvalidated: false
+      }
     );
     const thread = projects
       .flatMap((project) => project.threads)
       .find((candidate) => candidate.sessionId === input.sessionId);
     if (!thread) return null;
+    if (input.representation === "memory_events" && thread.eventCount === 0)
+      return null;
 
     const deploymentId = options.resolveDeploymentId();
     if (!deploymentId) return null;
     const logicalMemoryId = crossIdentitySyncDeterministicUuid({
-      protocol: "koed.captured-session-sync/v1",
+      protocol: "koed.captured-session-sync/v2",
       sourceDeploymentId: deploymentId,
       sourceUserId: input.localOwnerUserId,
       originSessionId: input.sessionId,
@@ -184,27 +209,109 @@ export const createLocalSharedMemoryCandidatePreparation = (options: {
           excludedItemCount += 1;
           continue;
         }
+        const isTool =
+          sourceKind === "tool_call" || sourceKind === "tool_result";
+        const manifest = Array.isArray(event.metadata.semanticItemManifest)
+          ? event.metadata.semanticItemManifest
+          : null;
+        const sourceItems: Extract<
+          SharedMemorySourceItem,
+          { representation: "memory_events" }
+        >["sourceItems"] =
+          isTool && manifest
+            ? manifest.flatMap((value: unknown) => {
+                if (!value || typeof value !== "object" || Array.isArray(value))
+                  return [];
+                const entry = value as Record<string, unknown>;
+                if (
+                  typeof entry.toolName !== "string" ||
+                  !entry.toolName.trim() ||
+                  entry.toolName.length > 240
+                )
+                  return [];
+                if (
+                  entry.actor !== "tool" ||
+                  typeof entry.kind !== "string" ||
+                  /system|developer|instruction|prompt|reasoning|thought/i.test(
+                    entry.kind
+                  )
+                )
+                  return [];
+                const start = entry.offsetStart,
+                  end = entry.offsetEnd;
+                if (
+                  !Number.isSafeInteger(start) ||
+                  !Number.isSafeInteger(end) ||
+                  Number(start) < 0 ||
+                  Number(end) <= Number(start) ||
+                  Number(end) > (event.content?.length ?? 0)
+                )
+                  return [];
+                const text = event
+                  .content!.slice(Number(start), Number(end))
+                  .trim();
+                if (!text) return [];
+                return [
+                  {
+                    id:
+                      Array.isArray(entry.sourceIds) &&
+                      typeof entry.sourceIds[0] === "string"
+                        ? entry.sourceIds[0]
+                        : event.id,
+                    sourceKind:
+                      entry.kind === "tool_result" ||
+                      /result|output/.test(entry.kind)
+                        ? ("tool_result" as const)
+                        : ("tool_call" as const),
+                    occurredAt:
+                      typeof entry.sourceEventTime === "string"
+                        ? entry.sourceEventTime
+                        : event.timestamp,
+                    body: text,
+                    actorName: null,
+                    toolName: entry.toolName,
+                    toolCallId:
+                      typeof entry.toolCallId === "string"
+                        ? entry.toolCallId
+                        : null
+                  }
+                ];
+              })
+            : [
+                {
+                  id: event.id,
+                  sourceKind,
+                  occurredAt: event.timestamp,
+                  body,
+                  actorName: null,
+                  toolName:
+                    isTool &&
+                    typeof event.metadata.toolName === "string" &&
+                    event.metadata.toolName.trim() &&
+                    event.metadata.toolName.length <= 240
+                      ? event.metadata.toolName
+                      : null,
+                  toolCallId:
+                    isTool && typeof event.metadata.toolCallId === "string"
+                      ? event.metadata.toolCallId
+                      : null
+                }
+              ];
+        // Match authoritative tool eligibility. An unknown tool identity is an
+        // excluded source, never the invented tool name "tool".
+        if (
+          !sourceItems.length ||
+          (isTool && sourceItems.some((item) => !item.toolName))
+        ) {
+          excludedItemCount += 1;
+          continue;
+        }
         append({
           id: event.id,
           representation: input.representation,
           sequence: index + 1,
           occurredAt: event.timestamp,
-          sourceItems: [
-            {
-              id: event.id,
-              sourceKind,
-              occurredAt: event.timestamp,
-              body,
-              actorName: null,
-              toolName:
-                sourceKind === "tool_call" || sourceKind === "tool_result"
-                  ? typeof event.metadata.toolName === "string"
-                    ? event.metadata.toolName
-                    : "tool"
-                  : null,
-              toolCallId: null
-            }
-          ]
+          sourceItems
         });
       }
     } else if (input.representation === "curated_assertions") {
@@ -243,12 +350,15 @@ export const createLocalSharedMemoryCandidatePreparation = (options: {
         });
       }
     } else {
-      await prepareLocalLcmCandidateRepresentation({
-        repository: options.repository,
-        ownerUserId: input.localOwnerUserId,
-        sessionId: input.sessionId,
-        representation: input.representation
-      });
+      if (input.prepareLcm !== false) {
+        const createdNodes = await prepareLocalLcmCandidateRepresentation({
+          repository: options.repository,
+          ownerUserId: input.localOwnerUserId,
+          sessionId: input.sessionId,
+          representation: input.representation
+        });
+        if (createdNodes) await options.requestLcmSummaryWork();
+      }
       const kind = input.representation === "lcm_leaves" ? "leaf" : "rollup";
       const syncEligibleNodeIds = new Set(
         await options.repository.listCapturedSessionSyncEligibleLcmNodeIds(

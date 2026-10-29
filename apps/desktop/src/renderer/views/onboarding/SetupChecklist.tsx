@@ -43,8 +43,8 @@ const stageCopy: Record<
     description: "Prepare storage and embedding dependencies."
   },
   model: {
-    title: "Local models",
-    description: "Download and verify the required local models."
+    title: "Memory models",
+    description: "Verify the models used to protect, index, and recall Memory."
   },
   services: {
     title: "Local services",
@@ -351,10 +351,11 @@ export function SetupChecklist({
           <DialogHeader>
             <DialogTitle>Set up Koed on this computer?</DialogTitle>
             <DialogDescription>
-              Koed will install or link its local runtime, download and verify
-              the embedding model, start local services, and prepare Koed core
-              artifacts. Detected AI Client setup remains optional. Existing
-              completed steps will be left alone.
+              Koed will prepare its runtime, start services, and set up core
+              integration. Bundled-local setup installs and verifies local
+              models. External-service setup checks the configured model
+              services. AI Client setup is optional. Completed steps will be
+              left alone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

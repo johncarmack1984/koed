@@ -1,11 +1,24 @@
 import type {
   PdsConversationSourceItem,
+  PdsCheckpointProfileTransition,
+  PdsClosedProfileTransition,
   PdsSessionCheckpointManifest,
-  PdsSessionPackage
+  PdsSessionPackage,
+  PdsProjectSelectionRevision,
+  PdsProjectSelectionRecord
 } from "@koed/shared";
 import type { PdsClosureSource } from "@koed/db";
 
 export interface PdsSecureSourceKeyContext {
+  sourceContextVersion?: "1";
+  prepareSourceContextPublication?(): Promise<void>;
+  configurationAuthority?: { epoch: string; head: string };
+  signProjectSelection?(
+    input: Pick<
+      PdsProjectSelectionRevision,
+      "associationId" | "selectionId" | "revisionId" | "replaces" | "operation"
+    >
+  ): PdsProjectSelectionRecord;
   /** Opaque references only. Never serialize, log, persist, or derive from API Tokens. */
   deviceSigningPrivateKeyRef: string;
   deviceKemPrivateKeyRef: string;
@@ -13,6 +26,7 @@ export interface PdsSecureSourceKeyContext {
   originDeploymentId: string;
   originDeviceId: string;
   buildClosedSessionPackage(input: {
+    closedProfileTransition?: PdsClosedProfileTransition | null;
     source: PdsClosureSource;
     sourceSequence: string;
     items: PdsConversationSourceItem[];
@@ -27,6 +41,7 @@ export interface PdsSecureSourceKeyContext {
   }>;
   buildCompletedTurnCheckpointPackage(input: {
     source: PdsClosureSource;
+    profileTransition?: PdsCheckpointProfileTransition | null;
     sourceSequence: string;
     items: PdsConversationSourceItem[];
     checkpoint: {

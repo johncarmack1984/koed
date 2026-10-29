@@ -3,6 +3,8 @@ import { Readable } from "node:stream";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   canonicalizePdsJson,
+  pdsConfigurationCapabilityAdvertisementSchema,
+  PDS_CONFIGURATION_CAPABILITY_PATH,
   PDS_PEER_ROUTE_TTL_MS,
   normalizePdsPeerEndpoint,
   decodePdsBase64url,
@@ -152,6 +154,34 @@ export const registerPersonalDeviceSyncRelayRoutes = (
   });
 
   const pre = { preHandler: context.rateLimit.memoryWrite };
+  app.post(PDS_CONFIGURATION_CAPABILITY_PATH, pre, async (request) => {
+    if (!context.personalDeviceSync.authoritySigner)
+      throw error("Personal Device Sync relay is unavailable", 503);
+    const input = await authenticate(request as RawRequest, context);
+    pdsConfigurationCapabilityAdvertisementSchema.parse(
+      body(request as RawRequest)
+    );
+    await input.relay.advertisePdsConfigurationCapability({
+      ...input.auth,
+      canonicalAdvertisement: rawBody(request as RawRequest).toString("utf8"),
+      canonicalRequestProof: input.canonicalProof
+    });
+    return { accepted: true };
+  });
+  app.get(
+    PDS_CONFIGURATION_CAPABILITY_PATH,
+    { preHandler: context.rateLimit.memoryRead },
+    async (request) => {
+      if (!context.personalDeviceSync.authoritySigner)
+        throw error("Personal Device Sync relay is unavailable", 503);
+      const input = await authenticate(request as RawRequest, context);
+      return {
+        capabilities: await input.relay.listPdsConfigurationCapabilities(
+          input.auth
+        )
+      };
+    }
+  );
   app.post(
     "/v1/personal-device-sync/relay/peer-routes",
     pre,
@@ -450,41 +480,46 @@ export const registerPersonalDeviceSyncRelayRoutes = (
       if (!pool) throw error("PDS relay wake is unavailable", 503);
       const client = await pool.connect();
       let timeout: ReturnType<typeof setTimeout> | null = null;
-      let onReplyClose: (() => void) | null = null;
+      let onWake: (() => void) | null = null;
       try {
-        await client.query("listen koed_pds_relay_wake");
-        const pending = await input.relay.listPdsRelayMailbox({
-          ...input.auth,
-          limit: 1
-        });
-        if (
-          pending.transports.length ||
-          (await input.relay.hasPdsRelayAcknowledgement({
-            ...input.auth,
-            transportIds
-          }))
-        ) {
-          return { wake: true };
-        }
-        await new Promise<void>((resolve) => {
-          const done = () => resolve();
-          onReplyClose = done;
+        const wake = new Promise<void>((resolve) => {
+          onWake = resolve;
           client.on("notification", (message) => {
             if (
               message.channel === "koed_pds_relay_wake" &&
               message.payload === input.auth.groupId
             ) {
-              done();
+              resolve();
             }
           });
-          reply.raw.once("close", done);
-          timeout = setTimeout(done, 30 * 60_000);
+          reply.raw.once("close", resolve);
+          timeout = setTimeout(resolve, 30 * 60_000);
           timeout.unref?.();
         });
+        await client.query("listen koed_pds_relay_wake");
+        if (reply.raw.destroyed) return { wake: true };
+        await Promise.race([
+          (async () => {
+            const pending = await input.relay.listPdsRelayMailbox({
+              ...input.auth,
+              limit: 1
+            });
+            if (
+              pending.transports.length ||
+              (await input.relay.hasPdsRelayAcknowledgement({
+                ...input.auth,
+                transportIds
+              }))
+            )
+              return;
+            await wake;
+          })(),
+          wake
+        ]);
         return { wake: true };
       } finally {
         if (timeout) clearTimeout(timeout);
-        if (onReplyClose) reply.raw.off("close", onReplyClose);
+        if (onWake) reply.raw.off("close", onWake);
         client.removeAllListeners("notification");
         await client
           .query("unlisten koed_pds_relay_wake")
@@ -653,8 +688,7 @@ export const registerPersonalDeviceSyncRelayRoutes = (
     "/v1/personal-device-sync/relay/cursors",
     { preHandler: context.rateLimit.memoryRead },
     async (request) => {
-      if (!context.personalDeviceSync.authoritySigner)
-        throw error("Personal Device Sync relay is unavailable", 503);
+      requireDataPlane(context);
       const input = await authenticate(request as RawRequest, context);
       return { cursors: await input.relay.listPdsRelayCursors(input.auth) };
     }

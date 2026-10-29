@@ -193,7 +193,22 @@ test("automated launch commands select only their intended test files", () => {
 });
 
 test("automated launch tests remove inherited deployment secrets and profiles", () => {
+  const serviceEncryptionKeys = [
+    "DATA_ENCRYPTION_KEY",
+    "ENVELOPE_ENCRYPTION_PROVIDER",
+    ...["TEAM_MEMORY", "API_TEAM_MEMORY"].flatMap((prefix) => [
+      `${prefix}_DATA_ENCRYPTION_KEY`,
+      `${prefix}_ENVELOPE_ENCRYPTION_PROVIDER`,
+      `${prefix}_MANAGED_KMS_KEY_ID`,
+      `${prefix}_MANAGED_KMS_KEY_VERSION`,
+      `${prefix}_MANAGED_KMS_ENDPOINT_URL`,
+      `${prefix}_MANAGED_KMS_AUTH_TOKEN`
+    ])
+  ];
   const parent = {
+    ...Object.fromEntries(
+      serviceEncryptionKeys.map((key) => [key, "do-not-inherit"])
+    ),
     PATH: "/usr/bin",
     DATABASE_URL: "postgres://fixture",
     API_TOKEN_PEPPER: "production-pepper",
@@ -235,6 +250,8 @@ test("automated launch tests remove inherited deployment secrets and profiles", 
   assert.equal(child.COOKIE_SECURE, undefined);
   assert.equal(child.API_ENVELOPE_ENCRYPTION_PROVIDER, undefined);
   assert.equal(child.API_DATA_ENCRYPTION_KEY, undefined);
+  for (const key of serviceEncryptionKeys)
+    assert.equal(child[key], undefined, key);
   assert.equal(child.MANAGED_KMS_AUTH_TOKEN, undefined);
   assert.equal(child.OWNER_PRIVATE_REPLICA_DATA_ENCRYPTION_KEY, undefined);
   assert.equal(

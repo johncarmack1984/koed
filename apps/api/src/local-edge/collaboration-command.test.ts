@@ -1,3 +1,4 @@
+import { unresolvedTeamRepositorySnapshot } from "@koed/shared";
 import { randomUUID } from "node:crypto";
 
 import type {
@@ -376,6 +377,7 @@ const sourceRelationshipRecord = (
   packageSequence: 0,
   lastPackageId: null,
   sourceSummaryRevisionHash: null,
+  sourceRepositorySnapshotHash: null,
   targetSummaryRevisionHash: null,
   lastSyncedAt: state === "ready" ? iso : null,
   staleAfter: null,
@@ -394,7 +396,12 @@ const createSourceRepository = (
   const summaryActors: string[] = [];
   const activationActors: string[] = [];
   const retryActors: string[] = [];
+  const relationshipLookups: Parameters<
+    SourceSyncRelationshipRepository["getSourceSyncRelationshipForSession"]
+  >[] = [];
   let relationship: CrossIdentitySyncRelationshipRecord | null = null;
+  let otherBackendRelationship: CrossIdentitySyncRelationshipRecord | null =
+    null;
   let logicalMemoryId: string | null = null;
   const summary = (): CapturedSessionSummaryRecord => ({
     sessionId: ids.session,
@@ -421,6 +428,7 @@ const createSourceRepository = (
       return actor.userId === ownerUserId && sessionId === ids.session
         ? {
             originSessionId: ids.session,
+            repositorySnapshot: unresolvedTeamRepositorySnapshot(),
             externalSessionId: "codex-session",
             sourceRuntime: "codex",
             captureMethod: "transcript",
@@ -497,10 +505,23 @@ const createSourceRepository = (
       };
       return relationship;
     },
-    getSourceSyncRelationshipForSession: async (actor, sessionId) =>
-      actor.userId === ownerUserId && sessionId === ids.session
+    getSourceSyncRelationshipForSession: async (
+      actor,
+      sessionId,
+      destination
+    ) => {
+      relationshipLookups.push([actor, sessionId, destination]);
+      if (actor.userId !== ownerUserId || sessionId !== ids.session)
+        return null;
+      // An unscoped lookup reproduces the original latest-relationship bug.
+      if (!destination) return otherBackendRelationship ?? relationship;
+      if (destination.upstreamBackendId !== "team-vps") return null;
+      return relationship &&
+        (!destination.relationshipId ||
+          destination.relationshipId === relationship.id)
         ? relationship
-        : null,
+        : null;
+    },
     pauseCrossIdentitySyncRelationship: async (actor, relationshipId) => {
       if (
         actor.userId !== ownerUserId ||
@@ -566,6 +587,35 @@ const createSourceRepository = (
     summaryActors,
     activationActors,
     retryActors,
+    relationshipLookups,
+    seedOtherBackendRelationship: (revoked: boolean) => {
+      otherBackendRelationship = sourceRelationshipRecord(
+        {
+          relationshipId: randomUUID(),
+          logicalMemoryId: randomUUID(),
+          localReplicaId: randomUUID(),
+          remoteDeploymentIdentityId: randomUUID(),
+          remoteUserIdentityId: randomUUID(),
+          remoteReplicaId: randomUUID(),
+          idempotencyKey: randomUUID(),
+          creationRequestHash: "a".repeat(64),
+          policyManifest: {},
+          consentManifest: { consented_at: iso },
+          sessionId: ids.session,
+          localDeploymentIdentityId: ids.localDeployment
+        },
+        ownerUserId,
+        revoked ? "revoked" : "paused"
+      );
+      if (revoked) otherBackendRelationship.revokedAt = iso;
+      return otherBackendRelationship;
+    },
+    otherBackendRelationship: () => otherBackendRelationship,
+    alterRelationship: (
+      change: Partial<CrossIdentitySyncRelationshipRecord>
+    ) => {
+      if (relationship) relationship = { ...relationship, ...change };
+    },
     failRelationship: () => {
       if (relationship) relationship = { ...relationship, state: "failed" };
     },
@@ -1184,6 +1234,7 @@ const remotePresence = {
 const remoteNavigationPayload = (input?: {
   threads?: unknown[];
   workspaces?: unknown[];
+  shareGrants?: unknown[];
 }) => ({
   principal: {
     id: ids.remotePrincipal,
@@ -1238,7 +1289,7 @@ const remoteNavigationPayload = (input?: {
             access: "write",
             canRecall: true
           },
-          shareGrants: [remoteSharedGrant]
+          shareGrants: input?.shareGrants ?? [remoteSharedGrant]
         }
       ]
     }
@@ -1787,6 +1838,85 @@ describe("local-edge collaboration command route", () => {
     await harness.app.close();
   });
 
+  it.each([false, true])(
+    "creates independent destination sync while preserving an old backend relationship (revoked=%s)",
+    async (revoked) => {
+      const source = createSourceRepository();
+      const old = structuredClone(source.seedOtherBackendRelationship(revoked));
+      const harness = createHarness({
+        backend: sourceSyncBackend(),
+        personalRepository: source.repository,
+        response: (call) => sourceSyncResponse(source, call)
+      });
+      const first = prepareSourceCommand();
+      for (const command of [first, prepareSourceCommand()]) {
+        expect(
+          parseResult((await injectCommand(harness.app, command)).body)
+        ).toMatchObject({ ok: true });
+      }
+      expect(source.otherBackendRelationship()).toEqual(old);
+      expect(source.relationship()?.id).not.toBe(old.id);
+      expect(source.createInputs.map((entry) => entry.idempotencyKey)).toEqual([
+        first.requestId,
+        first.requestId
+      ]);
+      expect(source.relationshipLookups).toEqual(
+        Array(2).fill([
+          { userId: ids.actor },
+          ids.session,
+          {
+            upstreamBackendId: "team-vps",
+            relationshipId: source.relationship()?.id
+          }
+        ])
+      );
+      await harness.app.close();
+    }
+  );
+
+  it.each([
+    { revokedAt: iso, state: "revoked" as const },
+    { remoteReplicaId: randomUUID() },
+    { creationRequestHash: "f".repeat(64) },
+    {
+      consentManifest: {
+        consented_at: iso,
+        policy_version: 1,
+        source_boundary: "captured_session",
+        selectedSessionId: randomUUID()
+      }
+    }
+  ])(
+    "still rejects a revoked or mismatched same-destination binding: %j",
+    async (change) => {
+      const source = createSourceRepository();
+      const harness = createHarness({
+        backend: sourceSyncBackend(),
+        personalRepository: source.repository,
+        response: (call) => sourceSyncResponse(source, call)
+      });
+      expect(
+        parseResult(
+          (await injectCommand(harness.app, prepareSourceCommand())).body
+        )
+      ).toMatchObject({ ok: true });
+      source.alterRelationship(change);
+      const callsBefore = harness.calls.length;
+      expect(
+        parseResult(
+          (await injectCommand(harness.app, prepareSourceCommand())).body
+        )
+      ).toMatchObject({ ok: false });
+      expect(source.createInputs).toHaveLength(1);
+      expect(
+        harness.calls
+          .slice(callsBefore)
+          .map((call) => new URL(call.url).pathname)
+      ).toEqual(["/koed/v1/cross-identity-sync/intake/context"]);
+      await harness.app.close();
+    }
+  );
+
   it("recovers a failed source relationship whether the target stays active or also fails", async () => {
     const source = createSourceRepository();
     let targetFailed = false;
@@ -2000,6 +2130,9 @@ describe("local-edge collaboration command route", () => {
       data: { entry: { id: ids.session, syncState: "ready" } }
     });
     expect(source.createInputs).toHaveLength(2);
+    expect(source.relationshipLookups[1]?.[2]).toEqual({
+      upstreamBackendId: "team-vps"
+    });
     expect(
       new Set(source.createInputs.map((input) => input.relationshipId))
     ).toEqual(new Set([source.relationship()?.id]));
@@ -2056,6 +2189,11 @@ describe("local-edge collaboration command route", () => {
     const dispatches: unknown[] = [];
     const harness = createHarness({
       sharedMemoryControl: {
+        verifyPublisherTakeoverReview: async () => false,
+        reconcileRuleDeliveries: async () => ({
+          processed: 0,
+          acknowledged: 0
+        }),
         resolvePreviewTarget: async () => null,
         resolveConsentPreview: async () => null,
         loadInitialSharedSession: async () => null,
@@ -2118,6 +2256,11 @@ describe("local-edge collaboration command route", () => {
     const harness = createHarness({
       backend: null,
       sharedMemoryControl: {
+        verifyPublisherTakeoverReview: async () => false,
+        reconcileRuleDeliveries: async () => ({
+          processed: 0,
+          acknowledged: 0
+        }),
         resolvePreviewTarget: async () => null,
         resolveConsentPreview: async () => null,
         loadInitialSharedSession: async () => null,
@@ -2488,74 +2631,95 @@ describe("local-edge collaboration command route", () => {
     ).toMatchObject({ ok: false, error: { code: "permission_denied" } });
   });
 
-  it("composes Personal state with authorized remote Team catalog and Shared Memory indexes", async () => {
-    const harness = createHarness({ response: remoteCompositionResponse });
-    const command = {
-      contractVersion: COLLABORATION_CONTRACT_VERSION,
-      requestId: randomUUID(),
-      command: "collaboration.load",
-      input: {}
-    } as CollaborationRendererCommand;
+  it.each(["memory_events", "curated_assertions"] as const)(
+    "composes Personal state with authorized remote Team catalog and %s Shared Memory indexes",
+    async (representation) => {
+      const harness = createHarness({
+        response: (call) => {
+          if (new URL(call.url).pathname.endsWith("/v1/teams/navigation")) {
+            const payload = remoteNavigationPayload({
+              shareGrants: [
+                {
+                  ...remoteSharedGrant,
+                  activeRepresentation: representation,
+                  activationRepresentation: representation,
+                  sourceCapabilities: [representation],
+                  includeCuratedMemory: representation === "curated_assertions"
+                }
+              ]
+            });
+            return Response.json(payload);
+          }
+          return remoteCompositionResponse(call);
+        }
+      });
+      const command = {
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
+        requestId: randomUUID(),
+        command: "collaboration.load",
+        input: {}
+      } as CollaborationRendererCommand;
 
-    const response = await injectPersonalCommand(harness.app, command);
-    expect(response.statusCode).toBe(200);
-    const result = parseResultAs<LoadTestResult>(response.body);
-    expect(result).toMatchObject({
-      ok: true,
-      data: {
-        snapshot: {
-          connection: { state: "live", backendId: "team-vps" },
-          navigation: {
-            personalOwner: { id: ids.actor },
-            teamPrincipal: { id: ids.remotePrincipal }
+      const response = await injectPersonalCommand(harness.app, command);
+      expect(response.statusCode).toBe(200);
+      const result = parseResultAs<LoadTestResult>(response.body);
+      expect(result).toMatchObject({
+        ok: true,
+        data: {
+          snapshot: {
+            connection: { state: "live", backendId: "team-vps" },
+            navigation: {
+              personalOwner: { id: ids.actor },
+              teamPrincipal: { id: ids.remotePrincipal }
+            }
           }
         }
+      });
+      if (!result.ok || result.command !== "collaboration.load") {
+        throw new Error("Expected collaboration.load success");
       }
-    });
-    if (!result.ok || result.command !== "collaboration.load") {
-      throw new Error("Expected collaboration.load success");
+      const team = result.data.snapshot.navigation.teams[0]!;
+      const workspace = team.workspaces[0]!;
+      expect(team).toMatchObject({
+        id: ids.team,
+        role: "member",
+        directMessages: [{ id: ids.thread }]
+      });
+      expect(team.people.map((person) => person.id)).toContain(
+        ids.remotePrincipal
+      );
+      expect(workspace).toMatchObject({
+        id: ids.workspace,
+        access: "write",
+        channels: [{ id: ids.thread }],
+        sharedMemory: [
+          {
+            id: ids.sharedGrant,
+            logicalMemoryId: ids.sharedLogicalMemory,
+            companionThreadId: ids.sharedDiscussionThread,
+            unreadCompanionCount: 1
+          }
+        ]
+      });
+      expect(result.data.snapshot.navigation.personalOwner.id).not.toBe(
+        result.data.snapshot.navigation.teamPrincipal?.id
+      );
+      expect(result.data.snapshot.navigation.personalOwner.id).toBe(ids.actor);
+      expect(result.data.snapshot.navigation.teamPrincipal?.id).toBe(
+        ids.remotePrincipal
+      );
+      expect(harness.calls.map((call) => new URL(call.url).pathname)).toEqual([
+        "/v1/local-edge/device-credentials/status",
+        "/koed/v1/teams/navigation"
+      ]);
+      for (const call of harness.calls) {
+        const headers = new Headers(call.init.headers);
+        expect(headers.get("authorization")).toBe(upstreamAuthorization);
+        expect(headers.get("authorization")).not.toBe(desktopAuthorization);
+        expect(headers.get("cookie")).toBeNull();
+      }
     }
-    const team = result.data.snapshot.navigation.teams[0]!;
-    const workspace = team.workspaces[0]!;
-    expect(team).toMatchObject({
-      id: ids.team,
-      role: "member",
-      directMessages: [{ id: ids.thread }]
-    });
-    expect(team.people.map((person) => person.id)).toContain(
-      ids.remotePrincipal
-    );
-    expect(workspace).toMatchObject({
-      id: ids.workspace,
-      access: "write",
-      channels: [{ id: ids.thread }],
-      sharedMemory: [
-        {
-          id: ids.sharedGrant,
-          logicalMemoryId: ids.sharedLogicalMemory,
-          companionThreadId: ids.sharedDiscussionThread,
-          unreadCompanionCount: 1
-        }
-      ]
-    });
-    expect(result.data.snapshot.navigation.personalOwner.id).not.toBe(
-      result.data.snapshot.navigation.teamPrincipal?.id
-    );
-    expect(result.data.snapshot.navigation.personalOwner.id).toBe(ids.actor);
-    expect(result.data.snapshot.navigation.teamPrincipal?.id).toBe(
-      ids.remotePrincipal
-    );
-    expect(harness.calls.map((call) => new URL(call.url).pathname)).toEqual([
-      "/v1/local-edge/device-credentials/status",
-      "/koed/v1/teams/navigation"
-    ]);
-    for (const call of harness.calls) {
-      const headers = new Headers(call.init.headers);
-      expect(headers.get("authorization")).toBe(upstreamAuthorization);
-      expect(headers.get("authorization")).not.toBe(desktopAuthorization);
-      expect(headers.get("cookie")).toBeNull();
-    }
-  });
+  );
 
   it("keeps a future remote Presence status from invalidating Team navigation", async () => {
     const harness = createHarness({
@@ -3125,6 +3289,11 @@ describe("local-edge collaboration command route", () => {
     const harness = createHarness({
       response: remoteCompositionResponse,
       sharedMemoryControl: {
+        verifyPublisherTakeoverReview: async () => false,
+        reconcileRuleDeliveries: async () => ({
+          processed: 0,
+          acknowledged: 0
+        }),
         resolvePreviewTarget: async () => null,
         resolveConsentPreview: async () => null,
         dispatch: async () => null,
@@ -3248,6 +3417,11 @@ describe("local-edge collaboration command route", () => {
     const dispatched: CollaborationRendererCommand[] = [];
     const harness = createHarness({
       sharedMemoryControl: {
+        verifyPublisherTakeoverReview: async () => false,
+        reconcileRuleDeliveries: async () => ({
+          processed: 0,
+          acknowledged: 0
+        }),
         resolvePreviewTarget: async () => null,
         resolveConsentPreview: async () => null,
         loadInitialSharedSession: async () => null,
@@ -3307,6 +3481,11 @@ describe("local-edge collaboration command route", () => {
     async (code) => {
       const harness = createHarness({
         sharedMemoryControl: {
+          verifyPublisherTakeoverReview: async () => false,
+          reconcileRuleDeliveries: async () => ({
+            processed: 0,
+            acknowledged: 0
+          }),
           resolvePreviewTarget: async () => null,
           resolveConsentPreview: async () => null,
           loadInitialSharedSession: async () => null,
@@ -3362,6 +3541,11 @@ describe("local-edge collaboration command route", () => {
       const harness = createHarness({
         response: remoteCompositionResponse,
         sharedMemoryControl: {
+          verifyPublisherTakeoverReview: async () => false,
+          reconcileRuleDeliveries: async () => ({
+            processed: 0,
+            acknowledged: 0
+          }),
           resolvePreviewTarget: async () => null,
           resolveConsentPreview: async () => null,
           dispatch: async () => null,
@@ -3411,6 +3595,11 @@ describe("local-edge collaboration command route", () => {
     const harness = createHarness({
       response: remoteCompositionResponse,
       sharedMemoryControl: {
+        verifyPublisherTakeoverReview: async () => false,
+        reconcileRuleDeliveries: async () => ({
+          processed: 0,
+          acknowledged: 0
+        }),
         resolvePreviewTarget: async () => null,
         resolveConsentPreview: async () => null,
         dispatch: async () => null,

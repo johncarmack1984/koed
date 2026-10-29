@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   PRIVACY_CLASSIFICATION_CONTRACT_VERSION,
+  PRIVACY_CLASSIFICATION_STREAM_TYPE,
   PRIVACY_CLASSIFICATION_MAX_FIELD_BYTES,
   PRIVACY_CLASSIFICATION_MAX_REQUEST_BODY_BYTES,
   PRIVACY_CLASSIFICATION_MAX_REQUEST_FIELD_BYTES,
@@ -37,7 +38,16 @@ import type { PrivacyRuntimeAdapter } from "./runtime.js";
 import { validateClassifyRequest } from "./schemas.js";
 
 export interface PrivacyService {
-  handle(request: Request): Promise<Response>;
+  reserve?(request: Request): PrivacyAdmission | undefined;
+  handle(
+    request: Request,
+    onProgress?: () => void,
+    admission?: PrivacyAdmission
+  ): Promise<Response>;
+}
+
+export interface PrivacyAdmission {
+  release(): void;
 }
 
 type ManagedPrivacyRuntime = PrivacyRuntimeAdapter &
@@ -149,192 +159,327 @@ const parseProviderControl = (
 export const createPrivacyService = (
   config: PrivacyServiceConfig,
   runtime: PrivacyRuntimeAdapter
-): PrivacyService => ({
-  async handle(request: Request): Promise<Response> {
-    const requestId = requestIdFor(request);
-    try {
-      const url = new URL(request.url);
-      if (request.method === "GET" && url.pathname === "/health") {
-        const runtimeStatus = isManagedRuntime(runtime)
-          ? runtime.status()
-          : undefined;
-        return jsonResponse(
-          {
-            status: runtime.isReady() ? "ok" : "loading",
-            schemaVersion: 1,
-            classifier: {
-              modelId: runtime.modelId,
-              modelRevision: runtime.modelRevision,
-              classifierHash: runtime.classifierHash
-            },
-            labels: PRIVACY_LABELS,
-            runtime: runtimeStatus
-              ? {
-                  component: runtimeStatus.component,
-                  requestedProvider: runtimeStatus.requestedProvider,
-                  activeProvider: runtimeStatus.activeProvider,
-                  switchState: runtimeStatus.switchState
-                }
-              : {
-                  component: "privacy_filter",
-                  activeProvider: runtime.provider
-                }
-          },
-          runtime.isReady() ? 200 : 503,
-          requestId
-        );
+): PrivacyService => {
+  let activeRequests = 0;
+  const reservations = new WeakSet<PrivacyAdmission>();
+  const claimed = new WeakSet<PrivacyAdmission>();
+  const capacity = () =>
+    Math.min(
+      PRIVACY_MAX_CONCURRENT_REQUESTS,
+      runtime.maximumConcurrentRequests ?? 1
+    );
+  const reserve = (request: Request): PrivacyAdmission | undefined => {
+    if (
+      request.method !== "POST" ||
+      new URL(request.url).pathname !== "/v1/classify"
+    )
+      return undefined;
+    requirePrivacyToken(
+      config.token,
+      request.headers.get("x-koed-privacy-token")
+    );
+    if (!runtime.isReady() || activeRequests >= capacity())
+      throw new HttpError(
+        503,
+        "privacy classification capacity is busy",
+        "classification_busy"
+      );
+    activeRequests += 1;
+    const admission = {
+      release() {
+        if (reservations.delete(admission)) activeRequests -= 1;
       }
-      if (request.method === "GET" && url.pathname === "/v1/capabilities") {
+    };
+    reservations.add(admission);
+    return admission;
+  };
+  return {
+    reserve,
+    async handle(
+      request: Request,
+      onProgress?: () => void,
+      suppliedAdmission?: PrivacyAdmission
+    ): Promise<Response> {
+      const requestId = requestIdFor(request);
+      try {
+        const url = new URL(request.url);
+        if (request.method === "GET" && url.pathname === "/health") {
+          const runtimeStatus = isManagedRuntime(runtime)
+            ? runtime.status()
+            : undefined;
+          return jsonResponse(
+            {
+              status: runtime.isReady() ? "ok" : "loading",
+              schemaVersion: 1,
+              classifier: {
+                modelId: runtime.modelId,
+                modelRevision: runtime.modelRevision,
+                classifierHash: runtime.classifierHash
+              },
+              labels: PRIVACY_LABELS,
+              runtime: runtimeStatus
+                ? {
+                    component: runtimeStatus.component,
+                    requestedProvider: runtimeStatus.requestedProvider,
+                    activeProvider: runtimeStatus.activeProvider,
+                    switchState: runtimeStatus.switchState,
+                    ...(runtimeStatus.inferenceState
+                      ? { inferenceState: runtimeStatus.inferenceState }
+                      : {})
+                  }
+                : {
+                    component: "privacy_filter",
+                    activeProvider: runtime.provider,
+                    ...(runtime.availability
+                      ? { inferenceState: runtime.availability() }
+                      : {})
+                  }
+            },
+            runtime.isReady() ? 200 : 503,
+            requestId
+          );
+        }
+        if (request.method === "GET" && url.pathname === "/v1/capabilities") {
+          requirePrivacyToken(
+            config.token,
+            request.headers.get("x-koed-privacy-token")
+          );
+          return jsonResponse(
+            {
+              schemaVersion: 1,
+              inputContractVersion: PRIVACY_CLASSIFICATION_CONTRACT_VERSION,
+              tokenizerSha256: OFFICIAL_PRIVACY_TOKENIZER_SHA256,
+              tokenizerNormalization: "none",
+              maximumFieldsPerRequest:
+                PRIVACY_CLASSIFICATION_REQUEST_FIELD_LIMIT,
+              maximumFieldBytes: PRIVACY_CLASSIFICATION_MAX_FIELD_BYTES,
+              maximumRequestFieldBytes:
+                PRIVACY_CLASSIFICATION_MAX_REQUEST_FIELD_BYTES,
+              maximumRequestBodyBytes:
+                PRIVACY_CLASSIFICATION_MAX_REQUEST_BODY_BYTES,
+              windowCoreTokens: PRIVACY_WINDOW_CORE_TOKENS,
+              windowContextTokens: PRIVACY_WINDOW_CONTEXT_TOKENS,
+              windowMaximumTokens: PRIVACY_WINDOW_MAX_TOKENS,
+              maximumFieldTokens: PRIVACY_MAX_FIELD_TOKENS,
+              maximumSemanticPreviewFields:
+                SHARED_MEMORY_SEMANTIC_PREVIEW_MAX_FIELDS,
+              maximumSemanticPreviewBytes:
+                SHARED_MEMORY_SEMANTIC_PREVIEW_MAX_BYTES,
+              maximumSemanticPreviewEncodedBytes:
+                SHARED_MEMORY_SEMANTIC_PREVIEW_MAX_ENCODED_BYTES,
+              maximumConcurrentRequests: capacity()
+            },
+            200,
+            requestId
+          );
+        }
+        if (url.pathname === "/v1/runtime/status") {
+          requirePrivacyToken(
+            config.controlToken,
+            request.headers.get("x-koed-privacy-token")
+          );
+          if (request.method !== "GET" || !isManagedRuntime(runtime)) {
+            throw new HttpError(404, "route not found", "not_found");
+          }
+          return jsonResponse(
+            await runtime.refreshAcceleratorObservation(),
+            200,
+            requestId
+          );
+        }
+        if (url.pathname === "/v1/runtime/provider") {
+          requirePrivacyToken(
+            config.controlToken,
+            request.headers.get("x-koed-privacy-token")
+          );
+          if (request.method !== "POST" || !isManagedRuntime(runtime)) {
+            throw new HttpError(404, "route not found", "not_found");
+          }
+          const provider = parseProviderControl(
+            await parseBody(request, config.maxBodyBytes)
+          );
+          return jsonResponse(
+            await runtime.switchProvider(provider),
+            200,
+            requestId
+          );
+        }
+        if (request.method !== "POST" || url.pathname !== "/v1/classify") {
+          throw new HttpError(404, "route not found", "not_found");
+        }
+
         requirePrivacyToken(
           config.token,
           request.headers.get("x-koed-privacy-token")
         );
-        return jsonResponse(
-          {
+        const admission = suppliedAdmission ?? reserve(request)!;
+        if (!reservations.has(admission) || claimed.has(admission))
+          throw new ClassificationError("invalid privacy capacity reservation");
+        claimed.add(admission);
+        try {
+          request.signal.throwIfAborted();
+          const input = validateClassifyRequest(
+            await parseBody(request, config.maxBodyBytes),
+            config
+          );
+          const fields: PrivacyClassificationResponse["fields"] = new Array(
+            input.fields.length
+          );
+          const failure = new AbortController();
+          const signal = AbortSignal.any([request.signal, failure.signal]);
+          const makeField = (
+            index: number,
+            raw: Awaited<ReturnType<PrivacyRuntimeAdapter["classify"]>>
+          ) => {
+            signal.throwIfAborted();
+            const field = input.fields[index]!;
+            const classified = maskClassification(field.text, raw);
+            onProgress?.();
+            fields[index] = {
+              path: field.path,
+              inputSha256: createHash("sha256")
+                .update(field.text)
+                .digest("hex"),
+              inputByteLength: Buffer.byteLength(field.text, "utf8"),
+              ...classified,
+              decodedTextMatchesInput: true as const
+            };
+          };
+          let cursor = 0;
+          const classifyFields = async () => {
+            while (cursor < input.fields.length) {
+              signal.throwIfAborted();
+              const index = cursor++;
+              const field = input.fields[index]!;
+              makeField(
+                index,
+                await runtime.classify(field.text, signal, onProgress)
+              );
+            }
+          };
+          const tasks =
+            runtime.supportsBatch && runtime.classifyFields
+              ? [
+                  (async () => {
+                    await runtime.classifyFields!(
+                      input.fields.map((field) => field.text),
+                      (index, raw) => {
+                        if (
+                          !Number.isSafeInteger(index) ||
+                          index < 0 ||
+                          index >= fields.length ||
+                          fields[index]
+                        )
+                          throw new ClassificationError(
+                            "invalid privacy field mapping"
+                          );
+                        makeField(index, raw);
+                      },
+                      signal,
+                      onProgress
+                    );
+                    if (Array.from(fields).some((result) => !result))
+                      throw new ClassificationError(
+                        "incomplete privacy batch results"
+                      );
+                  })()
+                ]
+              : Array.from(
+                  {
+                    length: Math.min(
+                      runtime.maximumConcurrentFields ?? 1,
+                      input.fields.length
+                    )
+                  },
+                  () => classifyFields()
+                );
+          try {
+            await Promise.all(tasks);
+          } catch (error) {
+            failure.abort();
+            await Promise.allSettled(tasks);
+            throw error;
+          }
+          const response: PrivacyClassificationResponse = {
             schemaVersion: 1,
             inputContractVersion: PRIVACY_CLASSIFICATION_CONTRACT_VERSION,
-            tokenizerSha256: OFFICIAL_PRIVACY_TOKENIZER_SHA256,
-            tokenizerNormalization: "none",
-            maximumFieldsPerRequest: PRIVACY_CLASSIFICATION_REQUEST_FIELD_LIMIT,
-            maximumFieldBytes: PRIVACY_CLASSIFICATION_MAX_FIELD_BYTES,
-            maximumRequestFieldBytes:
-              PRIVACY_CLASSIFICATION_MAX_REQUEST_FIELD_BYTES,
-            maximumRequestBodyBytes:
-              PRIVACY_CLASSIFICATION_MAX_REQUEST_BODY_BYTES,
-            windowCoreTokens: PRIVACY_WINDOW_CORE_TOKENS,
-            windowContextTokens: PRIVACY_WINDOW_CONTEXT_TOKENS,
-            windowMaximumTokens: PRIVACY_WINDOW_MAX_TOKENS,
-            maximumFieldTokens: PRIVACY_MAX_FIELD_TOKENS,
-            maximumSemanticPreviewFields:
-              SHARED_MEMORY_SEMANTIC_PREVIEW_MAX_FIELDS,
-            maximumSemanticPreviewBytes:
-              SHARED_MEMORY_SEMANTIC_PREVIEW_MAX_BYTES,
-            maximumSemanticPreviewEncodedBytes:
-              SHARED_MEMORY_SEMANTIC_PREVIEW_MAX_ENCODED_BYTES,
-            maximumConcurrentRequests: PRIVACY_MAX_CONCURRENT_REQUESTS
-          },
-          200,
-          requestId
-        );
-      }
-      if (url.pathname === "/v1/runtime/status") {
-        requirePrivacyToken(
-          config.controlToken,
-          request.headers.get("x-koed-privacy-token")
-        );
-        if (request.method !== "GET" || !isManagedRuntime(runtime)) {
-          throw new HttpError(404, "route not found", "not_found");
+            classifier: {
+              modelKey: runtime.modelId,
+              modelRevision: runtime.modelRevision,
+              classifierHash: runtime.classifierHash
+            },
+            fields
+          };
+          return jsonResponse(
+            privacyClassificationResponseSchema.parse(response),
+            200,
+            requestId
+          );
+        } finally {
+          admission.release();
         }
-        return jsonResponse(
-          await runtime.refreshAcceleratorObservation(),
-          200,
-          requestId
-        );
-      }
-      if (url.pathname === "/v1/runtime/provider") {
-        requirePrivacyToken(
-          config.controlToken,
-          request.headers.get("x-koed-privacy-token")
-        );
-        if (request.method !== "POST" || !isManagedRuntime(runtime)) {
-          throw new HttpError(404, "route not found", "not_found");
+      } catch (error) {
+        if (request.signal.aborted) {
+          return jsonResponse(
+            {
+              error: {
+                code: "request_cancelled",
+                detail: "privacy classification cancelled"
+              }
+            },
+            499,
+            requestId
+          );
         }
-        const provider = parseProviderControl(
-          await parseBody(request, config.maxBodyBytes)
-        );
-        return jsonResponse(
-          await runtime.switchProvider(provider),
-          200,
-          requestId
-        );
-      }
-      if (request.method !== "POST" || url.pathname !== "/v1/classify") {
-        throw new HttpError(404, "route not found", "not_found");
-      }
-
-      requirePrivacyToken(
-        config.token,
-        request.headers.get("x-koed-privacy-token")
-      );
-      const input = validateClassifyRequest(
-        await parseBody(request, config.maxBodyBytes),
-        config
-      );
-      const fields = [];
-      for (const field of input.fields) {
-        const classified = maskClassification(
-          field.text,
-          await runtime.classify(field.text)
-        );
-        fields.push({
-          path: field.path,
-          inputSha256: createHash("sha256").update(field.text).digest("hex"),
-          inputByteLength: Buffer.byteLength(field.text, "utf8"),
-          ...classified,
-          decodedTextMatchesInput: true as const
-        });
-      }
-      const response: PrivacyClassificationResponse = {
-        schemaVersion: 1,
-        inputContractVersion: PRIVACY_CLASSIFICATION_CONTRACT_VERSION,
-        classifier: {
-          modelKey: runtime.modelId,
-          modelRevision: runtime.modelRevision,
-          classifierHash: runtime.classifierHash
-        },
-        fields
-      };
-      return jsonResponse(
-        privacyClassificationResponseSchema.parse(response),
-        200,
-        requestId
-      );
-    } catch (error) {
-      if (error instanceof HttpError) {
-        return jsonResponse(
-          { error: { code: error.code, detail: error.detail } },
-          error.statusCode,
-          requestId
-        );
-      }
-      if (error instanceof ClassificationError) {
+        if (error instanceof HttpError) {
+          const response = jsonResponse(
+            { error: { code: error.code, detail: error.detail } },
+            error.statusCode,
+            requestId
+          );
+          if (error.code === "classification_busy")
+            response.headers.set("retry-after", "1");
+          return response;
+        }
+        if (error instanceof ClassificationError) {
+          return jsonResponse(
+            {
+              error: {
+                code: "classification_failed",
+                detail: "privacy classification output could not be validated"
+              }
+            },
+            503,
+            requestId
+          );
+        }
+        if (error instanceof PrivacyProviderSwitchError) {
+          return jsonResponse(
+            {
+              error: {
+                code: error.code,
+                detail: "privacy runtime provider could not be activated",
+                provider: error.provider
+              }
+            },
+            409,
+            requestId
+          );
+        }
         return jsonResponse(
           {
             error: {
-              code: "classification_failed",
-              detail: "privacy classification output could not be validated"
+              code: "internal_error",
+              detail: "privacy classification failed"
             }
           },
-          503,
+          500,
           requestId
         );
       }
-      if (error instanceof PrivacyProviderSwitchError) {
-        return jsonResponse(
-          {
-            error: {
-              code: error.code,
-              detail: "privacy runtime provider could not be activated",
-              provider: error.provider
-            }
-          },
-          409,
-          requestId
-        );
-      }
-      return jsonResponse(
-        {
-          error: {
-            code: "internal_error",
-            detail: "privacy classification failed"
-          }
-        },
-        500,
-        requestId
-      );
     }
-  }
-});
+  };
+};
 
 const readBody = async (
   request: IncomingMessage,
@@ -374,27 +519,91 @@ export const createNodeHttpServer = (
 ): Server =>
   createServer((request, response) => {
     void (async () => {
+      const cancellation = new AbortController();
+      const abort = (): void => cancellation.abort();
+      const onClose = (): void => {
+        if (!response.writableFinished) abort();
+      };
+      request.once("aborted", abort);
+      response.once("close", onClose);
+      let admission: PrivacyAdmission | undefined;
       try {
         const host = request.headers.host ?? "127.0.0.1";
+        const requestUrl = `http://${host}${request.url ?? "/"}`;
+        admission = service.reserve?.(
+          new Request(requestUrl, {
+            method: request.method,
+            headers: request.headers as HeadersInit,
+            signal: cancellation.signal
+          })
+        );
         const body =
           request.method === "POST"
             ? await readBody(request, maxBodyBytes)
             : undefined;
-        const webRequest = new Request(`http://${host}${request.url ?? "/"}`, {
+        const webRequest = new Request(requestUrl, {
           method: request.method,
           headers: request.headers as HeadersInit,
+          signal: cancellation.signal,
           body: body ? new Uint8Array(body) : undefined
         });
-        await writeResponse(response, await service.handle(webRequest));
+        const streaming =
+          request.headers.accept === PRIVACY_CLASSIFICATION_STREAM_TYPE &&
+          request.method === "POST" &&
+          new URL(webRequest.url).pathname === "/v1/classify";
+        let completedUnits = 0;
+        const writeFrame = (frame: unknown): void => {
+          if (cancellation.signal.aborted || response.destroyed) return;
+          if (!response.headersSent) {
+            response.setHeader(
+              "content-type",
+              PRIVACY_CLASSIFICATION_STREAM_TYPE
+            );
+            response.setHeader("cache-control", "no-store");
+          }
+          response.write(JSON.stringify(frame) + "\n");
+        };
+        const result = await service.handle(
+          webRequest,
+          streaming
+            ? () => {
+                completedUnits += 1;
+                writeFrame({ type: "progress", completedUnits });
+              }
+            : undefined,
+          admission
+        );
+        if (!cancellation.signal.aborted) {
+          if (streaming) {
+            writeFrame({
+              type: "result",
+              status: result.status,
+              retryAfter: result.headers.has("retry-after"),
+              body: await result.json()
+            });
+            response.end();
+          } else await writeResponse(response, result);
+        }
       } catch (error) {
+        if (cancellation.signal.aborted || response.destroyed) return;
         const status = error instanceof HttpError ? error.statusCode : 500;
         const code = error instanceof HttpError ? error.code : "internal_error";
+        if (response.headersSent) {
+          response.destroy();
+          return;
+        }
         response.statusCode = status;
         response.setHeader("content-type", "application/json; charset=utf-8");
         response.setHeader("cache-control", "no-store");
+        if (code === "classification_busy")
+          response.setHeader("retry-after", "1");
         response.end(
           JSON.stringify({ error: { code, detail: "request failed" } })
         );
+      } finally {
+        admission?.release();
+        request.off("aborted", abort);
+        response.off("close", onClose);
       }
     })();
   });

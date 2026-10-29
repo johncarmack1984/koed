@@ -46,7 +46,17 @@ type HighRiskRepository = Pick<
   | "getSharedMemoryCandidatePreviewAdmission"
   | "getSharedMemoryPendingShareReview"
   | "getSharedMemoryShareReview"
+  | "getConversationSharingRuleControlReview"
+  | "getSharingRuleDetailReview"
+  | "getSharingRulePublisherTakeoverReview"
+  | "getSharingRuleContentPolicyReview"
+  | "getConversationSharingRuleCreationReview"
+  | "getRepositorySharingRuleCreationReview"
+  | "getRepositorySharingRuleControlReview"
   | "getSharedMemoryRevokeReview"
+  | "getWorkspaceConversationRestorationReview"
+  | "getWorkspaceConversationExclusionReview"
+  | "reviewGrantRepositorySnapshot"
   | "getSharedMemoryFidelityChangeReview"
   | "getTeamConversationSourceGrantReview"
   | "getConversationSourceArtifactByGeneration"
@@ -199,6 +209,7 @@ export const registerHighRiskRoutes = (
         userId: auth.user.id,
         upstreamBackendId: auth.credential.upstreamBackendId,
         currentDeviceInstanceId: auth.credential.deviceInstanceId,
+        currentDeviceCredentialId: auth.credential.id,
         clientRequestId: input.clientRequestId,
         hashSecret: context.hashSecret,
         intent: input.intent

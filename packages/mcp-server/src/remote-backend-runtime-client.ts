@@ -1,6 +1,9 @@
+import { pinRepositoryRecallContext } from "./repository-recall-context.js";
+import { pinPersonalRecallRequest } from "./personal-recall-request.js";
 import path from "node:path";
 import {
   isTeamMemoryAnswerTaskCapability,
+  requirePortableTeamRepositoryContext,
   type MemoryAnswerTask
 } from "@koed/shared";
 import { MemoryAnswerDelivery } from "../integrations/pi/memory-answer-delivery.mjs";
@@ -15,6 +18,7 @@ import type {
 import {
   memoryAccessCheckInputSchema,
   memoryAnswerInputSchema,
+  memoryAnswerRequestSchema,
   memoryExpandInputSchema,
   memoryIntakeProposeInputSchema,
   memorySearchInputSchema,
@@ -54,6 +58,7 @@ export interface RemoteBackendRuntimeClientOptions {
 const requireProject = (input: {
   search_domain: string;
   project_id?: string;
+  repository_context?: unknown;
 }): void => {
   if (input.search_domain === "project" && !input.project_id) {
     throw new LocalAiRuntimeError(
@@ -64,6 +69,7 @@ const requireProject = (input: {
   if (
     input.search_domain === "project" &&
     input.project_id &&
+    !input.repository_context &&
     !path.posix.isAbsolute(input.project_id) &&
     !path.win32.isAbsolute(input.project_id)
   ) {
@@ -85,7 +91,10 @@ const safeCaller = (
       clientInfo[key] = value;
   }
   return {
-    cwd: input.search_domain === "project" ? input.project_id! : "",
+    cwd:
+      input.search_domain === "project"
+        ? (input.repository_context?.root ?? input.project_id!)
+        : "",
     ...(caller.protocolVersion && caller.protocolVersion.length <= 128
       ? { protocolVersion: caller.protocolVersion }
       : {}),
@@ -169,8 +178,20 @@ export class RemoteBackendRuntimeClient implements KoedMcpRuntimeClient {
     signal?: AbortSignal
   ): Promise<MemoryAnswerTask> {
     assertActive(signal);
-    let input = memoryAnswerInputSchema.parse(rawInput);
-    requireProject(input);
+    const pinned = await pinPersonalRecallRequest(
+      rawInput,
+      this.options.client
+    );
+    let input = pinned.input;
+    if (!pinned.selection) {
+      input = await pinRepositoryRecallContext(input, caller, process.env);
+      requireProject(input);
+    }
+    if (
+      (input.team_workspace_id || input.team_backend_id) &&
+      input.search_domain === "project"
+    )
+      requirePortableTeamRepositoryContext(input.repository_context);
     if (input.team_workspace_id || input.team_backend_id) {
       const support = this.options.supportedTaskScopes?.team;
       if (
@@ -195,7 +216,15 @@ export class RemoteBackendRuntimeClient implements KoedMcpRuntimeClient {
     const { task } = await this.options.client.acceptMemoryAnswerTask({
       origin: "mcp",
       ...(invocationKey ? { invocation_key: invocationKey } : {}),
-      request: { input, caller: safeCaller(input, caller) },
+      request: {
+        input,
+        caller: pinned.selection
+          ? { ...safeCaller(input, caller), cwd: "" }
+          : safeCaller(input, caller),
+        ...(pinned.selection
+          ? { requestVersion: 1, selection: pinned.selection }
+          : {})
+      },
       max_queued: this.maxQueued
     });
     return task;
@@ -227,8 +256,9 @@ export class RemoteBackendRuntimeClient implements KoedMcpRuntimeClient {
     assertActive(signal);
     switch (name) {
       case "memory_answer": {
-        const input = memoryAnswerInputSchema.parse(rawInput);
-        requireProject(input);
+        const input = memoryAnswerRequestSchema.parse(rawInput);
+        if (!input.recall_target)
+          requireProject(memoryAnswerInputSchema.parse(input));
         const task = await this.delivery.accept(
           input,
           caller,
@@ -281,19 +311,41 @@ export class RemoteBackendRuntimeClient implements KoedMcpRuntimeClient {
       case "memory_search": {
         const input = memorySearchInputSchema.parse(rawInput);
         requireProject(input);
+        const pinned = await pinRepositoryRecallContext(
+          input,
+          caller,
+          process.env
+        );
+        requireProject(pinned);
         if (input.search_domain === "session" && !input.session_id)
           throw new LocalAiRuntimeError(
             "session_id is required for Session recall",
             400
           );
+        const { repository_context: _context, ...search } = input;
+        void _context;
         return this.options.client.search({
-          ...input,
+          ...search,
+          project_id: pinned.project_id,
+          repository_context: pinned.repository_context,
           retrieval_scope: "personal"
         });
       }
       case "memory_expand": {
         const input = memoryExpandInputSchema.parse(rawInput);
-        return this.options.client.expand(input.nodeId);
+        const pinned = await pinRepositoryRecallContext(
+          input,
+          caller,
+          process.env
+        );
+        return this.options.client.expand(input.nodeId, {
+          searchDomain: input.search_domain,
+          projectId: pinned.project_id,
+          sessionId: input.session_id,
+          recentDays: input.recent_days,
+          sourceAfter: input.source_after,
+          sourceBefore: input.source_before
+        });
       }
     }
   }

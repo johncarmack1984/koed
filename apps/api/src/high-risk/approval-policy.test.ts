@@ -1,3 +1,9 @@
+import { publisherTakeoverReviewFixture } from "../shared-memory/test-fixtures/publisher-takeover-review.js";
+import {
+  noPrivacyLabelsPolicy,
+  sharingRuleDetailReviewSchema,
+  unresolvedTeamRepositorySnapshot
+} from "@koed/shared";
 import { describe, expect, it } from "vitest";
 
 import { highRiskActionDefinitions } from "./action-definitions.js";
@@ -16,10 +22,212 @@ const capturedSource = {
   logicalMemoryId: uuid(3)
 };
 
+const policyHash = "a".repeat(64);
+const reviewedRule = {
+  ruleId: uuid(30),
+  teamId: uuid(1),
+  teamWorkspaceId: uuid(2),
+  maximumFidelity: "lcm_rollups",
+  includeCuratedMemory: false,
+  selectorKind: "captured_session",
+  state: "active",
+  previousMaximumFidelity: "lcm_rollups",
+  previousIncludeCuratedMemory: false,
+  expectedAuthorityVersion: 1,
+  publisherFence: 1,
+  teamPolicyVersion: 1,
+  teamPolicyHash: policyHash,
+  workspacePolicyVersion: 1,
+  workspacePolicyHash: policyHash,
+  effectivePrivacyPolicyHash: policyHash,
+  policyBindingHash: policyHash,
+  memberBindingHash: policyHash,
+  memberCount: 1,
+  ownerPolicyExpansionCount: 0,
+  disclosureIncrease: false,
+  teamName: "Team",
+  workspaceName: "Workspace",
+  expiresAt: "2099-01-01T00:00:00.000Z",
+  reviewHash: policyHash
+} as const;
+const exclusionScope = {
+  ownerUserId: uuid(5),
+  logicalMemoryId: uuid(3),
+  teamId: uuid(1),
+  teamWorkspaceId: uuid(2),
+  expectedExclusionVersion: 1,
+  shareGrantId: uuid(8),
+  expectedGrantVersion: 1
+};
+const labels = noPrivacyLabelsPolicy();
+const contentReview = sharingRuleDetailReviewSchema
+  .omit({
+    previousMaximumFidelity: true,
+    previousIncludeCuratedMemory: true,
+    ownerPolicyExpansionCount: true
+  })
+  .strip()
+  .parse(reviewedRule);
+
 const matrixCases: Array<{
   intent: HighRiskActionGrantIntent;
   expected: "direct" | "native_review" | "step_up";
 }> = [
+  {
+    intent: {
+      action: "shared_memory.publisher_takeover",
+      mutationId: uuid(31),
+      review: publisherTakeoverReviewFixture({
+        ruleId: uuid(30),
+        teamId: uuid(1),
+        teamWorkspaceId: uuid(2),
+        receivingCredentialId: uuid(32)
+      })
+    },
+    expected: "native_review"
+  },
+  {
+    intent: {
+      action: "shared_memory.rule_detail",
+      mutationId: uuid(31),
+      review: reviewedRule
+    },
+    expected: "native_review"
+  },
+  {
+    intent: {
+      action: "shared_memory.rule_content_policy",
+      mutationId: uuid(31),
+      review: {
+        ...contentReview,
+        labels,
+        previousLabels: labels,
+        previousEffectiveLabels: labels,
+        requiredLabels: labels,
+        effectiveLabels: labels,
+        globalPolicyHash: policyHash,
+        previousGlobalPolicyHash: policyHash,
+        expectedContentPolicyVersion: 1
+      }
+    },
+    expected: "native_review"
+  },
+  {
+    intent: {
+      action: "shared_memory.rule_control",
+      mutationId: uuid(31),
+      teamId: uuid(1),
+      teamWorkspaceId: uuid(2),
+      ruleId: uuid(30),
+      reasonId: uuid(32),
+      shareGrantId: uuid(8),
+      expectedAuthorityVersion: 1,
+      expectedGrantVersion: 1,
+      controlAction: "pause"
+    },
+    expected: "native_review"
+  },
+  {
+    intent: {
+      action: "shared_memory.repository_rule_control",
+      mutationId: uuid(31),
+      selectorKind: "selection",
+      teamId: uuid(1),
+      teamWorkspaceId: uuid(2),
+      ruleId: uuid(30),
+      expectedAuthorityVersion: 1,
+      publisherFence: 1,
+      controlAction: "pause"
+    },
+    expected: "native_review"
+  },
+  {
+    intent: {
+      action: "shared_memory.repository_rule_create",
+      mutationId: uuid(31),
+      ruleId: uuid(30),
+      selector: {
+        kind: "portable_repository",
+        key: "github.com/example/catalog"
+      },
+      teamId: uuid(1),
+      teamWorkspaceId: uuid(2),
+      maximumFidelity: "lcm_rollups",
+      includeCuratedMemory: false,
+      includesFutureConversations: true,
+      completedReviewHash: policyHash,
+      selectionSnapshotVersion: uuid(33),
+      teamPolicyVersion: 1,
+      teamPolicyHash: policyHash,
+      workspacePolicyVersion: 1,
+      workspacePolicyHash: policyHash,
+      effectivePrivacyPolicyHash: policyHash
+    },
+    expected: "native_review"
+  },
+  {
+    intent: {
+      action: "shared_memory.conversation_rule_create",
+      mutationId: uuid(31),
+      ruleId: uuid(30),
+      logicalGrantId: uuid(8),
+      consentId: uuid(34),
+      expectedGrantVersion: null,
+      effectivePrivacyPolicyHash: policyHash,
+      source: capturedSource,
+      sourceCapabilities: ["lcm_rollups"],
+      activationRepresentation: "lcm_rollups",
+      previewId: uuid(35),
+      previewHash: policyHash,
+      previewRevision: 1,
+      logicalMemoryId: uuid(3),
+      teamId: uuid(1),
+      teamWorkspaceId: uuid(2),
+      mode: "continuous",
+      maximumFidelity: "lcm_rollups",
+      includeCuratedMemory: false,
+      expiresAt: null
+    },
+    expected: "native_review"
+  },
+  {
+    intent: {
+      action: "shared_memory.workspace_exclude",
+      mutationId: uuid(31),
+      scope: exclusionScope
+    },
+    expected: "native_review"
+  },
+  {
+    intent: {
+      action: "shared_memory.workspace_restore",
+      mutationId: uuid(31),
+      scope: exclusionScope,
+      restoration: {
+        scope: exclusionScope,
+        source: { logicalMemoryId: uuid(3), title: "Source" },
+        team: { id: uuid(1), name: "Team" },
+        workspace: { id: uuid(2), name: "Workspace" },
+        exclusion: {
+          id: uuid(36),
+          ownerUserId: uuid(5),
+          logicalMemoryId: uuid(3),
+          teamId: uuid(1),
+          teamWorkspaceId: uuid(2),
+          version: 1,
+          state: "excluded",
+          excludedAt: "2026-10-21T00:00:00.000Z",
+          restoredAt: null,
+          updatedAt: "2026-10-21T00:00:00.000Z"
+        },
+        rules: [],
+        authorityHash: policyHash,
+        expiresAt: "2099-01-01T00:00:00.000Z",
+        reviewHash: policyHash
+      }
+    },
+    expected: "native_review"
+  },
   {
     intent: { action: "team.create", body: { name: "Koed" } },
     expected: "direct"
@@ -211,6 +419,7 @@ const matrixCases: Array<{
       activationRepresentation: "lcm_rollups",
       mutationId: uuid(6),
       logicalGrantId: uuid(7),
+      expectedGrantVersion: null,
       logicalMemoryId: uuid(3),
       teamId: uuid(1),
       teamWorkspaceId: uuid(2),
@@ -234,6 +443,28 @@ const matrixCases: Array<{
       shareGrantId: uuid(7),
       expectedGrantVersion: 1,
       reasonCode: "owner_revoked"
+    },
+    expected: "native_review"
+  },
+  {
+    intent: {
+      action: "shared_memory.update_repository_snapshot",
+      mutationId: uuid(6),
+      teamId: uuid(1),
+      teamWorkspaceId: uuid(2),
+      shareGrantId: uuid(7),
+      expected: {
+        shareGrantId: uuid(7),
+        teamId: uuid(1),
+        teamWorkspaceId: uuid(2),
+        grantVersion: 1,
+        sourceRevision: 0,
+        representationId: uuid(10),
+        representationVersion: 1,
+        assignmentVersion: 1,
+        sourceContextHash: "d".repeat(64),
+        currentSnapshot: unresolvedTeamRepositorySnapshot()
+      }
     },
     expected: "native_review"
   },
@@ -358,6 +589,9 @@ describe("action approval policy", () => {
   it.each(matrixCases)(
     "resolves the cataloged operation family for $intent.action",
     async ({ intent }) => {
+      expect(highRiskActionGrantIntentSchema.safeParse(intent).success).toBe(
+        true
+      );
       const definition = highRiskActionDefinitions[intent.action];
       const operation = await resolveHighRiskActionGrantOperation({
         clientRequestId: uuid(99),

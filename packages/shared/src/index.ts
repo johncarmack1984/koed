@@ -1,3 +1,13 @@
+export * from "./personal-project-default-contract.js";
+export * from "./personal-inventory.js";
+export * from "./personal-inventory-classification.js";
+export * from "./personal-folder-execution-id.js";
+export { PRIVACY_CLASSIFICATION_STREAM_TYPE } from "./privacy-classification-transport.js";
+export {
+  readPiToolProvenance,
+  resolvePiToolProvenance,
+  type PiToolProvenance
+} from "./pi-tool-provenance.js";
 import { createHash } from "node:crypto";
 
 export {
@@ -481,14 +491,15 @@ export {
   personalDesktopNoteSummarySchema,
   personalDesktopNotesDataSchema,
   personalDesktopProjectMetadataDataSchema,
+  personalDesktopLocalFoldersDataSchema,
   personalDesktopProjectMetadataSchema,
   personalDesktopProjectSchema,
   personalDesktopProjectsDataSchema,
   personalDesktopProjectThreadSchema,
   personalDesktopRequestSchema,
   personalDesktopResultSchema,
-  personalDesktopSessionProjectDataSchema,
-  personalDesktopSessionProjectInputSchema,
+  personalDesktopProjectCreateDataSchema,
+  personalDesktopProjectCreateInputSchema,
   personalDesktopSessionTitleDataSchema,
   personalDesktopSessionTitleInputSchema,
   personalDesktopSessionPresentationDataSchema,
@@ -535,7 +546,6 @@ export type {
   PersonalDesktopProjectThread,
   PersonalDesktopRequest,
   PersonalDesktopResult,
-  PersonalDesktopSessionProjectInput,
   PersonalDesktopSessionTitleInput,
   PersonalDesktopSessionPresentationInput,
   PersonalConversationPresentation
@@ -636,6 +646,10 @@ export {
   ownedSharedMemoryGrantSchema,
   pendingShareSchema,
   ownedShareSummarySchema,
+  ownedSharingReasonSchema,
+  gitAnchorSharingReviewInputSchema,
+  gitAnchorSharingReviewPageSchema,
+  sharingDestinationReviewSchema,
   ownedShareItemSchema,
   conversationSourceAccessSchema,
   sharedMemoryPreviewSchema,
@@ -660,6 +674,10 @@ export type {
   CollaborationMessagePage,
   PersonalMemoryEntry,
   OwnedShareItem,
+  OwnedSharingReason,
+  GitAnchorSharingReviewInput,
+  GitAnchorSharingReviewPage,
+  SharingDestinationReview,
   CollaborationMembership,
   CollaborationInvitation,
   CollaborationInvitationPage,
@@ -800,9 +818,9 @@ export {
   deriveLocalProjectId,
   hmacProjectValue,
   isPortableGitRemote,
-  mergeGitRemoteAliases,
   normalizeGitRemoteUrl,
   normalizeProjectDisplayName,
+  normalizeRecordedProjectDirectory,
   safeProjectMetadataForRemote
 } from "./project-metadata.js";
 export {
@@ -857,7 +875,17 @@ export {
   sharedMemoryFidelityBundleActionGrantBinding,
   sharedMemoryCandidatePreviewActionGrantBinding,
   sharedMemoryPendingShareActionGrantBinding,
+  sharedMemoryConversationRuleCreationActionGrantBinding,
+  sharedMemoryRepositoryRuleCreationActionGrantBinding,
   sharedMemoryRevokeActionGrantBinding,
+  sharedMemoryWorkspaceRestorationActionGrantBinding,
+  sharedMemoryWorkspaceExclusionActionGrantBinding,
+  sharedMemoryRuleControlActionGrantBinding,
+  sharedMemoryRuleDetailActionGrantBinding,
+  sharedMemoryRuleContentPolicyActionGrantBinding,
+  sharedMemoryRepositoryRuleControlActionGrantBinding,
+  sharedMemoryPublisherTakeoverActionGrantBinding,
+  sharedMemoryRepositorySnapshotActionGrantBinding,
   sharedMemoryTranscriptAccessActionGrantBinding,
   sharedMemoryTranscriptRevokeActionGrantBinding
 } from "./shared-memory-action-grant.js";
@@ -1002,6 +1030,9 @@ export type {
 } from "./personal-device-sync-relay-client.js";
 export {
   PDS_SESSION_PACKAGE_VERSION,
+  PDS_SESSION_MANIFEST_VERSION,
+  PDS_SESSION_CONTEXT_MANIFEST_VERSION,
+  PDS_SESSION_CONTEXT_CHECKPOINT_MANIFEST_VERSION,
   PDS_SESSION_CHECKPOINT_MANIFEST_VERSION,
   PDS_SESSION_CHECKPOINT_PROFILE,
   PDS_SESSION_PACKAGE_MAX_BYTES,
@@ -1031,11 +1062,14 @@ export {
   validatePdsRelayTransport,
   validatePdsSessionCheckpointAppend,
   validatePdsSessionCheckpointManifest,
+  validatePdsCheckpointProfileTransition,
+  validatePdsClosedProfileTransition,
   validatePdsSessionSourceManifest,
   validatePdsSessionPackageChunk,
   verifyAndDecryptPdsSessionPackage,
   verifyAndDecryptPdsSessionSourcePackage,
   verifyPdsSessionCheckpointManifest,
+  verifyPdsSessionManifest,
   verifyPdsSessionSourceManifest
 } from "./personal-device-session-package.js";
 export type {
@@ -1054,6 +1088,8 @@ export type {
   PdsSessionManifest,
   PdsSessionCheckpointManifest,
   PdsSessionCheckpointMetadata,
+  PdsCheckpointProfileTransition,
+  PdsClosedProfileTransition,
   PdsSessionSourceManifest,
   PdsSessionPackage,
   PdsSessionPackageChunk,
@@ -1120,7 +1156,7 @@ export {
   crossIdentitySyncPackageRequestHash,
   crossIdentitySyncSummaryNodeRevisionHash,
   isCapturedSessionSyncChunkV1,
-  isCapturedSessionSyncPackageV1
+  isCapturedSessionSyncPackageV2
 } from "./cross-identity-sync.js";
 export {
   koedLocalWorkSignalPath,
@@ -1158,7 +1194,7 @@ export type {
   CapturedSessionSyncChunkV1,
   CapturedSessionSyncContributorV1,
   CapturedSessionSyncEventV1,
-  CapturedSessionSyncPackageV1,
+  CapturedSessionSyncPackageV2,
   CapturedSessionSyncSummaryNodeV1,
   CapturedSessionSyncUploadPackageManifest
 } from "./cross-identity-sync.js";
@@ -1819,3 +1855,171 @@ export {
   type TeamMemoryAnswerTaskCapability,
   type MemoryAnswerTaskStatus
 } from "./memory-answer-task-contract.js";
+
+export { repositoryIdentitySchema } from "./repository-identity.js";
+export type {
+  RepositoryIdentity,
+  AssociatedRepositorySelection
+} from "./repository-identity.js";
+
+export {
+  repositoryAssignmentSchema,
+  effectiveRepositoryIdentity,
+  createRepositoryAssignment
+} from "./repository-assignment.js";
+export type { RepositoryAssignment } from "./repository-assignment.js";
+
+export {
+  repositoryRecallContextSchema,
+  repositoryScopeId,
+  planRepositorySearch,
+  repositoryIdentityMatches
+} from "./repository-recall.js";
+
+export * from "./repository-review.js";
+
+export {
+  createPdsRepositoryAssignment,
+  createPdsRepositoryAssignmentFromSourceContext,
+  verifyPdsRepositoryAssignment,
+  verifyPdsRepositoryAssignmentWithKeyHistory,
+  pdsRepositoryAssignmentSchema,
+  pdsRepositoryKeyHistorySchema,
+  pdsSelectedRepositoryToken
+} from "./personal-repository-assignment.js";
+export type { PdsRepositoryAssignment } from "./personal-repository-assignment.js";
+
+export * from "./personal-project-selection.js";
+export * from "./personal-source-contract.js";
+export * from "./personal-membership-contract.js";
+export * from "./personal-selection-contract.js";
+export * from "./personal-selection-snapshot.js";
+export * from "./team-repository-snapshot.js";
+
+export {
+  syncProfileTransitionRequestSchema,
+  syncProfileTransitionReceiptSchema
+} from "./cross-identity-sync-profile-transition.js";
+export type {
+  SyncProfileTransitionRequest,
+  SyncProfileTransitionReceipt
+} from "./cross-identity-sync-profile-transition.js";
+export * from "./personal-project-contract.js";
+
+export * from "./personal-source-correction-contract.js";
+
+export * from "./personal-source-context-transport.js";
+
+export * from "./personal-configuration-capability.js";
+
+export * from "./personal-configuration-record.js";
+
+export * from "./personal-membership-transport.js";
+export * from "./personal-membership-review-contract.js";
+
+export { canonicalJsonStringify } from "./canonical-json.js";
+
+export * from "./personal-selection-consumer-contract.js";
+export * from "./selection-sharing-journal.js";
+
+export {
+  personalCaptureTargetBindingSchema,
+  type PersonalCaptureTargetBinding
+} from "./personal-capture-target-contract.js";
+
+export {
+  conversationSharingRuleCreationIntentSchema,
+  sharingSelectionSelectorSchema,
+  sharingSelectionTargetSchema,
+  sharingSelectionDescriptor,
+  repositorySharingRuleCreationReviewInputSchema,
+  repositorySharingRuleCreationPolicySchema,
+  repositorySharingRuleCreationIntentSchema,
+  repositorySharingRuleCreationReviewSchema,
+  repositorySharingRuleCreationResultSchema,
+  repositorySharingRuleControlIntentSchema,
+  repositorySharingRuleControlResultSchema,
+  repositorySharingRuleControlReviewSchema,
+  ownedRepositorySharingRulesInputSchema,
+  ownedRepositorySharingRulesPageSchema,
+  ownedRepositorySharingRuleSchema,
+  type OwnedRepositorySharingRule,
+  type OwnedRepositorySharingRulesPage,
+  type RepositorySharingRuleControlIntent,
+  type RepositorySharingRuleControlResult,
+  type RepositorySharingRuleControlReview,
+  repositorySharingRuleCreationReviewRequestSchema,
+  repositorySharingRuleCreationLocalIntentSchema,
+  repositorySharingRuleMemberAdmissionSchema,
+  repositorySharingRuleMemberReadmissionSchema,
+  repositorySharingRuleMemberAcceptanceSchema,
+  repositorySharingRuleMembersInspectSchema,
+  repositorySharingRuleMembersStateSchema,
+  repositorySharingRuleMemberInventoryInputSchema,
+  repositorySharingRuleMemberInventorySchema,
+  repositorySharingRuleMemberContextSchema,
+  repositorySharingRuleMemberContextResultSchema,
+  repositorySharingRuleMemberRemovalSchema,
+  repositorySharingRuleMemberRemovalResultSchema,
+  repositorySharingRuleMutationCancellationSchema,
+  repositorySharingRuleMutationSettlementSchema,
+  type RepositorySharingRuleMembersState,
+  type RepositorySharingRuleMemberContext,
+  type RepositorySharingRuleMemberContextResult,
+  type RepositorySharingRuleCreationIntent,
+  type RepositorySharingRuleCreationReviewInput,
+  type RepositorySharingRuleCreationReview,
+  type RepositorySharingRuleCreationResult,
+  conversationSharingRuleCreationResultSchema,
+  sharingRuleMutationIntentSchema,
+  type ConversationSharingRuleCreationResult,
+  type SharingRuleMutationIntent,
+  type ConversationSharingRuleCreationIntent,
+  snapshotConversionScopeSchema,
+  type SnapshotConversionScope,
+  conversationSharingRuleCreationReviewInputSchema,
+  conversationSharingRuleCreationReviewSchema,
+  type ConversationSharingRuleCreationReviewInput,
+  type ConversationSharingRuleCreationReview,
+  sharingRuleDeliveryPresentationSchema,
+  sharingRuleDeliverySchema,
+  conversationSharingRuleControlIntentSchema,
+  conversationSharingRuleControlResultSchema
+} from "./team-sharing-review-contract.js";
+export type { ConversationSharingRuleControlIntent } from "./team-sharing-review-contract.js";
+
+export type {
+  SharingRuleDelivery,
+  ConversationSharingRuleControlResult
+} from "./team-sharing-review-contract.js";
+export * from "./sharing-rule-detail-contract.js";
+
+export * from "./sharing-rule-content-policy-contract.js";
+export * from "./workspace-conversation-exclusion-contract.js";
+export { sharingRulePublisherSchema } from "./sharing-rule-publisher-contract.js";
+export type { SharingRulePublisher } from "./sharing-rule-publisher-contract.js";
+export {
+  sharingRuleSourceIdentitySchema,
+  sharingRuleSourceIdentityHash
+} from "./sharing-rule-source-identity.js";
+export type { SharingRuleSourceIdentity } from "./sharing-rule-source-identity.js";
+export {
+  sharingRulePublisherTakeoverLocalReviewSchema,
+  sharingRulePublisherTakeoverLocalIntentSchema,
+  sharingRulePublisherTakeoverAppliedScopeSchema,
+  sharingRulePublisherTakeoverReviewInputSchema,
+  sharingRulePublisherTakeoverReviewSchema,
+  sharingRulePublisherTakeoverIntentSchema,
+  sharingRulePublisherTakeoverResultSchema
+} from "./team-sharing-review-contract.js";
+export type {
+  SharingRulePublisherTakeoverLocalReview,
+  SharingRulePublisherTakeoverLocalIntent,
+  SharingRulePublisherTakeoverAppliedScope,
+  SharingRulePublisherTakeoverReviewInput,
+  SharingRulePublisherTakeoverReview,
+  SharingRulePublisherTakeoverIntent,
+  SharingRulePublisherTakeoverResult
+} from "./team-sharing-review-contract.js";
+
+export { transferredSelectionSharingScopeSchema } from "./selection-sharing-journal.js";

@@ -1,3 +1,12 @@
+import type { PdsConfigurationCapabilityRecord } from "@koed/shared";
+import type { PdsClosureSource } from "@koed/db";
+import {
+  PdsRelayClient,
+  requirePdsConfigurationCapability,
+  createPdsRepositoryAssignmentFromSourceContext
+} from "@koed/shared";
+import { pdsRepositoryKeyHistorySchema } from "@koed/shared";
+import { createPdsRepositoryAssignment } from "@koed/shared";
 import { spawnSync } from "node:child_process";
 import { generateKeyPairSync, randomUUID, sign, verify } from "node:crypto";
 import {
@@ -8,7 +17,9 @@ import {
   createPdsSessionPackage,
   createPdsSessionPackageRuntimeContext,
   pdsEd25519PrivateKey,
-  pdsEd25519PublicKey
+  pdsEd25519PublicKey,
+  PDS_PROJECT_SELECTION_PROTOCOL,
+  signPdsProjectSelection
 } from "@koed/shared";
 import type {
   AiClientSourceRuntime,
@@ -43,6 +54,7 @@ type PdsRuntimeSecret = {
   certificate: string;
   recipientCertificates: string[];
   historicalOriginCertificates?: string[];
+  historicalProjectKeys?: Record<string, string>;
   groupSecrets: {
     currentEpoch: string;
     contentKey: string;
@@ -72,9 +84,15 @@ const parseRuntimeSecret = (value: string): PdsRuntimeSecret | null => {
       | Record<string, unknown>
       | undefined;
     if (
-      (Object.keys(parsed).sort().join(",") !==
+      (Object.keys(parsed)
+        .filter((key) => key !== "historicalProjectKeys")
+        .sort()
+        .join(",") !==
         "authority,certificate,device,groupId,groupSecrets,historicalOriginCertificates,recipientCertificates,recovery,relayUrl,userId,version" &&
-        Object.keys(parsed).sort().join(",") !==
+        Object.keys(parsed)
+          .filter((key) => key !== "historicalProjectKeys")
+          .sort()
+          .join(",") !==
           "authority,certificate,device,groupId,groupSecrets,recipientCertificates,recovery,relayUrl,userId,version") ||
       parsed.version !== 1 ||
       ![
@@ -110,6 +128,9 @@ const parseRuntimeSecret = (value: string): PdsRuntimeSecret | null => {
         "tombstoneFloorKey",
         "projectAliasKey"
       ].every((key) => strictString(groupSecrets[key])) ||
+      (parsed.historicalProjectKeys !== undefined &&
+        !pdsRepositoryKeyHistorySchema.safeParse(parsed.historicalProjectKeys)
+          .success) ||
       !Array.isArray(parsed.recipientCertificates) ||
       !parsed.recipientCertificates.every(strictString) ||
       (parsed.historicalOriginCertificates !== undefined &&
@@ -314,20 +335,103 @@ const isAiClientSourceRuntime = (
   value === "claude-code" ||
   value === "pi";
 
+const sourceRepositoryAssignment = (
+  source: PdsClosureSource,
+  secret: PdsRuntimeSecret
+) =>
+  source.sourceContext
+    ? createPdsRepositoryAssignmentFromSourceContext(
+        source.sourceContext.context,
+        secret.groupSecrets.currentEpoch,
+        secret.groupSecrets.projectAliasKey,
+        {
+          capturedCwd: source.capturedCwd,
+          branchObservation: source.branchObservation
+        }
+      )
+    : createPdsRepositoryAssignment(
+        source.repositoryAssignment ?? {
+          state: "historical_unresolved",
+          version: 1,
+          automatic: null,
+          override: null,
+          effective: null
+        },
+        secret.groupSecrets.currentEpoch,
+        secret.groupSecrets.projectAliasKey,
+        {
+          capturedCwd: source.capturedCwd,
+          branchObservation: source.branchObservation
+        }
+      );
 const sourceContext = (secret: PdsRuntimeSecret): PdsSecureSourceKeyContext => {
   const runtime = runtimeFor(secret);
   const signingKey = pdsEd25519PrivateKey(
     secret.device.signingPrivateSeed,
     runtime.serving.signingPublicKey
   );
+  let sourceCapabilities: PdsConfigurationCapabilityRecord[] = [];
+  const prepareSourceContextPublication = async () => {
+    const relay = new PdsRelayClient({
+      baseUrl: secret.relayUrl,
+      identity: {
+        certificate: secret.certificate,
+        deviceId: secret.device.id,
+        signingKeyId: secret.device.signingKeyId,
+        signingPublicKey: runtime.serving.signingPublicKey,
+        signingPrivateSeed: secret.device.signingPrivateSeed
+      }
+    });
+    sourceCapabilities = await relay.configurationCapabilities();
+    requireSourceContextRecipients();
+  };
+  const requireSourceContextRecipients = () => {
+    requirePdsConfigurationCapability({
+      groupId: secret.groupId,
+      authorityHead: secret.authority.head,
+      currentEpoch: secret.groupSecrets.currentEpoch,
+      authorityPublicKey: secret.authority.publicKey,
+      authorityKeyId: secret.authority.keyId,
+      activeCertificates: secret.recipientCertificates,
+      records: sourceCapabilities,
+      feature: "source_context_v1",
+      intendedRecipientDeviceIds: runtime.recipients
+        .filter((member) => member.deviceId !== secret.device.id)
+        .map((member) => member.deviceId)
+    });
+  };
   return {
+    sourceContextVersion: "1",
+    prepareSourceContextPublication,
+    configurationAuthority: {
+      epoch: runtime.epoch,
+      head: runtime.authorityHead
+    },
     deviceSigningPrivateKeyRef: "desktop-secure-runtime",
     deviceKemPrivateKeyRef: "desktop-secure-runtime",
     groupSecretSetRef: "desktop-secure-runtime",
     originDeploymentId: secret.device.originDeploymentId,
     originDeviceId: secret.device.id,
-    buildClosedSessionPackage(input) {
+    signProjectSelection(input) {
+      return signPdsProjectSelection(
+        {
+          ...input,
+          protocol: PDS_PROJECT_SELECTION_PROTOCOL,
+          groupId: secret.groupId,
+          authorDeviceId: secret.device.id,
+          authorSigningKeyId: secret.device.signingKeyId
+        },
+        signingKey
+      );
+    },
+    async buildClosedSessionPackage(input) {
+      if (input.source.sourceContext) requireSourceContextRecipients();
       const manifest = createPdsSessionManifest({
+        profileTransition: input.closedProfileTransition ?? null,
+        ...(input.source.sourceContext
+          ? { sourceContext: input.source.sourceContext }
+          : {}),
+        repositoryAssignment: sourceRepositoryAssignment(input.source, secret),
         runtime,
         originDeploymentId: secret.device.originDeploymentId,
         sourceSequence: input.sourceSequence,
@@ -371,7 +475,8 @@ const sourceContext = (secret: PdsRuntimeSecret): PdsSecureSourceKeyContext => {
         deletionFloorToken: manifest.deletionFloorToken
       });
     },
-    buildCompletedTurnCheckpointPackage(input) {
+    async buildCompletedTurnCheckpointPackage(input) {
+      if (input.source.sourceContext) requireSourceContextRecipients();
       const sourceRuntime = input.source.sourceRuntime;
       if (!isAiClientSourceRuntime(sourceRuntime)) {
         throw new TypeError("PDS checkpoint source runtime is invalid");
@@ -393,6 +498,11 @@ const sourceContext = (secret: PdsRuntimeSecret): PdsSecureSourceKeyContext => {
         sourceCreatedAt: input.source.sourceCreatedAt
       };
       const manifest = createPdsSessionCheckpointManifest({
+        profileTransition: input.profileTransition,
+        ...(input.source.sourceContext
+          ? { sourceContext: input.source.sourceContext }
+          : {}),
+        repositoryAssignment: sourceRepositoryAssignment(input.source, secret),
         runtime,
         originDeploymentId: secret.device.originDeploymentId,
         sourceSequence: input.sourceSequence,

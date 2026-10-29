@@ -1,4 +1,17 @@
 export { createAuditRepository } from "./audit-repository.js";
+export {
+  createSelectionSharingReconciliation,
+  type SelectionSharingInventoryReader
+} from "./selection-sharing-reconciliation.js";
+export {
+  createSelectionSharingJournal,
+  recordSelectionSharingDetailScope,
+  recordSelectionSharingContentPolicyScope,
+  selectionSharingSourceKey,
+  selectionSharingGoalHash,
+  type SelectionSharingProgressLease,
+  type SelectionSharingSourceLease
+} from "./selection-sharing-journal.js";
 export { createRemoteMcpOAuthRepository } from "./remote-mcp-oauth-repository.js";
 export type {
   RemoteMcpOAuthStore,
@@ -70,6 +83,7 @@ export {
   type CollaborationSharedMemoryAuthorityBindingRepository,
   type CollaborationSharedMemoryAuthorityIdentity,
   type CollaborationSharedMemoryAuthorityRepository,
+  type CollaborationSharingRuleDeliveryWork,
   type CollaborationSharedMemoryAuthorityStore,
   type CollaborationSharedMemoryAuthorityStoreOptions,
   type CollaborationSharedMemoryCanonicalSourceItem,
@@ -420,9 +434,13 @@ export {
   type SharedMemoryCandidatePreviewRecord,
   type PendingShareRecord,
   type SharedMemoryRevokeReviewRecord,
+  type SharedMemoryRuleControlReviewRecord,
   type SharedMemoryReviewDestination,
   type SharedMemoryReviewSource,
   type SharedMemoryRepository,
+  type PendingConversationSharingRuleAuthority,
+  type RepositorySharingRuleMemberAdmission,
+  type RepositorySharingRuleMemberAcceptance,
   type SharedMemorySourceBindingDto
 } from "./shared-memory-repository.js";
 export {
@@ -449,9 +467,25 @@ export { createWorkflowTokenUsageRepository } from "./workflow-token-usage-repos
 export { presentMemoryText } from "./presentation.js";
 export * as schema from "./schema.js";
 export * from "./types.js";
+export {
+  createPersonalProjectDefaultRepository,
+  type PersonalProjectDefaultRepository
+} from "./personal-project-default-repository.js";
 export * from "./memory-answer-team-authority.js";
 
 export {
   verifyManagedJournalTerminal,
   type VerifiedManagedJournalTerminal
 } from "./managed-journal-terminal.js";
+
+export { updateSessionRepositoryOverride } from "./repository-assignment.js";
+
+export * from "./repository-review-repository.js";
+
+export { createPersonalProjectSelectionRepository } from "./personal-project-selection-repository.js";
+
+export * from "./personal-membership-repository.js";
+
+export type { PersonalConfigurationRepository } from "./personal-configuration-repository.js";
+
+export { createPersonalSelectionConsumerRepository } from "./personal-selection-consumer-repository.js";

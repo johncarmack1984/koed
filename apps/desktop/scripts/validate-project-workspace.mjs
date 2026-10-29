@@ -7,7 +7,10 @@ import process from "node:process";
 import { app, BrowserWindow } from "electron";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const pagePath = resolve(scriptDir, "../dist/browser-validation.html");
+const pagePath = resolve(
+  scriptDir,
+  "../dist-validation/browser-validation.html"
+);
 
 const inspectWorkspace = async (window) =>
   window.webContents.executeJavaScript(`(() => {
@@ -292,6 +295,10 @@ const run = async () => {
     );
     await window.loadFile(pagePath);
     await waitForReady(window);
+    await window.webContents.executeJavaScript(`
+      [...document.querySelectorAll('.desktop-sidebar-nav-item')]
+        .find(button => button.querySelector('.desktop-sidebar-nav-label')?.textContent?.trim() === 'Ask')?.click()
+    `);
     await waitFor(
       window,
       `Boolean(document.querySelector('.personal-agent-start textarea'))`,
@@ -308,9 +315,9 @@ const run = async () => {
         heading: document.querySelector('.personal-agent-start h1')?.textContent,
         independentFirst: cards[0]?.textContent?.includes('Chat') ?? false,
         projectVisible: projectCard?.textContent?.includes('Koed Desktop browser validation') ?? false,
-        projectCountVisible: projectCard?.textContent?.includes('4 recent Conversations') ?? false,
+        projectContextVisible: Boolean(projectCard?.querySelector('.personal-agent-project-context')),
         projectTextGap: name && count ? Math.round(count.top - name.bottom) : null,
-        openProjectVisible: document.querySelector('.personal-agent-open-project')?.textContent?.includes('Open a project') ?? false,
+        openProjectVisible: document.querySelector('.personal-agent-open-project')?.textContent?.includes('Choose a Project') ?? false,
         forbiddenCopyVisible: /CHOOSE YOUR CONTEXT|Explore an idea|Working in/u.test(document.body.innerText),
         composerVisible: Boolean(document.querySelector('.personal-agent-start textarea')),
         overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth
@@ -319,8 +326,8 @@ const run = async () => {
     assert.equal(askLight.heading, "Where shall we start?");
     assert.equal(askLight.independentFirst, true);
     assert.equal(askLight.projectVisible, true);
-    assert.equal(askLight.projectCountVisible, true);
-    assert.equal(askLight.projectTextGap, 4);
+    assert.equal(askLight.projectContextVisible, false);
+    assert.equal(askLight.projectTextGap, null);
     assert.equal(askLight.openProjectVisible, true);
     assert.equal(askLight.forbiddenCopyVisible, false);
     assert.equal(askLight.composerVisible, true);
@@ -340,6 +347,10 @@ const run = async () => {
     );
     await window.loadFile(pagePath);
     await waitForReady(window);
+    await window.webContents.executeJavaScript(`
+      [...document.querySelectorAll('.desktop-sidebar-nav-item')]
+        .find(button => button.querySelector('.desktop-sidebar-nav-label')?.textContent?.trim() === 'Ask')?.click()
+    `);
     await waitFor(
       window,
       `Boolean(document.querySelector('.personal-agent-start textarea'))`,
@@ -363,6 +374,10 @@ const run = async () => {
     );
     await window.loadFile(pagePath);
     await waitForReady(window);
+    await window.webContents.executeJavaScript(`
+      [...document.querySelectorAll('.desktop-sidebar-nav-item')]
+        .find(button => button.querySelector('.desktop-sidebar-nav-label')?.textContent?.trim() === 'Ask')?.click()
+    `);
     await waitFor(
       window,
       `Boolean(document.querySelector('.personal-agent-start textarea'))`,
@@ -505,9 +520,101 @@ const run = async () => {
       "Personal Memory workspace"
     );
     await window.webContents.executeJavaScript(
-      `document.querySelector('[data-project-id="browser-project"]')?.click()`
+      `document.querySelector('button[aria-label="Create Project"]')?.click()`
+    );
+    await waitFor(
+      window,
+      `Boolean(document.querySelector('.personal-project-create-dialog input'))`,
+      "named Project creation dialog"
+    );
+    await window.webContents.executeJavaScript(`(() => {
+      const input = document.querySelector('.personal-project-create-dialog input');
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'Added Project');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await waitFor(
+      window,
+      `Boolean(document.querySelector('.personal-project-create-dialog button[type="submit"]:not(:disabled)'))`,
+      "enabled Create action"
+    );
+    await captureValidationScreenshot(window, "project-create-dialog");
+    await window.webContents.executeJavaScript(
+      `document.querySelector('.personal-project-create-dialog form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))`
+    );
+    await waitFor(
+      window,
+      `document.querySelector('.personal-project-detail h2')?.textContent === 'Added Project'`,
+      "empty Project added and opened by canonical identity"
+    );
+    await captureValidationScreenshot(window, "named-project-empty");
+    const createdProject = await window.webContents.executeJavaScript(`(() => {
+      const row = [...document.querySelectorAll('[data-project-id]')]
+        .find((candidate) => candidate.textContent.includes('Added Project'));
+      const action = document.querySelector('button[aria-label="Create Project"]');
+      return { id: row?.getAttribute('data-project-id'), visible: Boolean(row?.getBoundingClientRect().height), enabled: !action?.disabled };
+    })()`);
+    assert.ok(
+      createdProject.id === "00000000-0000-4000-8000-000000000800",
+      JSON.stringify(createdProject)
+    );
+    assert.equal(createdProject.visible, true);
+    assert.equal(createdProject.enabled, true);
+    await window.webContents.executeJavaScript(
+      `document.querySelector('[data-project-id="00000000-0000-4000-8000-000000000500"]')?.click()`
     );
     await delay(50);
+
+    const projectHeader = await window.webContents.executeJavaScript(`(() => {
+      const header = document.querySelector('.personal-project-header');
+      const move = header.querySelector('[aria-label="Move Project"]');
+      const create = header.querySelector('.personal-new-conversation');
+      return {
+        height: header.getBoundingClientRect().height,
+        retiredMoveVisible: Boolean(move),
+        newHeight: create?.getBoundingClientRect().height ?? 0,
+        pathsExposed: header.textContent.includes('/private/operator/')
+      };
+    })()`);
+    assert.equal(projectHeader.height, 96, JSON.stringify(projectHeader));
+    assert.equal(projectHeader.retiredMoveVisible, false);
+    assert.equal(projectHeader.newHeight, 0);
+    assert.equal(
+      projectHeader.pathsExposed,
+      false,
+      JSON.stringify(projectHeader)
+    );
+    await window.webContents.executeJavaScript(
+      `document.querySelector('.personal-project-details-trigger').click()`
+    );
+    await waitFor(
+      window,
+      `Boolean(document.querySelector('.personal-project-details-card'))`,
+      "Project detail card"
+    );
+    const projectDetails = await window.webContents.executeJavaScript(`(() => {
+      const card = document.querySelector('.personal-project-details-card');
+      return {
+        folder: card.textContent.includes('/private/operator/koed'),
+        repository: Boolean(card.querySelector('.personal-project-repo')),
+        headerHeight: document.querySelector('.personal-project-header').getBoundingClientRect().height
+      };
+    })()`);
+    assert.equal(projectDetails.folder, true, JSON.stringify(projectDetails));
+    // This named Project includes a Folder; checkout remotes alone do not establish a Git Anchor.
+    assert.equal(
+      projectDetails.repository,
+      false,
+      JSON.stringify(projectDetails)
+    );
+    assert.equal(
+      projectDetails.headerHeight,
+      96,
+      JSON.stringify(projectDetails)
+    );
+    await captureValidationScreenshot(window, "balanced-project-header");
+    await window.webContents.executeJavaScript(
+      `document.querySelector('[aria-label="Close Project details"]').click()`
+    );
 
     await setEmulatedViewport(window, 1440, 900);
     const wide = await inspectWorkspace(window);
@@ -964,6 +1071,81 @@ const run = async () => {
       window,
       `document.querySelector('.personal-memory-workspace')?.classList.contains('route-projects')`,
       "top-bar breadcrumb navigation"
+    );
+
+    await setEmulatedViewport(window, 1440, 900);
+    await window.webContents.executeJavaScript(
+      `document.querySelector('[data-project-id="00000000-0000-4000-8000-000000000500"]')?.click()`
+    );
+    assert.equal(
+      await window.webContents.executeJavaScript(
+        `Boolean(document.querySelector('[aria-label="Move Project"]'))`
+      ),
+      false
+    );
+    await window.webContents.executeJavaScript(
+      `document.querySelector('[data-session-id] .personal-session-row-select')?.click()`
+    );
+    await waitFor(
+      window,
+      `Boolean(document.querySelector('button[aria-label="Conversation actions"]'))`,
+      "Conversation inclusion action"
+    );
+    await window.webContents.executeJavaScript(
+      `document.querySelector('button[aria-label="Conversation actions"]').click()`
+    );
+    await waitFor(
+      window,
+      `Boolean([...document.querySelectorAll('[role="menuitem"]')].find(item=>item.textContent.trim()==='Add to Project'))`,
+      "Conversation Project action"
+    );
+    await window.webContents.executeJavaScript(
+      `[...document.querySelectorAll('[role="menuitem"]')].find(item=>item.textContent.trim()==='Add to Project').click()`
+    );
+    const inclusionCheckbox = 'input[aria-label="Include in Added Project"]';
+    await waitFor(
+      window,
+      `!!document.querySelector('${inclusionCheckbox}') && !document.querySelector('${inclusionCheckbox}').disabled`,
+      "Project membership checklist"
+    );
+    assert.equal(
+      await window.webContents.executeJavaScript(
+        `document.querySelector('${inclusionCheckbox}').checked`
+      ),
+      false
+    );
+    await window.webContents.executeJavaScript(
+      `document.querySelector('${inclusionCheckbox}').click()`
+    );
+    assert.equal(
+      await window.webContents.executeJavaScript(
+        `document.querySelector('.personal-conversation-card [role="status"]').textContent`
+      ),
+      "1 pending change"
+    );
+    await window.webContents.executeJavaScript(
+      `[...document.querySelectorAll('.personal-conversation-card button')].find(button=>button.textContent.trim()==='Confirm').click()`
+    );
+    await waitFor(
+      window,
+      `!document.querySelector('.personal-conversation-card')`,
+      "Confirmed membership closes the card"
+    );
+    await window.webContents.executeJavaScript(
+      `document.querySelector('[data-project-id="00000000-0000-4000-8000-000000000800"]')?.click()`
+    );
+    await waitFor(
+      window,
+      `document.querySelector('.personal-project-detail h2')?.textContent==='Added Project' && document.querySelectorAll('.personal-session-row').length===1`,
+      "Only the selected Conversation was included"
+    );
+    await window.webContents.executeJavaScript(
+      `document.querySelector('[data-project-id="00000000-0000-4000-8000-000000000500"]')?.click()`
+    );
+    await waitFor(
+      window,
+      `document.querySelectorAll('.personal-session-row').length===4`,
+      "Original source Conversations remain available"
     );
 
     await setEmulatedViewport(window, 1440, 900);

@@ -2094,7 +2094,9 @@ describe("collaboration realtime protocol", () => {
           mode: "continuous" as const,
           authorizedPreview: null,
           lastReadyRevision: null,
-          lastSuccessfulUpdateAt: null
+          lastSuccessfulUpdateAt: null,
+          workspaceExclusion: null,
+          sharingReasons: []
         }
       }))
     };

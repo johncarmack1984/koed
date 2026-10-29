@@ -99,7 +99,11 @@ In a source checkout, the Desktop `prestart` script runs
 `pnpm source-runtime:prepare` before Electron starts. This command calculates a
 SHA-256 fingerprint for the API, Worker, MCP Server, Embedding Service, Privacy
 Filter Service, and their workspace dependencies. It builds these packages only
-when their inputs or required outputs changed.
+when their inputs or required outputs changed. Before a rebuild, it removes
+the previous runtime packages' compiled output and TypeScript build state so
+deleted source modules cannot remain in an artifact. Workspace builds run
+one at a time to limit peak memory use. Desktop packaging uses the same
+preparation step before staging its service runtime.
 
 The source-runtime state is under
 `node_modules/.cache/koed/source-runtime-build.json`. A failed or interrupted
@@ -270,6 +274,14 @@ it resumes the managed local `koed-server`. Platform secret-provider
 initialization runs after the window exists and before the runtime resumes. A
 blocked or interactive operating-system credential provider therefore cannot
 leave the User with no application window.
+Managed Conversation draft storage selects its existing encryption provider
+only when a draft is read or changed. A provider failure rejects that operation
+without switching to a weaker store.
+
+During external-service setup, Desktop starts its managed local API before
+it checks model readiness. That API validates the configured external services.
+Desktop does not install or start those Operator-managed dependencies. Failed
+startup or model readiness prevents setup from completing.
 
 A packaged User can enable **Launch Koed at startup** in General settings. A
 login launch takes the background path: Desktop creates its macOS menu-bar or
@@ -350,6 +362,13 @@ Privacy Filter startup emits `privacy.startup` stage timings for CPU model load,
 CPU parity validation, provider selection and HTTP listening. These logs contain
 no classified text or credentials. A timeout still fails readiness; use the last
 completed stage to distinguish slow loading from an unavailable service.
+
+The separate Linux x64 Team CPU image packages the newer ONNX worker, bounded
+two-worker scheduling and short-field batching. Its qualified service profile,
+resource bounds, qualified publication/rollout results and platform limits are documented in
+[Packaged Privacy CPU worker](privacy-cpu-worker.md). Native/provider defaults
+remain unchanged. [Qualification replay](privacy-runtime-qualification.md)
+uses isolated synthetic runners and does not modify a running Team backend.
 
 Bundled-local Team startup verifies every pinned Privacy Filter model file once
 before the Privacy Filter process is spawned. Readiness polling then trusts the
@@ -768,25 +787,65 @@ node packages/koed-server/dist/cli.js project show --cwd "$PWD" --json
 node packages/koed-server/dist/cli.js project list --json
 ```
 
-Project metadata is local matching/display data, not authorization. Discovery
-stores raw local paths only under `KOED_HOME/config/projects.json`, strips
-credentials from Git remotes, derives a device-local Project id, and retains
-individual current and historical network remote aliases as non-authoritative
-matching signals. Remote signals never select or authorize a Team Workspace;
-explicit Project linking is authoritative. The Team Workspace id remains the
-stable Team memory boundary.
+Native Project metadata supplies checkout display and local execution context.
+Named Personal Projects and their membership live in the database.
+Discovery stores local checkout metadata under `KOED_HOME/config/projects.json` and strips credentials from Git remotes.
+The exact Folder registry separately retains the originating device, profile, deployment, and directory lifetime.
+Neither local metadata nor an equal path authorizes access to Memory or a Team Workspace.
+Explicit Workspace association remains authoritative.
+
+Desktop inventory reads do not run discovery or create named Projects.
+After capture or verified source receipt becomes durable, the existing worker reconciles eligible sources in bounded pages.
+It creates one default Project per canonical Git source or proven standalone exact Folder.
+Rename, source removal, and deletion remain durable through refresh and restart.
+The read-only reconciliation status distinguishes pending organization from an empty inventory.
+See [Personal inventory](personal-inventory.md) for source eligibility and retained suppression.
+
+Discovery and inspection use the shared `koed-server` Git Project probe. The
+caller supplies its local profile configuration and persisted device salt;
+the probe never creates capture-producer identities. Each Git command has a
+five-second timeout and a one-MiB output limit. Successful observations are
+cached for two seconds per profile, checkout, salt, and configuration revision.
+Git marker, configuration, HEAD, and branch-ref changes invalidate the cache.
+Probe results distinguish a non-Git directory from failed execution and
+ambiguous output. Partial observations preserve the existing discovery metadata;
+failed or ambiguous probes are not cached. Raw Git errors and remote credentials
+are not included in the diagnostic result. These observations grant no access.
 
 Discovery inspects the supplied directory and its enclosing Git repository only;
 it does not recursively discover child repositories, submodules, or monorepo
-packages. Worktrees retain separate local Project ids while a salted Git
-common-directory hash identifies worktrees backed by the same device-local Git
-repository. Local-only repositories have no portable remote signal.
+packages. Worktrees retain separate local checkout identities.
+Only the recorded canonical Git identity can join their Conversations into one default Project.
+Names, paths, and additional remote aliases cannot establish that equality.
+Local-only repositories have no portable remote signal.
 
-Desktop reveals a Project in the platform file browser only through its opaque,
-device-local Project id. Electron main resolves that id against the local
-Project metadata store, requires the stored absolute path to still exist, and
-uses the platform show-in-folder operation. The renderer cannot submit an
-arbitrary local path or fall back to opening a `file://` URL.
+Desktop reveals a checkout in the platform file browser through its opaque native identity.
+Electron main resolves that identity against local metadata and requires the absolute path to exist.
+The renderer cannot submit an arbitrary path or open a `file://` fallback.
+
+Choose New Conversation from the Project header's three-dot actions menu.
+The action requires an available exact local Folder.
+Choose the Folder chip in the input toolbar to select an eligible local Folder.
+A Project with several eligible Folders requires a choice before execution starts.
+Changing Folders retains the draft. A pending launch locks its Folder for retries.
+Electron main checks the current host, profile, and directory lifetime against the native registry.
+On macOS, local Folder checks use a stable volume UUID with the inode and creation time.
+A remount can change the filesystem device number while preserving the Folder identity.
+A replaced directory or different recorded volume cannot reuse the old native registration.
+For a known Git checkout with no Folder registration, Desktop verifies its current Git context and prepares its first execution Folder.
+The Project catalog appears before that background preparation finishes.
+An unavailable existing Folder requires inspection and is not automatically replaced.
+The managed execution API resolves that opaque choice again before it launches the AI Client.
+Remote and historical Folders remain available for browsing and Ask when local execution is unavailable.
+
+On the Ask start page, choose a named Project from its card or the Project selector.
+Use the shared input toolbar chip to choose an eligible local Folder.
+Changing the Project or Folder retains the draft.
+Chat uses its own automatic Conversation Folder.
+
+Run `pnpm --filter @koed/desktop test:browser` for the maintained native browser journeys.
+They use synthetic Memory and simulated AI Clients in disposable Electron profiles.
+See [Project cutover validation](projects-default-view-validation.md) for the route and recorded automated results.
 
 ### Managed Conversation permissions
 
@@ -928,6 +987,31 @@ to plaintext queue state, logs, or capability metadata. Live filesystem reads,
 writes, Team repository access, and non-Git file authority are not part of this
 capability. See
 [ADR 0035](./adr/0035-runner-owned-rooted-file-authority.md).
+
+### Inspect and select a repository anchor
+
+On the Project integration branch, `project discover` and `project show` expose
+`repository`: identity kind and key, resolution reason, selected remote, root,
+branch observation, stable checkout id, and originating device provenance.
+Desktop shows the same information in a Project's **Repository anchor** panel.
+Select a remote there or choose **Use automatic selection** to remove the local
+selection. Invalid selections remain visibly unresolved.
+
+For headless editing, copy the local Project id and checkout id from discovery:
+
+```bash
+node packages/koed-server/dist/cli.js project anchor --local-project-id <id> --checkout-id <checkout-id> --remote upstream --json
+node packages/koed-server/dist/cli.js project anchor --local-project-id <id> --checkout-id <checkout-id> --reset --json
+```
+
+The local selection wins over an associated replicated selection, portable
+`upstream`, portable `origin`, and device-local fallback, in that order. Extra
+remotes and historical aliases are inspection metadata. They do not contribute
+additional repository identities. A reused checkout path receives new checkout
+provenance and cannot inherit the old selection. Local editing does not reassign
+recorded sessions, establish a Project association, or change Workspace access.
+The complete capture and recall behavior is released at the Project cutover;
+see [ADR 0064](adr/0064-selected-repository-identity.md).
 
 ## Managed terminals
 
@@ -1378,3 +1462,11 @@ networking, least-privilege credentials, encrypted storage, and restricted
 administrator access.
 
 Only `/health` and `/ready` are intended for unauthenticated infrastructure probes. They return coarse status and should not be used as operator diagnostics. `/v1/capabilities` is also unauthenticated, but it is a client discovery contract rather than a health check: clients can use it to detect the positive capabilities registered by the current backend, and should treat missing capabilities as unavailable. `status --json` and `doctor --json` use readiness gates for Postgres reachability/version, migrations, pgvector, work queue backend, Embedding Service model/dimensions, and registered upstream capability-cache state before reporting healthy; doctor output gives repair actions such as running migrations, enabling pgvector, fixing dependency URLs, refreshing upstream capabilities, or correcting model/runtime mismatch. If startup times out, the supervisor lists the required blocking checks by component and state. Use those names with `/ready` for coarse dependency readiness and `koed status --json` for detailed remediation; non-blocking AI Client diagnostics are omitted from the timeout reason. Registered upstream backends are local edge metadata only: capability caches and route-policy state live under `KOED_HOME/config/upstream-backends.json`, while reusable upstream/device credentials must stay out of ordinary config. Detailed status endpoints such as `/health/details`, `/self-host/diagnostics`, and the authenticated view of `/self-host/status` should remain behind normal API authentication. Koed Desktop packaging/signing remains tracked separately from this local runtime path.
+
+### Desktop collaboration startup recovery
+
+Once the local API and database are healthy, Desktop retries a retryable initial
+collaboration load failure using its existing bounded startup recovery. A stale
+saved verification result or optional setup check does not suppress that retry.
+Setup status still controls onboarding. Permission denials remain nonretryable;
+normal backend authorization and enrollment checks apply to every request.

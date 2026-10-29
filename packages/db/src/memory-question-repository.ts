@@ -1,3 +1,9 @@
+import {
+  personalFolderReferenceSchema,
+  personalFolderScopeId,
+  personalGitContextSchema,
+  repositoryScopeId
+} from "@koed/shared";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import pg from "pg";
@@ -47,6 +53,9 @@ export interface MemoryQuestionRepository {
   createPendingDesktopAsk(
     actor: MemoryQuestionActorContext,
     input: {
+      namedProjectId?: string;
+      folderSelection?: import("@koed/shared").PersonalFolderReference;
+      repositorySelection?: import("@koed/shared").PersonalGitContext;
       askThreadId?: string;
       idempotencyKey: string;
       query: string;
@@ -508,6 +517,34 @@ export const createMemoryQuestionRepository = (
 
   const repository: MemoryQuestionRepository = {
     async createPendingDesktopAsk(actor, input) {
+      if (
+        [
+          input.namedProjectId,
+          input.folderSelection,
+          input.repositorySelection
+        ].filter(Boolean).length > 1
+      )
+        throw Object.assign(new Error("Ask requires one explicit target"), {
+          statusCode: 400
+        });
+      const repositorySelection = input.repositorySelection
+        ? personalGitContextSchema.parse(input.repositorySelection)
+        : undefined;
+      const folder = input.folderSelection
+        ? personalFolderReferenceSchema.parse(input.folderSelection)
+        : undefined;
+      if (
+        folder &&
+        (folder.ownerUserId !== actor.userId || input.namedProjectId)
+      )
+        throw Object.assign(new Error("Invalid Personal Folder selection"), {
+          statusCode: 403
+        });
+      const selectedId = repositorySelection
+        ? repositoryScopeId(repositorySelection)
+        : folder
+          ? personalFolderScopeId(folder)
+          : (input.namedProjectId ?? null);
       const suppressPlaintextPayload =
         memoryQuestionSensitiveFieldsRequireEncryption();
       if (suppressPlaintextPayload && !options.envelopeEncryptionProvider) {
@@ -535,6 +572,11 @@ export const createMemoryQuestionRepository = (
           [actor.userId, input.idempotencyKey]
         );
         if (existing.rows[0]) {
+          if (existing.rows[0].project_id !== selectedId)
+            throw Object.assign(
+              new Error("Ask request belongs to another selection"),
+              { statusCode: 409 }
+            );
           if (existing.rows[0].origin !== "desktop_ask") {
             throw new Error("Memory Question idempotency key is unavailable");
           }
@@ -544,6 +586,16 @@ export const createMemoryQuestionRepository = (
           );
         }
 
+        if (input.namedProjectId) {
+          const selected = await client.query(
+            "select project_id from personal_named_projects where project_id::text=$2 and owner_user_id=$1 and deleted_at is null for share",
+            [actor.userId, input.namedProjectId]
+          );
+          if (!selected.rows.length)
+            throw Object.assign(new Error("Personal Project not found"), {
+              statusCode: 404
+            });
+        }
         const askThreadId = input.askThreadId ?? randomUUID();
         let askTurnIndex = 0;
         if (input.askThreadId) {
@@ -554,10 +606,12 @@ export const createMemoryQuestionRepository = (
           const thread = await client.query<{
             count: string | number;
             next_turn_index: string | number;
+            other_scope_count: string | number;
           }>(
             `
               select
                 count(*) as count,
+                count(*) filter(where project_id is distinct from $3::text) as other_scope_count,
                 coalesce(max(ask_turn_index), -1) + 1 as next_turn_index
               from memory_questions
               where owner_user_id = $1
@@ -565,11 +619,16 @@ export const createMemoryQuestionRepository = (
                 and origin = 'desktop_ask'
                 and ask_thread_id = $2
             `,
-            [actor.userId, askThreadId]
+            [actor.userId, askThreadId, selectedId]
           );
           if (Number(thread.rows[0]?.count ?? 0) === 0) {
             throw new Error("Ask thread not found or not visible");
           }
+          if (Number(thread.rows[0]?.other_scope_count ?? 0) > 0)
+            throw Object.assign(
+              new Error("Start a new Ask to change its selection"),
+              { statusCode: 409 }
+            );
           askTurnIndex = Number(thread.rows[0]!.next_turn_index);
         }
 
@@ -577,11 +636,11 @@ export const createMemoryQuestionRepository = (
           `
             insert into memory_questions (
               owner_user_id, visibility, origin, retrieval_scope,
-              search_domain, ask_thread_id, ask_turn_index, idempotency_key,
+              search_domain, project_id, ask_thread_id, ask_turn_index, idempotency_key,
               query, status, attempt_count
             )
             values (
-              $1, 'personal', 'desktop_ask', 'personal', 'global', $2, $3, $4,
+              $1, 'personal', 'desktop_ask', 'personal', case when $6::text is null then 'global'::memory_search_domain else 'project'::memory_search_domain end,$6,$2,$3,$4,
               $5, 'pending'::memory_question_status, 0
             )
             returning
@@ -600,7 +659,8 @@ export const createMemoryQuestionRepository = (
             input.idempotencyKey,
             suppressPlaintextPayload
               ? ENCRYPTED_MEMORY_QUESTION_TEXT
-              : input.query
+              : input.query,
+            selectedId
           ]
         );
         const row = result.rows[0]!;

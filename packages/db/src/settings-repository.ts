@@ -1,3 +1,4 @@
+import { readPersonalCaptureTarget } from "./personal-capture-target-state.js";
 import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { auditEventValues } from "./audit-repository.js";
 import type { KoedDb } from "./connection.js";
@@ -421,6 +422,7 @@ export const createSettingsRepository = (db: KoedDb) => ({
       ? await db
           .select({
             id: sessions.id,
+            logicalSessionId: sessions.logicalSessionId,
             externalSessionId: sessions.externalSessionId,
             cwd: sessions.cwd,
             automaticProjectId: sessions.automaticProjectId,
@@ -443,12 +445,10 @@ export const createSettingsRepository = (db: KoedDb) => ({
         ? [input.sessionId, session.externalSessionId ?? undefined]
         : [input.threadId]
     ).filter((value): value is string => Boolean(value));
-    const projectId =
-      input.projectId ??
-      session?.projectOverrideId ??
-      session?.automaticProjectId ??
-      session?.cwd ??
-      null;
+    const captureTarget = session
+      ? await readPersonalCaptureTarget(db, actor.userId, session)
+      : null;
+    const projectId = input.projectId ?? captureTarget?.targetId ?? null;
 
     const policyConditions = [
       eq(capturePolicies.targetType, "global"),
@@ -500,14 +500,18 @@ export const createSettingsRepository = (db: KoedDb) => ({
     const paused = pauseUntil !== null;
 
     return {
-      captureState: paused
-        ? "disabled"
-        : (effective?.captureState ?? global?.captureState ?? "enabled"),
+      captureState:
+        paused || captureTarget?.blocked
+          ? "disabled"
+          : (effective?.captureState ?? global?.captureState ?? "enabled"),
       visibility: effective?.visibility ?? global?.visibility ?? "personal",
       paused,
       pauseUntil,
       source: effective?.targetType ?? (global ? "global" : "default"),
-      policy: effective
+      policy: effective,
+      ...(captureTarget?.binding
+        ? { captureTarget: captureTarget.binding }
+        : {})
     };
   },
 

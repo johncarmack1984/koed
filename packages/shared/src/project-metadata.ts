@@ -1,5 +1,6 @@
 import { createHash, createHmac } from "node:crypto";
 import path from "node:path";
+import type { RepositoryIdentity } from "./repository-identity.js";
 
 export interface NormalizedGitRemote {
   name: string;
@@ -30,14 +31,13 @@ export interface ProjectMetadataV1 {
   };
   git?: {
     rootHash: string;
-    commonDirHash: string | null;
     remotes: NormalizedGitRemote[];
-    remoteAliases: NormalizedGitRemote[];
     branch: string | null;
     headCommit: string | null;
     isWorktree: boolean;
     worktreeHash: string | null;
   };
+  repository?: RepositoryIdentity;
   packages: ProjectPackageMetadata[];
   aiClient?: {
     cwdHash: string;
@@ -64,6 +64,8 @@ const sha256 = (value: string): string =>
 
 export const hmacProjectValue = (salt: string, value: string): string =>
   `hmac_sha256:${createHmac("sha256", salt).update(value).digest("hex")}`;
+
+export { normalizeRecordedProjectDirectory } from "./recorded-directory.js";
 
 const stripGitSuffix = (value: string): string => value.replace(/\.git$/i, "");
 
@@ -125,7 +127,7 @@ export const normalizeGitRemoteUrl = (
   name = "origin"
 ): NormalizedGitRemote => {
   const trimmed = value.trim();
-  const scpLike = trimmed.match(/^([^@\s]+)@([^:\s]+):(.+)$/);
+  const scpLike = trimmed.match(/^([^@:/\s]+)@([^:/\s]+):(.+)$/);
   if (scpLike) {
     return remoteFromPathParts(
       name,
@@ -140,12 +142,16 @@ export const normalizeGitRemoteUrl = (
     parsed.password = "";
     parsed.search = "";
     parsed.hash = "";
-    if (parsed.protocol === "file:") {
+    if (!["https:", "http:", "ssh:", "git:"].includes(parsed.protocol)) {
       return opaqueRemote(name, parsed.toString());
     }
     return remoteFromPathParts(
       name,
-      parsed.host,
+      parsed.protocol === "ssh:" && parsed.port === "22"
+        ? parsed.hostname
+        : parsed.protocol === "git:" && parsed.port === "9418"
+          ? parsed.hostname
+          : parsed.host,
       parsed.pathname,
       parsed.toString()
     );
@@ -157,20 +163,6 @@ export const normalizeGitRemoteUrl = (
 
 export const isPortableGitRemote = (remote: NormalizedGitRemote): boolean =>
   Boolean(remote.host && remote.namespace && remote.repo);
-
-export const mergeGitRemoteAliases = (
-  ...remoteSets: NormalizedGitRemote[][]
-): NormalizedGitRemote[] => {
-  const byFingerprint = new Map<string, NormalizedGitRemote>();
-  for (const remote of remoteSets.flat()) {
-    if (isPortableGitRemote(remote)) {
-      byFingerprint.set(remote.fingerprint, remote);
-    }
-  }
-  return [...byFingerprint.values()].sort((left, right) =>
-    left.fingerprint.localeCompare(right.fingerprint)
-  );
-};
 
 export const deriveLocalProjectId = (input: {
   salt: string;

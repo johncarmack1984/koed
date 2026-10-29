@@ -1,6 +1,19 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { MemoryAnswerTask, ClaimedMemoryAnswerTask } from "@koed/shared";
+import {
+  discoverProjectMetadata,
+  resolveKoedServerPaths
+} from "@koed-labs/server";
+import {
+  repositoryScopeId,
+  type RepositoryIdentity,
+  type MemoryAnswerTask,
+  type ClaimedMemoryAnswerTask
+} from "@koed/shared";
 import type { MemoryAnswerRetrievalClient } from "../src/answer-worker.js";
 import { AnswerExecutionCapacity } from "../src/answer-admission.js";
 import { MemoryAnswerTaskScheduler } from "../src/memory-answer-task-scheduler.js";
@@ -11,6 +24,45 @@ import {
   type MemoryAnswerTaskBackend
 } from "../src/memory-answer-task-coordinator.js";
 import { MemoryApiClient } from "../src/index.js";
+
+it.each(["personal_selection", "personalSelection", "recall_target"])(
+  "rejects %s before forwarding Personal metadata to Team Memory",
+  async (key) => {
+    const client = new MemoryApiClient({
+      apiUrl: "https://unavailable.fixture"
+    });
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("Unexpected network request"));
+    const input = {
+      [key]: {
+        version: 0,
+        ownerUserId: "00000000-0000-4000-8000-000000000001",
+        target: { kind: "global" },
+        callerRepositoryContext: null
+      }
+    };
+    try {
+      await expect(
+        client.teamMemorySearch("team", input, "fixture-authorization")
+      ).rejects.toThrow("Personal selections are not supported");
+      await expect(
+        client.teamMemoryAnswer("team", input, "fixture-authorization")
+      ).rejects.toThrow("Personal selections are not supported");
+      await expect(
+        client.teamMemoryExpand(
+          "team",
+          "00000000-0000-4000-8000-000000000002",
+          input,
+          "fixture-authorization"
+        )
+      ).rejects.toThrow("Personal selections are not supported");
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      fetch.mockRestore();
+    }
+  }
+);
 
 const task = (team = false): MemoryAnswerTask => ({
   id: randomUUID(),
@@ -356,6 +408,134 @@ describe("Memory Answer task coordinator", () => {
     ).toBe(false);
   });
 
+  it("keeps an accepted named Project on Personal recall without resolving the caller checkout", async () => {
+    const client = new MemoryApiClient({ apiUrl: "https://koed.example" });
+    const accepted = task();
+    const accept = vi
+      .spyOn(client, "acceptMemoryAnswerTask")
+      .mockResolvedValue({ task: accepted });
+    const adapter = createMemoryAnswerTaskCoordinator(client, {
+      KOED_HOME: "/fixture/no-enrollment"
+    });
+    const ownerUserId = randomUUID(),
+      projectId = randomUUID();
+    const request = {
+      ...acceptInput(),
+      request: {
+        requestVersion: 1,
+        selection: {
+          version: 1,
+          ownerUserId,
+          target: { kind: "project", project: { ownerUserId, projectId } },
+          callerRepositoryContext: null
+        },
+        input: {
+          query: "Synthetic decision",
+          search_domain: "project",
+          project_id: projectId,
+          repository_context: null
+        },
+        caller: { cwd: "/unrelated/checkout" }
+      }
+    };
+    await expect(adapter.acceptMemoryAnswerTask(request)).resolves.toEqual({
+      task: accepted
+    });
+    expect(accept.mock.calls[0]?.[0]?.request).toMatchObject({
+      selection: request.request.selection,
+      input: {
+        search_domain: "project",
+        project_id: projectId,
+        repository_context: null
+      }
+    });
+
+    await expect(
+      adapter.acceptMemoryAnswerTask({
+        ...request,
+        request: {
+          ...request.request,
+          input: { ...request.request.input, team_workspace_id: randomUUID() }
+        }
+      })
+    ).rejects.toThrow("Personal selections cannot route to Team Memory");
+  });
+
+  it("routes a repository scope by its verified checkout, not a recreated path's Team mapping", async () => {
+    const directory = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "koed-route-checkout-"))
+    );
+    try {
+      const environment = {
+        KOED_HOME: path.join(directory, "profile"),
+        KOED_TEAM_WORKSPACE_AUTO_RESOLUTION_ENABLED: "1"
+      };
+      const checkout = (name: string, remote: string) => {
+        const root = path.join(directory, name);
+        fs.mkdirSync(root, { recursive: true });
+        execFileSync("git", ["-C", root, "init", "--initial-branch=main"]);
+        execFileSync("git", ["-C", root, "remote", "add", "origin", remote]);
+        return root;
+      };
+      const first = checkout("first", "https://github.com/example/shared.git");
+      const second = checkout(
+        "second",
+        "https://github.com/example/shared.git"
+      );
+      const paths = resolveKoedServerPaths(environment);
+      const scope = repositoryScopeId(
+        (await discoverProjectMetadata(paths, { cwd: first })).project!
+          .repository!
+      );
+      await discoverProjectMetadata(paths, { cwd: second });
+      // The first path now holds another repository mapped to a Team Workspace.
+      fs.rmSync(first, { recursive: true, force: true });
+      checkout("first", "https://github.com/example/other.git");
+      fs.mkdirSync(path.join(environment.KOED_HOME, "config"), {
+        recursive: true
+      });
+      fs.writeFileSync(
+        path.join(environment.KOED_HOME, "config/project-team-workspaces.json"),
+        JSON.stringify({
+          links: [{ projectRoot: first, teamWorkspaceId: randomUUID() }]
+        })
+      );
+
+      const client = new MemoryApiClient({ apiUrl: "https://koed.example" });
+      const accepted = task();
+      const accept = vi
+        .spyOn(client, "acceptMemoryAnswerTask")
+        .mockResolvedValue({ task: accepted });
+      const adapter = createMemoryAnswerTaskCoordinator(client, environment);
+      const request = acceptInput();
+      await expect(
+        adapter.acceptMemoryAnswerTask({
+          ...request,
+          request: {
+            ...request.request,
+            input: {
+              ...request.request.input,
+              search_domain: "project",
+              project_id: scope
+            },
+            caller: { cwd: directory }
+          }
+        })
+      ).resolves.toEqual({ task: accepted });
+      expect(accept.mock.calls[0]?.[0]?.request).toMatchObject({
+        input: {
+          project_id: scope,
+          repository_context: { root: second }
+        }
+      });
+      expect(JSON.stringify(accept.mock.calls[0]?.[0]?.request)).not.toContain(
+        "team_workspace_id"
+      );
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("claims only Personal work without explicit headless Team consent", async () => {
     const client = new MemoryApiClient({ apiUrl: "https://koed.example" });
     const claim = vi
@@ -407,11 +587,26 @@ describe("Memory Answer task coordinator", () => {
       "team"
     ]);
     const input = acceptInput(accepted.teamWorkspaceId!);
+    const repositoryContext: RepositoryIdentity = {
+      kind: "portable_repository",
+      key: "gr_team_fixture",
+      root: "/fixture",
+      branch: "main",
+      reason: "origin",
+      checkoutId: "checkout_team_fixture",
+      originatingDeviceId: "device_fixture",
+      selectedRemote: "origin",
+      anchorDisplay: null
+    };
     await adapter.acceptMemoryAnswerTask({
       ...input,
       request: {
         ...input.request,
-        input: { ...input.request.input, team_backend_id: "remote" }
+        input: {
+          ...input.request.input,
+          team_backend_id: "remote",
+          repository_context: repositoryContext
+        }
       }
     });
     expect(accept).toHaveBeenCalledWith({
@@ -424,7 +619,8 @@ describe("Memory Answer task coordinator", () => {
           response_detail: "answer_only",
           limit: 10,
           include_evidence: false,
-          project_id: "/fixture"
+          project_id: repositoryScopeId(repositoryContext),
+          repository_context: repositoryContext
         }
       }
     });

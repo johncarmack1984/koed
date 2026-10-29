@@ -1,3 +1,4 @@
+import { resolveCaptureFolderObservation } from "./capture-repository-context.js";
 import {
   createHash,
   createHmac,
@@ -1098,6 +1099,16 @@ export class ClaudeManagedConversationSession {
       }
       return { identity: this.identity };
     }
+    const captureEnvironment = this.config.env ?? process.env;
+    if (captureEnvironment.KOED_HOME?.trim()) {
+      await resolveCaptureFolderObservation({
+        cwd: this.cwd,
+        env: captureEnvironment,
+        sourceKind: "claude-code",
+        externalSessionId: this.sessionId,
+        newConversation: !this.resumed
+      });
+    }
     this.started = true;
     if (initialPrompt === undefined) {
       return { identity: this.identity };
@@ -1132,7 +1143,10 @@ export class ClaudeManagedConversationSession {
     const shouldResume = this.resumed || this.submittedQuery;
     let stream: Query;
     try {
-      const koedMcp = managedKoedMcpServer(this.config.env ?? process.env);
+      const koedMcp = managedKoedMcpServer(
+        this.config.env ?? process.env,
+        this.cwd
+      );
       stream = query({
         prompt,
         options: {

@@ -1,4 +1,10 @@
-import { CURATED_MEMORY_REVIEW_MAX_EVIDENCE } from "@koed/shared";
+import { isConversationDirectory } from "./conversation-directory.js";
+import {
+  repositoryIdentitySchema,
+  personalProjectReferenceSchema,
+  personalFolderReferenceSchema,
+  CURATED_MEMORY_REVIEW_MAX_EVIDENCE
+} from "@koed/shared";
 import { z } from "zod";
 import { memoryAnswerRetrievalHintsSchema } from "./memory-answer-request.js";
 import { MEMORY_ANSWER_DELIVERY_MODES } from "../integrations/pi/memory-answer-delivery-policy.mjs";
@@ -28,6 +34,7 @@ export const memoryAnswerInputSchema = z
     response_detail: memoryAnswerResponseDetailSchema.default("answer_only"),
     search_domain: searchDomainSchema.default("project"),
     project_id: z.string().trim().min(1).max(4096).optional(),
+    repository_context: repositoryIdentitySchema.nullable().optional(),
     session_id: uuidSchema.optional(),
     team_workspace_id: uuidSchema.optional(),
     team_backend_id: z
@@ -48,6 +55,14 @@ export const memoryAnswerInputSchema = z
   .strict()
   .refine(
     (input) =>
+      input.search_domain !== "project" ||
+      input.repository_context === undefined ||
+      (input.repository_context !== null &&
+        input.repository_context.kind !== "unresolved"),
+    "Project recall requires a resolved repository context"
+  )
+  .refine(
+    (input) =>
       input.team_backend_id === undefined ||
       input.team_workspace_id !== undefined,
     "team_workspace_id is required with team_backend_id"
@@ -63,9 +78,82 @@ export const memoryAnswerInputSchema = z
     "session_id is required for session search"
   );
 
-// The runtime and durable worker retain the strict execution schema above.
+// Public targets are normalized before acceptance; durable workers consume only
+// the pinned execution schema above. Keep defaults out of selector validation.
+export const memoryAnswerRequestSchema = z
+  .object({
+    ...memoryAnswerInputSchema.shape,
+    search_domain: searchDomainSchema.optional(),
+    recall_target: z
+      .union([
+        z
+          .object({
+            kind: z.literal("project"),
+            project: personalProjectReferenceSchema
+          })
+          .strict(),
+        z
+          .object({
+            kind: z.literal("folder"),
+            folder: personalFolderReferenceSchema
+          })
+          .strict()
+      ])
+      .optional()
+      .describe(
+        "Explicit Personal Project or exact Folder target. Cannot be combined with legacy selectors or Team routing."
+      )
+  })
+  .strict()
+  .superRefine(({ recall_target, ...input }, ctx) => {
+    if (recall_target) return;
+    // Adapter extensions (delivery mode and caller cwd) are transport metadata.
+    const execution = Object.fromEntries(
+      Object.entries(input).filter(([key]) =>
+        Object.hasOwn(memoryAnswerInputSchema.shape, key)
+      )
+    );
+    const result = memoryAnswerInputSchema.safeParse(execution);
+    if (!result.success)
+      for (const issue of result.error.issues)
+        ctx.addIssue({
+          code: "custom",
+          path: issue.path,
+          message: issue.message
+        });
+  })
+  .refine(
+    (input) =>
+      !input.recall_target ||
+      (input.search_domain === undefined &&
+        input.project_id === undefined &&
+        input.session_id === undefined &&
+        input.team_workspace_id === undefined &&
+        input.team_backend_id === undefined),
+    "Personal recall_target cannot be combined with legacy selectors or Team routing"
+  );
+
+export const parseMemoryAnswerRequest = (raw: unknown) => {
+  const request = memoryAnswerRequestSchema.parse(raw);
+  if (request.recall_target) return request;
+  const { recall_target: _target, ...input } = request;
+  void _target;
+  return memoryAnswerInputSchema.parse(input);
+};
+
 export const memoryAnswerAdapterInputSchema =
-  memoryAnswerInputSchema.safeExtend({
+  memoryAnswerRequestSchema.safeExtend({
+    conversation_cwd: z
+      .string()
+      .min(1)
+      .max(4096)
+      .refine(isConversationDirectory, {
+        message: "conversation_cwd must be an absolute conversation directory"
+      })
+      .optional()
+      .describe(
+        "Current conversation directory, supplied automatically by the client integration. Overrides the MCP process directory, without changing an explicit Project target."
+      ),
     delivery_mode: z
       .enum(MEMORY_ANSWER_DELIVERY_MODES)
       .optional()
@@ -114,6 +202,7 @@ export const memorySearchInputSchema = z
     query: z.string().trim().min(1).max(32_000),
     search_domain: searchDomainSchema.default("project"),
     project_id: z.string().trim().min(1).max(4096).optional(),
+    repository_context: repositoryIdentitySchema.nullable().optional(),
     session_id: uuidSchema.optional(),
     recent_days: z.number().int().positive().max(36500).optional(),
     source_after: z.string().datetime().optional(),
@@ -123,7 +212,16 @@ export const memorySearchInputSchema = z
   .strict();
 
 export const memoryExpandInputSchema = z
-  .object({ nodeId: uuidSchema })
+  .object({
+    nodeId: uuidSchema,
+    search_domain: searchDomainSchema.default("project"),
+    project_id: z.string().trim().min(1).max(4096).optional(),
+    repository_context: repositoryIdentitySchema.nullable().optional(),
+    session_id: uuidSchema.optional(),
+    recent_days: z.number().int().positive().max(36500).optional(),
+    source_after: z.string().datetime().optional(),
+    source_before: z.string().datetime().optional()
+  })
   .strict();
 
 export type MemoryAnswerToolInput = z.infer<typeof memoryAnswerInputSchema>;

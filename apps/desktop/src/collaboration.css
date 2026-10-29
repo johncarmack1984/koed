@@ -322,6 +322,24 @@
   scrollbar-width: thin;
 }
 
+.collab-shares-scroll .collab-selection-sharing-rules {
+  border-bottom: 1px solid var(--collab-border);
+  margin: 8px 0 16px;
+  padding: 8px;
+}
+
+.collab-shares-scroll .collab-selection-sharing-rules article {
+  background: var(--collab-surface);
+  border: 1px solid var(--collab-border);
+  border-radius: 10px;
+  margin: 12px 0;
+  padding: 12px;
+}
+
+.collab-shares-scroll .collab-selection-sharing-rules button {
+  margin: 4px 4px 4px 0;
+}
+
 .collab-share-section > header {
   align-items: center;
   color: var(--collab-muted);
@@ -556,6 +574,28 @@
   font-weight: 650;
   letter-spacing: 0.025em;
   text-transform: uppercase;
+}
+
+.collab-sharing-reasons {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--collab-border);
+  overflow-wrap: anywhere;
+}
+
+.collab-sharing-reasons h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.collab-git-sharing-review p,
+.collab-git-sharing-review li {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.collab-sharing-reasons p {
+  margin: 6px 0;
+  font-size: 13px;
 }
 
 .collab-share-preview {
@@ -2943,4 +2983,21 @@
     scroll-behavior: auto !important;
     transition-duration: 1ms !important;
   }
+}
+
+.collab-rule-delivery-status {
+  margin: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+}
+.collab-rule-delivery-status article + article {
+  margin-top: 1rem;
+}
+.collab-rule-delivery-status h2 {
+  font-size: 1rem;
+  margin: 0 0 0.75rem;
+}
+.collab-rule-delivery-status p {
+  margin: 0.35rem 0;
 }

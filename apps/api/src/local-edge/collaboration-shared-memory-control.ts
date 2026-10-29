@@ -1,3 +1,8 @@
+import {
+  resolvePublisherTakeoverReview,
+  verifyPublisherTakeoverLocalEvidence,
+  PublisherTakeoverReviewError
+} from "./publisher-takeover-review.js";
 import { createHash, randomUUID } from "node:crypto";
 
 import {
@@ -8,6 +13,9 @@ import {
   collaborationRendererCommandSchema,
   collaborationSafeErrorMessages,
   crossIdentitySyncDigest,
+  teamRepositorySnapshotSchema,
+  teamRepositorySnapshotReviewSchema,
+  sharedMemoryRepositorySnapshotActionGrantBinding,
   crossIdentitySyncDeterministicUuid,
   fetchBoundedJsonObject,
   readLocalEdgeClientCredentialAuthorization,
@@ -19,6 +27,7 @@ import {
   sharedMemoryCandidatePreviewSchema,
   sharedMemoryCandidatePreviewActionGrantBinding,
   sharedMemoryGrantSchema,
+  sharedMemoryGrantScopedSourceId,
   sharedMemoryPreviewActionGrantBinding,
   sharedMemoryPreviewSchema,
   sharedMemoryRevokeActionGrantBinding,
@@ -39,6 +48,23 @@ import {
 } from "@koed/shared";
 import * as shared from "@koed/shared";
 import { z } from "zod";
+import type {
+  MemorySourceRepository,
+  createSelectionSharingJournal,
+  SelectionSharingSourceLease,
+  CollaborationSharedMemoryAuthorityStore as DbAuthorityStore
+} from "@koed/db";
+import {
+  deliverSelectionSharingSources,
+  type SelectionSharingDeliveryTransport
+} from "./selection-sharing-delivery.js";
+import type { CollaborationActionGrantControl } from "./collaboration-action-grant-control.js";
+import {
+  reviewGitAnchorSharing,
+  resolveCompletedGitAnchorSharingReview,
+  validateCompletedGitAnchorRuleCreationIntent,
+  SharingReviewConflict
+} from "./sharing-selection-review.js";
 
 import {
   readLocalEdgeUpstreamRegistry,
@@ -68,6 +94,8 @@ const sharedMemoryControlCommandNames = [
   "collaboration.list_owned_shared_memory_grants",
   "collaboration.list_owned_shares",
   "collaboration.get_owned_share",
+  "collaboration.review_git_anchor_sharing",
+  "collaboration.review_repository_rule_creation",
   "collaboration.control_pending_share",
   "collaboration.share_conversation_source",
   "collaboration.revoke_conversation_source",
@@ -75,8 +103,27 @@ const sharedMemoryControlCommandNames = [
   "collaboration.preview_shared_memory",
   "collaboration.load_shared_memory_preview_page",
   "collaboration.share_memory",
+  "collaboration.review_conversation_rule_creation",
+  "collaboration.create_conversation_rule",
+  "collaboration.create_repository_rule",
+  "collaboration.control_sharing_rule",
+  "collaboration.control_repository_rule",
+  "collaboration.take_over_publisher",
+  "collaboration.review_publisher_takeover",
+  "collaboration.review_rule_detail",
+  "collaboration.review_rule_content_policy",
+  "collaboration.amend_rule_detail",
+  "collaboration.amend_rule_content_policy",
+  "collaboration.list_repository_rules",
+  "collaboration.list_sharing_rule_deliveries",
   "collaboration.revoke_shared_memory",
-  "collaboration.change_shared_memory_fidelity"
+  "collaboration.review_workspace_exclusion",
+  "collaboration.restore_conversation_to_workspace",
+  "collaboration.review_workspace_restoration",
+  "collaboration.exclude_conversation_from_workspace",
+  "collaboration.change_shared_memory_fidelity",
+  "collaboration.review_shared_project_snapshot",
+  "collaboration.update_shared_project_snapshot"
 ] as const;
 
 type SharedMemoryControlCommandName =
@@ -170,6 +217,7 @@ const redactedSourceItemSchema = z
     sourceLogicalMemoryId: uuidSchema,
     sourceRevision: z.number().int().safe().min(0),
     occurredAt: timestampSchema.nullable(),
+    repositorySnapshot: teamRepositorySnapshotSchema.optional(),
     content: z.record(z.string(), z.unknown())
   })
   .strict();
@@ -301,6 +349,7 @@ const companionScopeSchema = z
 
 const remoteGrantSchema = z
   .object({
+    repositorySnapshot: teamRepositorySnapshotSchema.optional(),
     source: sharedMemorySourceRefSchema,
     sourceCapabilities: z.array(representationSchema).min(1).max(4),
     activationRepresentation: representationSchema,
@@ -334,6 +383,7 @@ const remoteGrantSchema = z
 
 const remoteTeamGrantSchema = z
   .object({
+    repositorySnapshot: teamRepositorySnapshotSchema.optional(),
     sourceCapabilities: z.array(representationSchema).min(1).max(4),
     activationRepresentation: representationSchema,
     id: uuidSchema,
@@ -366,7 +416,7 @@ const remoteOwnedShareGrantSchema = remoteGrantSchema.omit({
 
 const remoteOwnerGrantPageSchema = z
   .object({
-    shareGrants: z.array(remoteGrantSchema).max(100),
+    shareGrants: z.array(remoteOwnedShareGrantSchema).max(100),
     pagination: z
       .object({
         limit: z.number().int().safe().min(1).max(100),
@@ -481,6 +531,7 @@ const ownerSafeGrant = (
 const remoteOwnedGrantDto = (
   grant: z.infer<typeof remoteOwnedShareGrantSchema>
 ) => ({
+  repositorySnapshot: grant.repositorySnapshot,
   source: grant.source,
   sourceCapabilities: grant.sourceCapabilities,
   activationRepresentation: grant.activationRepresentation,
@@ -531,8 +582,17 @@ interface AuthorityIdentity {
   upstreamUserId: string;
 }
 
-export interface CollaborationSharedMemoryAuthorityStore {
-  isEnrollmentBound(input: AuthorityIdentity): Promise<boolean>;
+export interface CollaborationSharedMemoryAuthorityStore extends Pick<
+  DbAuthorityStore,
+  | "readRuleDeliveryEnrollment"
+  | "persistRuleDelivery"
+  | "listRuleDeliveries"
+  | "claimRuleDeliveries"
+  | "finishRuleDelivery"
+> {
+  isEnrollmentBound(
+    input: AuthorityIdentity & { remoteDeviceId?: string }
+  ): Promise<boolean>;
   /** Resolves the exact persisted sync replica for the requested source. */
   resolvePreviewTarget(
     input: AuthorityIdentity & {
@@ -672,6 +732,28 @@ export interface CollaborationSharedMemoryControlOptions {
     backend: LocalEdgeUpstreamBackend
   ): string | null;
   authorityStore: CollaborationSharedMemoryAuthorityStore;
+  selectionSharingJournal?: ReturnType<typeof createSelectionSharingJournal>;
+  readNativeConversationSource?: ReturnType<
+    typeof createSelectionSharingJournal
+  >["resolveNativeConversationSource"];
+  readPublisherTakeoverSource?: ReturnType<
+    typeof createSelectionSharingJournal
+  >["resolvePublisherTakeoverSource"];
+  readSharingSelectionTarget?: ReturnType<
+    typeof createSelectionSharingJournal
+  >["resolveSharingSelectionTarget"];
+  actionGrantControl?: Pick<CollaborationActionGrantControl, "dispatch">;
+  reconcileSelectionSharing?(
+    localOwnerUserId: string,
+    readInventory: import("@koed/db").SelectionSharingInventoryReader
+  ): Promise<unknown>;
+  selectionReviewRepository?: Pick<
+    MemorySourceRepository,
+    | "startPersonalSelectionEnumeration"
+    | "continuePersonalSelectionEnumeration"
+    | "reconcilePersonalSelectionChanges"
+    | "listLcmGraphThreads"
+  >;
   ensureEnrollmentBinding?(
     input: AuthorityIdentity & {
       remoteDeviceId: string;
@@ -688,6 +770,7 @@ export interface CollaborationSharedMemoryControlOptions {
     sessionId: string;
     representation: Representation;
     mode: "snapshot" | "continuous";
+    prepareLcm?: boolean;
   }): Promise<SharedMemoryCandidatePreview | null>;
   loadPersonalNoteCandidatePreview?(input: {
     localOwnerUserId: string;
@@ -699,12 +782,16 @@ export interface CollaborationSharedMemoryControlOptions {
     sourceDeploymentProtocolId: string;
     sourceOwnerPrincipalId: string;
   } | null;
+  requestRuleDelivery?(): void;
   requestPendingShareSourceWork?(): void;
   requestContinuousNoteAdvancementWork?(): void;
   readDesktopCredential?: DesktopCredentialReader;
   readLocalEdgeClientCredential?: LocalEdgeCredentialReader;
   readUpstreamRegistry?: (path: string) => LocalEdgeUpstreamRegistry;
-  actionGrantLifecycle?: Pick<CollaborationActionGrantLifecycle, "resolve">;
+  actionGrantLifecycle?: Pick<
+    CollaborationActionGrantLifecycle,
+    "resolve" | "read"
+  >;
   reportDiagnostic?(diagnostic: {
     code: "shared_memory_authority_projection_failed";
     operation: SharedMemoryControlCommandName;
@@ -724,6 +811,10 @@ const readStoredDesktopCredential: DesktopCredentialReader = (koedHome) => {
 };
 
 export interface CollaborationSharedMemoryControl {
+  reconcileRuleDeliveries(): Promise<{
+    processed: number;
+    acknowledged: number;
+  }>;
   advanceContinuousPersonalNoteRevision(input: {
     backendId: string;
     localOwnerUserId: string;
@@ -744,8 +835,16 @@ export interface CollaborationSharedMemoryControl {
     },
     context: CollaborationSharedMemoryControlDispatchContext
   ): Promise<{ remoteReplicaId: string } | null>;
+  verifyPublisherTakeoverReview(
+    input: Omit<
+      shared.SharingRulePublisherTakeoverLocalIntent,
+      "teamWorkspaceId"
+    > & { workspaceId: string },
+    context: CollaborationSharedMemoryControlDispatchContext
+  ): Promise<boolean>;
   resolveConsentPreview(
     input: {
+      sourceIdentity?: shared.SharingRuleSourceIdentity;
       source: shared.SharedMemorySourceRef;
       sourceCapabilities: Representation[];
       activationRepresentation: Representation;
@@ -1179,7 +1278,8 @@ const operationFamilyFor = (
   command.command === "collaboration.load_shared_memory_preview_page" ||
   command.command === "collaboration.list_owned_shared_memory_grants" ||
   command.command === "collaboration.list_owned_shares" ||
-  command.command === "collaboration.get_owned_share"
+  command.command === "collaboration.get_owned_share" ||
+  command.command === "collaboration.list_sharing_rule_deliveries"
     ? "team_workspace_read"
     : "share_grant_management";
 
@@ -1190,7 +1290,14 @@ const desktopFamilyFor = (
   command.command === "collaboration.load_shared_memory_preview_page" ||
   command.command === "collaboration.list_owned_shared_memory_grants" ||
   command.command === "collaboration.list_owned_shares" ||
-  command.command === "collaboration.get_owned_share"
+  command.command === "collaboration.get_owned_share" ||
+  command.command === "collaboration.review_git_anchor_sharing" ||
+  command.command === "collaboration.list_repository_rules" ||
+  command.command === "collaboration.review_repository_rule_creation" ||
+  command.command === "collaboration.review_conversation_rule_creation" ||
+  command.command === "collaboration.review_workspace_restoration" ||
+  command.command === "collaboration.review_workspace_exclusion" ||
+  command.command === "collaboration.list_sharing_rule_deliveries"
     ? "personal_collaboration_read"
     : "personal_collaboration_write";
 
@@ -1308,7 +1415,10 @@ const resolveAuthority = async (
   if (!status.credential.operationFamilies.includes(operationFamily)) {
     throw new ControlFailure("permission_denied");
   }
-  const bound = await options.authorityStore.isEnrollmentBound(identity);
+  const bound = await options.authorityStore.isEnrollmentBound({
+    ...identity,
+    remoteDeviceId: status.credential.id
+  });
   if (
     !bound &&
     !(await options.ensureEnrollmentBinding?.({
@@ -1325,9 +1435,299 @@ const resolveAuthority = async (
   };
 };
 
+// Reading the local journal is not proof of current Team authority. Delivery
+// separately uses resolveAuthority and the Team's atomic Action Grant executor.
+const resolveLocalRuleDeliveryContext = async (
+  options: CollaborationSharedMemoryControlOptions,
+  command: CollaborationSharedMemoryControlCommand,
+  context: z.infer<typeof dispatchContextSchema>
+) => {
+  const desktop = (
+    options.readDesktopCredential ?? readStoredDesktopCredential
+  )(options.koedHome);
+  if (
+    !desktop ||
+    desktop.ownerUserId !== context.localOwnerUserId ||
+    desktop.credentialKeyId !== context.desktopCredentialKeyId ||
+    !desktop.operationFamilies.includes(desktopFamilyFor(command))
+  )
+    throw new ControlFailure("access_revoked");
+  if (!context.upstreamBackendId) throw new ControlFailure("not_available");
+  const backend = upstreamBackendById(
+    (options.readUpstreamRegistry ?? readLocalEdgeUpstreamRegistry)(
+      options.upstreamBackendsPath
+    ),
+    context.upstreamBackendId
+  );
+  const lec = (
+    options.readLocalEdgeClientCredential ??
+    readLocalEdgeClientCredentialAuthorization
+  )(options.koedHome, context.upstreamBackendId);
+  if (
+    !backend ||
+    !lec ||
+    lec.backendId !== backend.id ||
+    !lec.operationFamilies.includes(operationFamilyFor(command))
+  )
+    throw new ControlFailure("permission_denied");
+  const enrollment = await options.authorityStore.readRuleDeliveryEnrollment({
+    backendId: backend.id,
+    localOwnerUserId: context.localOwnerUserId
+  });
+  if (!enrollment) throw new ControlFailure("access_revoked");
+  return {
+    ...enrollment,
+    backend,
+    desktopCredential: desktop,
+    upstreamDeviceCredentialId: enrollment.remoteDeviceId
+  };
+};
+const ruleDeliveryCommand = (
+  intent: shared.SharingRuleMutationIntent,
+  requestId: string,
+  actionGrantId: string
+) => {
+  if ("scope" in intent)
+    return collaborationRendererCommandSchema.parse({
+      contractVersion: COLLABORATION_CONTRACT_VERSION,
+      requestId,
+      command:
+        "restoration" in intent
+          ? "collaboration.restore_conversation_to_workspace"
+          : "collaboration.exclude_conversation_from_workspace",
+      input: { ...intent, actionGrant: { id: actionGrantId } }
+    });
+  const { teamWorkspaceId, ...input } = intent;
+  return collaborationRendererCommandSchema.parse({
+    contractVersion: COLLABORATION_CONTRACT_VERSION,
+    requestId,
+    command:
+      "operationKind" in intent
+        ? intent.operationKind === "publisher_takeover"
+          ? "collaboration.take_over_publisher"
+          : intent.operationKind === "detail"
+            ? "collaboration.amend_rule_detail"
+            : "collaboration.amend_rule_content_policy"
+        : "controlAction" in intent
+          ? "selectorKind" in intent
+            ? "collaboration.control_repository_rule"
+            : "collaboration.control_sharing_rule"
+          : "source" in intent
+            ? "collaboration.create_conversation_rule"
+            : "collaboration.create_repository_rule",
+    input: {
+      ...input,
+      workspaceId: teamWorkspaceId,
+      actionGrant: { id: actionGrantId }
+    }
+  });
+};
+const ruleDeliveryBinding = (
+  intent: shared.SharingRuleMutationIntent,
+  referenceId: string
+) =>
+  "scope" in intent
+    ? "restoration" in intent
+      ? shared.sharedMemoryWorkspaceRestorationActionGrantBinding({
+          ...intent,
+          referenceId
+        })
+      : shared.sharedMemoryWorkspaceExclusionActionGrantBinding({
+          ...intent,
+          referenceId
+        })
+    : "operationKind" in intent
+      ? intent.operationKind === "publisher_takeover"
+        ? shared.sharedMemoryPublisherTakeoverActionGrantBinding({
+            mutationId: intent.mutationId,
+            review: intent.review,
+            referenceId
+          })
+        : intent.operationKind === "detail"
+          ? shared.sharedMemoryRuleDetailActionGrantBinding({
+              mutationId: intent.mutationId,
+              review: intent.review,
+              referenceId
+            })
+          : shared.sharedMemoryRuleContentPolicyActionGrantBinding({
+              mutationId: intent.mutationId,
+              review: intent.review,
+              referenceId
+            })
+      : "controlAction" in intent
+        ? "selectorKind" in intent
+          ? shared.sharedMemoryRepositoryRuleControlActionGrantBinding({
+              ...intent,
+              referenceId
+            })
+          : shared.sharedMemoryRuleControlActionGrantBinding({
+              ...intent,
+              referenceId
+            })
+        : "source" in intent
+          ? shared.sharedMemoryConversationRuleCreationActionGrantBinding({
+              ...intent,
+              referenceId
+            })
+          : shared.sharedMemoryRepositoryRuleCreationActionGrantBinding({
+              ...shared.repositorySharingRuleCreationIntentSchema
+                .strip()
+                .parse(intent),
+              referenceId
+            });
+const dispatchLocalRuleDelivery = async (
+  options: CollaborationSharedMemoryControlOptions,
+  command: Extract<
+    CollaborationSharedMemoryControlCommand,
+    {
+      command:
+        | "collaboration.take_over_publisher"
+        | "collaboration.amend_rule_detail"
+        | "collaboration.amend_rule_content_policy"
+        | "collaboration.control_sharing_rule"
+        | "collaboration.control_repository_rule"
+        | "collaboration.create_conversation_rule"
+        | "collaboration.create_repository_rule"
+        | "collaboration.list_sharing_rule_deliveries"
+        | "collaboration.exclude_conversation_from_workspace"
+        | "collaboration.restore_conversation_to_workspace";
+    }
+  >,
+  context: z.infer<typeof dispatchContextSchema>
+) => {
+  const local = await resolveLocalRuleDeliveryContext(
+    options,
+    command,
+    context
+  );
+  const identity = authorityIdentity(local);
+  if (command.command === "collaboration.list_sharing_rule_deliveries") {
+    const deliveries = await options.authorityStore.listRuleDeliveries({
+      ...identity,
+      shareGrantId: command.input.shareGrantId,
+      mutationId: command.input.mutationId
+    });
+    if (!deliveries) throw new ControlFailure("not_available");
+    return success(command, { deliveries })!;
+  }
+  const input = command.input;
+  const { actionGrant, ...localIntent } = input;
+  const intent = shared.sharingRuleMutationIntentSchema.parse(
+    "scope" in localIntent
+      ? localIntent
+      : (() => {
+          const { workspaceId, ...scalars } = localIntent;
+          return { ...scalars, teamWorkspaceId: workspaceId };
+        })()
+  );
+  const draft = {
+    identity,
+    remoteDeviceId: local.upstreamDeviceCredentialId,
+    requestId: command.requestId,
+    actionGrantId: input.actionGrant.id,
+    intent
+  };
+  // Exact retries observe an already persisted request even after custody TTL.
+  let delivery = await options.authorityStore.persistRuleDelivery({
+    ...draft,
+    actionGrant: null,
+    presentation: null
+  });
+  if (!delivery) {
+    if (
+      "operationKind" in intent &&
+      intent.operationKind === "publisher_takeover" &&
+      !(await verifyPublisherTakeoverLocalEvidence({
+        review: intent,
+        localOwnerUserId: local.localOwnerUserId,
+        receivingCredentialId: local.upstreamDeviceCredentialId,
+        readSource: (input) => readTakeoverSource(options, input)
+      }))
+    )
+      throw new ControlFailure("permission_denied");
+
+    if (
+      "source" in intent &&
+      intent.sourceIdentity &&
+      crossIdentitySyncDigest(
+        await readNativeConversationOrigin(options, local, intent.source)
+      ) !== crossIdentitySyncDigest(intent.sourceIdentity)
+    )
+      throw new ControlFailure("permission_denied");
+
+    if ("includesFutureConversations" in intent) {
+      try {
+        validateCompletedGitAnchorRuleCreationIntent(intent, {
+          backendId: local.backendId,
+          ownerUserId: local.localOwnerUserId,
+          upstreamUserId: local.upstreamUserId,
+          cursorSecret: local.desktopCredential.authorization,
+          resolvedTarget: await readRuleSelectionTarget(
+            options,
+            local.localOwnerUserId,
+            intent.review.target
+          )
+        });
+      } catch (error) {
+        if (error instanceof SharingReviewConflict)
+          throw new ControlFailure("conflict");
+        throw error;
+      }
+    }
+    const binding = ruleDeliveryBinding(intent, actionGrant.id);
+    const secret = resolveProtectedActionGrant(
+      options,
+      local,
+      command,
+      binding
+    );
+    const lifecycle =
+      options.actionGrantLifecycle ??
+      createCollaborationActionGrantLifecycle({ koedHome: options.koedHome });
+    const status = lifecycle.read(
+      {
+        backend: local.backend,
+        localOwnerUserId: local.localOwnerUserId,
+        principalUserId: local.upstreamUserId,
+        upstreamDeviceCredentialId: local.upstreamDeviceCredentialId
+      },
+      input.actionGrant
+    );
+    if (!status || status.state !== "approved" || !status.review)
+      throw new ControlFailure("permission_denied");
+    const label = (name: string) =>
+      status?.review?.details.find((detail) => detail.label === name)?.value;
+    const presentation = shared.sharingRuleDeliveryPresentationSchema.parse({
+      sourceTitle:
+        label("Conversation") ??
+        label("Git Anchor") ??
+        label("Folder identity") ??
+        label("Project identity") ??
+        label("Rule"),
+      teamName: label("Team"),
+      workspaceName: label("Workspace")
+    });
+    delivery = await options.authorityStore.persistRuleDelivery({
+      ...draft,
+      actionGrant: secret,
+      presentation
+    });
+  }
+  if (!delivery) throw new ControlFailure("conflict");
+  if (delivery.state === "queued") options.requestRuleDelivery?.();
+  return success(command, { delivery })!;
+};
+
 const resolveProtectedActionGrant = (
   options: CollaborationSharedMemoryControlOptions,
-  authority: ResolvedAuthority,
+  authority: Pick<
+    ResolvedAuthority,
+    | "backend"
+    | "backendId"
+    | "localOwnerUserId"
+    | "upstreamUserId"
+    | "upstreamDeviceCredentialId"
+  >,
   command: CollaborationSharedMemoryControlCommand,
   binding: SharedMemoryActionGrantBinding
 ): string => {
@@ -1638,6 +2038,8 @@ const remoteGrantMatchesPersisted = (
   return (
     sameIdentity(persisted, identity) &&
     grant.id === remote.id &&
+    crossIdentitySyncDigest(grant.repositorySnapshot ?? null) ===
+      crossIdentitySyncDigest(remote.repositorySnapshot ?? null) &&
     crossIdentitySyncDigest(grant.source ?? null) ===
       crossIdentitySyncDigest(remote.source ?? null) &&
     canonicalJson(grant.sourceCapabilities) ===
@@ -1649,6 +2051,7 @@ const remoteGrantMatchesPersisted = (
     grant.teamId === remote.teamId &&
     grant.workspaceId === remote.teamWorkspaceId &&
     grant.consentId === remote.consentId &&
+    grant.mode === remote.mode &&
     grant.maximumFidelity === remote.maximumFidelity &&
     grant.includeCuratedMemory === remote.includeCuratedMemory &&
     grant.fidelityPolicyRevision === remote.fidelityPolicyRevision &&
@@ -1689,12 +2092,13 @@ const remoteGrantCanRefreshPersisted = (
     grant.teamId === remote.teamId &&
     grant.workspaceId === remote.teamWorkspaceId &&
     grant.consentId === remote.consentId &&
+    grant.mode === remote.mode &&
     grant.maximumFidelity === remote.maximumFidelity &&
     grant.includeCuratedMemory === remote.includeCuratedMemory &&
     grant.fidelityPolicyRevision === remote.fidelityPolicyRevision &&
     grant.grantVersion === remote.grantVersion &&
     grant.createdAt === remote.createdAt &&
-    remote.sourceRevision > grant.sourceRevision &&
+    remote.sourceRevision >= grant.sourceRevision &&
     Date.parse(remote.updatedAt) > Date.parse(grant.updatedAt) &&
     remote.companionScope.teamId === grant.teamId &&
     remote.companionScope.teamWorkspaceId === grant.workspaceId &&
@@ -1757,9 +2161,13 @@ const createOrResolveCompanion = async (
   grant: z.infer<typeof remoteGrantSchema>,
   idempotencyKey: string
 ): Promise<{ companionThreadId: string; sharedSessionId: string }> => {
+  const publicLogicalMemoryId = sharedMemoryGrantScopedSourceId(
+    grant.id,
+    grant.logicalMemoryId
+  );
   const payload = await remoteRequest(options, authority, {
     method: "POST",
-    path: `/v1/collaboration/teams/${encodeURIComponent(grant.teamId)}/workspaces/${encodeURIComponent(grant.teamWorkspaceId)}/shared-sessions/${encodeURIComponent(grant.logicalMemoryId)}/discussion`,
+    path: `/v1/collaboration/teams/${encodeURIComponent(grant.teamId)}/workspaces/${encodeURIComponent(grant.teamWorkspaceId)}/shared-sessions/${encodeURIComponent(publicLogicalMemoryId)}/discussion`,
     body: { shareGrantId: grant.id },
     idempotencyKey
   });
@@ -1768,7 +2176,7 @@ const createOrResolveCompanion = async (
     !thread.success ||
     thread.data.teamId !== grant.teamId ||
     thread.data.teamWorkspaceId !== grant.teamWorkspaceId ||
-    thread.data.sharedLogicalMemoryId !== grant.logicalMemoryId ||
+    thread.data.sharedLogicalMemoryId !== publicLogicalMemoryId ||
     thread.data.shareGrantId !== grant.id
   ) {
     throw new ControlFailure("permission_denied");
@@ -2449,12 +2857,149 @@ const dispatchPreviewPage = async (
   return result;
 };
 
+const readTakeoverSource = (
+  options: CollaborationSharedMemoryControlOptions,
+  input: Parameters<
+    NonNullable<
+      CollaborationSharedMemoryControlOptions["readPublisherTakeoverSource"]
+    >
+  >[0]
+) =>
+  (
+    options.readPublisherTakeoverSource ??
+    options.selectionSharingJournal?.resolvePublisherTakeoverSource
+  )?.(input) ?? Promise.resolve(null);
+
+const readRuleSelectionTarget = async (
+  options: CollaborationSharedMemoryControlOptions,
+  ownerUserId: string,
+  target: shared.GitAnchorSharingReviewInput["target"]
+) => {
+  const readTarget =
+    options.readSharingSelectionTarget ??
+    options.selectionSharingJournal?.resolveSharingSelectionTarget;
+  const normalized =
+    target.kind === "project"
+      ? await readTarget?.({ ownerUserId, target })
+      : target;
+  if (
+    !normalized ||
+    normalized.kind !== target.kind ||
+    (normalized.kind === "project" &&
+      normalized.project.ownerUserId !== ownerUserId) ||
+    (normalized.kind === "folder" &&
+      normalized.folder.ownerUserId !== ownerUserId)
+  )
+    throw new ControlFailure("not_available");
+  return normalized;
+};
+
+const readNativeConversationOrigin = async (
+  options: CollaborationSharedMemoryControlOptions,
+  authority: Pick<ResolvedAuthority, "localOwnerUserId">,
+  source: shared.SharedMemorySourceRef
+): Promise<shared.SharingRuleSourceIdentity | null> => {
+  if (source.kind !== "captured_session") return null;
+  const transport = options.resolveCandidateSourceIdentity?.(
+    authority.localOwnerUserId
+  );
+  if (
+    !transport ||
+    transport.sourceOwnerPrincipalId !== authority.localOwnerUserId
+  )
+    return null;
+  const readSource =
+    options.readNativeConversationSource ??
+    options.selectionSharingJournal?.resolveNativeConversationSource;
+  const available = await readSource?.({
+    ownerUserId: authority.localOwnerUserId,
+    sessionId: source.sessionId,
+    deploymentProtocolId: transport.sourceDeploymentProtocolId
+  });
+  return available?.logicalMemoryId === source.logicalMemoryId
+    ? available.sourceIdentity
+    : null;
+};
+
+const dispatchConversationRuleCreationReview = async (
+  options: CollaborationSharedMemoryControlOptions,
+  authority: ResolvedAuthority,
+  command: Extract<
+    CollaborationSharedMemoryControlCommand,
+    { command: "collaboration.review_conversation_rule_creation" }
+  >
+): Promise<CollaborationCommandResult> => {
+  const identity = authorityIdentity(authority);
+  const preview = persistedPreviewSchema.safeParse(
+    await options.authorityStore.readAuthoritativePreview({
+      ...identity,
+      previewHash: command.input.previewHash
+    })
+  );
+  if (
+    !preview.success ||
+    !sameIdentity(preview.data, identity) ||
+    preview.data.mode !== "continuous" ||
+    preview.data.source.kind !== "captured_session" ||
+    preview.data.previewHash !== command.input.previewHash ||
+    preview.data.previewRevision !== command.input.previewRevision ||
+    preview.data.logicalMemoryId !== command.input.logicalMemoryId ||
+    preview.data.teamId !== command.input.teamId ||
+    preview.data.teamWorkspaceId !== command.input.workspaceId
+  )
+    throw new ControlFailure("conflict");
+  const body = {
+    ...(command.input.snapshotReasonId
+      ? { snapshotReasonId: command.input.snapshotReasonId }
+      : {}),
+    previewId: preview.data.previewId,
+    previewHash: command.input.previewHash,
+    previewRevision: command.input.previewRevision,
+    logicalMemoryId: command.input.logicalMemoryId,
+    teamId: command.input.teamId,
+    teamWorkspaceId: command.input.workspaceId
+  };
+  const response = await remoteRequest(options, authority, {
+    method: "POST",
+    path: "/v1/shared-memory/conversation-rules/review",
+    body
+  });
+  const review = shared.conversationSharingRuleCreationReviewSchema.safeParse(
+    response.review
+  );
+  if (
+    !review.success ||
+    Object.entries(body).some(
+      ([key, value]) => review.data[key as keyof typeof body] !== value
+    ) ||
+    crossIdentitySyncDigest(review.data.source) !==
+      crossIdentitySyncDigest(preview.data.source) ||
+    crossIdentitySyncDigest(review.data.sourceCapabilities) !==
+      crossIdentitySyncDigest(preview.data.sourceCapabilities) ||
+    review.data.activationRepresentation !==
+      preview.data.activationRepresentation ||
+    review.data.maximumFidelity !== preview.data.maximumFidelity ||
+    review.data.includeCuratedMemory !== preview.data.includeCuratedMemory
+  )
+    throw new ControlFailure("permission_denied");
+  const sourceIdentity = await readNativeConversationOrigin(
+    options,
+    authority,
+    review.data.source
+  );
+  return success(command, {
+    review: { ...review.data, sourceIdentity: sourceIdentity ?? undefined }
+  })!;
+};
+
 const dispatchShare = async (
   options: CollaborationSharedMemoryControlOptions,
   authority: ResolvedAuthority,
   command: Extract<
     CollaborationSharedMemoryControlCommand,
-    { command: "collaboration.share_memory" }
+    {
+      command: "collaboration.share_memory";
+    }
   >
 ): Promise<CollaborationCommandResult> => {
   const identity = authorityIdentity(authority);
@@ -2485,13 +3030,14 @@ const dispatchShare = async (
     throw new ControlFailure("conflict");
   }
   const pendingSource = command.input.source;
-  const binding = sharedMemoryPendingShareActionGrantBinding({
+  const bindingInput = {
     referenceId: command.input.actionGrant.id,
     source: pendingSource,
     sourceCapabilities: command.input.sourceCapabilities,
     activationRepresentation: command.input.activationRepresentation,
     mutationId: command.input.mutationId,
     logicalGrantId: command.input.logicalGrantId,
+    expectedGrantVersion: command.input.expectedGrantVersion,
     logicalMemoryId: command.input.logicalMemoryId,
     teamId: command.input.teamId,
     teamWorkspaceId: command.input.workspaceId,
@@ -2503,7 +3049,8 @@ const dispatchShare = async (
     maximumFidelity: command.input.maximumFidelity,
     includeCuratedMemory: command.input.includeCuratedMemory,
     expiresAt: command.input.expiresAt
-  });
+  };
+  const binding = sharedMemoryPendingShareActionGrantBinding(bindingInput);
   const payload = await remoteRequest(options, authority, {
     method: binding.method,
     path: binding.path,
@@ -2557,12 +3104,16 @@ const dispatchShare = async (
   return result;
 };
 
-const dispatchRevoke = async (
+const dispatchRepositorySnapshot = async (
   options: CollaborationSharedMemoryControlOptions,
   authority: ResolvedAuthority,
   command: Extract<
     CollaborationSharedMemoryControlCommand,
-    { command: "collaboration.revoke_shared_memory" }
+    {
+      command:
+        | "collaboration.review_shared_project_snapshot"
+        | "collaboration.update_shared_project_snapshot";
+    }
   >
 ): Promise<CollaborationCommandResult> => {
   const identity = authorityIdentity(authority);
@@ -2573,6 +3124,115 @@ const dispatchRevoke = async (
     command.input.teamId,
     command.input.workspaceId
   );
+  if (command.command === "collaboration.review_shared_project_snapshot") {
+    const payload = await remoteRequest(options, authority, {
+      method: "GET",
+      path: `/v1/shared-memory/share-grants/${command.input.shareGrantId}/repository-snapshot/review`
+    });
+    const parsed = teamRepositorySnapshotReviewSchema.safeParse(payload.review);
+    if (
+      !parsed.success ||
+      parsed.data.shareGrantId !== prior.grant.id ||
+      parsed.data.teamId !== command.input.teamId ||
+      parsed.data.teamWorkspaceId !== command.input.workspaceId ||
+      parsed.data.grantVersion !== prior.grant.grantVersion
+    )
+      throw new ControlFailure("conflict");
+    const result = success(command, { review: parsed.data });
+    if (!result) throw new ControlFailure("internal_error");
+    return result;
+  }
+  if (
+    command.input.expected.shareGrantId !== prior.grant.id ||
+    command.input.expected.grantVersion !== prior.grant.grantVersion ||
+    command.input.expected.teamId !== command.input.teamId ||
+    command.input.expected.teamWorkspaceId !== command.input.workspaceId
+  )
+    throw new ControlFailure("conflict");
+  const binding = sharedMemoryRepositorySnapshotActionGrantBinding({
+    ...command.input,
+    teamWorkspaceId: command.input.workspaceId,
+    referenceId: command.input.actionGrant.id
+  });
+  const payload = await remoteRequest(options, authority, {
+    method: binding.method,
+    path: binding.path,
+    body: binding.body,
+    idempotencyKey: command.input.mutationId,
+    actionGrant: resolveProtectedActionGrant(
+      options,
+      authority,
+      command,
+      binding
+    )
+  });
+  const remote = readRemoteGrant(payload);
+  if (
+    remote.id !== prior.grant.id ||
+    remote.teamId !== command.input.teamId ||
+    remote.teamWorkspaceId !== command.input.workspaceId ||
+    remote.logicalMemoryId !== prior.grant.logicalMemoryId ||
+    remote.lifecycle !== "active" ||
+    remote.grantVersion <= prior.grant.grantVersion ||
+    remote.repositorySnapshot?.classification !==
+      command.input.expected.currentSnapshot.classification ||
+    remote.repositorySnapshot?.fingerprint !==
+      command.input.expected.currentSnapshot.fingerprint
+  )
+    throw new ControlFailure("permission_denied");
+  const persisted = await persistGrant(
+    options.authorityStore,
+    identity,
+    remote,
+    prior,
+    {
+      companionThreadId: prior.grant.companionThreadId,
+      sharedSessionId: remote.id
+    }
+  );
+  const result = success(command, { grant: ownerSafeGrant(persisted.grant) });
+  if (!result) throw new ControlFailure("internal_error");
+  return result;
+};
+
+const dispatchRevoke = async (
+  options: CollaborationSharedMemoryControlOptions,
+  authority: ResolvedAuthority,
+  command: Extract<
+    CollaborationSharedMemoryControlCommand,
+    { command: "collaboration.revoke_shared_memory" }
+  >
+): Promise<CollaborationCommandResult> => {
+  const identity = authorityIdentity(authority);
+  let prior: CollaborationPersistedSharedMemoryGrant;
+  try {
+    prior = await requirePersistedGrant(
+      options.authorityStore,
+      identity,
+      command.input.shareGrantId,
+      command.input.teamId,
+      command.input.workspaceId
+    );
+  } catch (error) {
+    if (!(error instanceof ControlFailure) || error.code !== "not_available")
+      throw error;
+    // Activated Pending Shares can be listed before their grant projection
+    // exists locally. Hydrate through the scoped owner read, then apply the
+    // same identity, destination, version, and approved-action checks.
+    await dispatchGetOwnedShare(options, authority, {
+      contractVersion: COLLABORATION_CONTRACT_VERSION,
+      requestId: randomUUID(),
+      command: "collaboration.get_owned_share",
+      input: { kind: "grant", id: command.input.shareGrantId }
+    });
+    prior = await requirePersistedGrant(
+      options.authorityStore,
+      identity,
+      command.input.shareGrantId,
+      command.input.teamId,
+      command.input.workspaceId
+    );
+  }
   if (prior.grant.grantVersion !== command.input.expectedGrantVersion) {
     throw new ControlFailure("conflict");
   }
@@ -2597,7 +3257,9 @@ const dispatchRevoke = async (
       binding
     )
   });
-  const remote = readRemoteGrant(payload);
+  const revoked = remoteOwnedShareGrantSchema.safeParse(payload.grant);
+  if (!revoked.success) throw new ControlFailure("internal_error");
+  const remote = remoteOwnedGrantWithCompanion(revoked.data);
   if (
     remote.id !== prior.grant.id ||
     remote.logicalMemoryId !== prior.grant.logicalMemoryId ||
@@ -2672,7 +3334,8 @@ const dispatchListOwnedGrants = async (
     for (const grant of page.data.shareGrants) seen.add(grant.id);
     if (seen.size > 250) throw new ControlFailure("not_available");
 
-    for (const remote of page.data.shareGrants) {
+    for (const ownerGrant of page.data.shareGrants) {
+      const remote = remoteOwnedGrantWithCompanion(ownerGrant);
       const prior = localById.get(remote.id) ?? null;
       if (prior && remote.grantVersion < prior.grant.grantVersion) {
         throw new ControlFailure("permission_denied");
@@ -3448,6 +4111,290 @@ const dispatchResolved = async (
   command: CollaborationSharedMemoryControlCommand
 ): Promise<CollaborationCommandResult> => {
   switch (command.command) {
+    case "collaboration.list_repository_rules": {
+      const { target, ...input } = command.input;
+      let selector = input.selector;
+      if (target) {
+        if (
+          !selector ||
+          crossIdentitySyncDigest(shared.sharingSelectionDescriptor(target)) !==
+            crossIdentitySyncDigest(selector)
+        )
+          throw new ControlFailure("invalid_input");
+        const normalized = await readRuleSelectionTarget(
+          options,
+          authority.localOwnerUserId,
+          target
+        );
+        selector = shared.sharingSelectionDescriptor(normalized);
+      }
+      const response = await remoteRequest(options, authority, {
+        method: "POST",
+        path: "/v1/shared-memory/repository-rules/owned",
+        body: { ...input, selector },
+        idempotencyKey: command.requestId
+      });
+      const page = shared.ownedRepositorySharingRulesPageSchema.parse(
+        response.page
+      );
+      if (
+        selector &&
+        page.rules.some(
+          (rule) =>
+            crossIdentitySyncDigest(rule.selector) !==
+            crossIdentitySyncDigest(selector)
+        )
+      )
+        throw new ControlFailure("permission_denied");
+      return success(command, { page })!;
+    }
+    case "collaboration.review_publisher_takeover": {
+      try {
+        const review = await resolvePublisherTakeoverReview({
+          input: command.input,
+          localOwnerUserId: authority.localOwnerUserId,
+          receivingCredentialId: authority.upstreamDeviceCredentialId,
+          readSource: (input) => readTakeoverSource(options, input),
+          requestReview: async ({ ruleId, ...body }) =>
+            (
+              await remoteRequest(options, authority, {
+                method: "POST",
+                path: `/v1/shared-memory/sharing-rules/${encodeURIComponent(ruleId)}/publisher-review`,
+                body
+              })
+            ).review
+        });
+        return success(command, { review })!;
+      } catch (error) {
+        if (error instanceof PublisherTakeoverReviewError)
+          throw new ControlFailure(error.code);
+        throw error;
+      }
+    }
+    case "collaboration.review_rule_detail": {
+      const { ruleId, workspaceId, ...input } = command.input;
+      const response = await remoteRequest(options, authority, {
+        method: "POST",
+        path: `/v1/shared-memory/sharing-rules/${encodeURIComponent(ruleId)}/detail-review`,
+        body: { ...input, teamWorkspaceId: workspaceId },
+        idempotencyKey: command.requestId
+      });
+      const review = shared.sharingRuleDetailReviewSchema.parse(
+        response.review
+      );
+      if (
+        review.ruleId !== ruleId ||
+        review.teamId !== input.teamId ||
+        review.teamWorkspaceId !== workspaceId ||
+        review.maximumFidelity !== input.maximumFidelity ||
+        review.includeCuratedMemory !== input.includeCuratedMemory
+      )
+        throw new ControlFailure("permission_denied");
+      return success(command, { review })!;
+    }
+    case "collaboration.review_rule_content_policy": {
+      const { ruleId, workspaceId, ...input } = command.input;
+      const response = await remoteRequest(options, authority, {
+        method: "POST",
+        path: `/v1/shared-memory/sharing-rules/${encodeURIComponent(ruleId)}/content-policy-review`,
+        body: { ...input, teamWorkspaceId: workspaceId },
+        idempotencyKey: command.requestId
+      });
+      const review = shared.sharingRuleContentPolicyReviewSchema.parse(
+        response.review
+      );
+      if (
+        review.ruleId !== ruleId ||
+        review.teamId !== input.teamId ||
+        review.teamWorkspaceId !== workspaceId ||
+        crossIdentitySyncDigest(review.labels) !==
+          crossIdentitySyncDigest(input.labels)
+      )
+        throw new ControlFailure("permission_denied");
+      return success(command, { review })!;
+    }
+    case "collaboration.take_over_publisher":
+    case "collaboration.amend_rule_detail":
+    case "collaboration.amend_rule_content_policy":
+    case "collaboration.control_sharing_rule":
+    case "collaboration.control_repository_rule":
+    case "collaboration.list_sharing_rule_deliveries":
+    case "collaboration.create_repository_rule":
+      throw new ControlFailure("invalid_input");
+    case "collaboration.review_repository_rule_creation": {
+      const repo = options.selectionReviewRepository;
+      if (!repo) throw new ControlFailure("not_available");
+      try {
+        const completed = await resolveCompletedGitAnchorSharingReview(
+          command.input,
+          {
+            backendId: authority.backendId,
+            ownerUserId: authority.localOwnerUserId,
+            upstreamUserId: authority.upstreamUserId,
+            cursorSecret: authority.desktopCredential.authorization,
+            hasChanges: async (cursor) =>
+              (
+                await repo.reconcilePersonalSelectionChanges(
+                  { userId: authority.localOwnerUserId },
+                  { cursor }
+                )
+              ).reconciliationRequired,
+            destination: async () => {
+              const payload = await remoteRequest(options, authority, {
+                method: "GET",
+                path: queryPath(
+                  `/v1/shared-memory/teams/${command.input.teamId}/workspaces/${command.input.workspaceId}/sharing-review`,
+                  { representation: command.input.representation }
+                )
+              });
+              return shared.sharingDestinationReviewSchema.parse(
+                payload.review
+              );
+            }
+          }
+        );
+        const reviewInput =
+          shared.repositorySharingRuleCreationReviewInputSchema.parse({
+            selector: shared.sharingSelectionDescriptor(
+              await readRuleSelectionTarget(
+                options,
+                authority.localOwnerUserId,
+                command.input.target
+              )
+            ),
+            teamId: command.input.teamId,
+            teamWorkspaceId: command.input.workspaceId,
+            maximumFidelity: command.input.representation,
+            includeCuratedMemory: false,
+            includesFutureConversations: true,
+            completedReviewHash: completed.reviewHash,
+            selectionSnapshotVersion: completed.snapshotVersion
+          });
+        const payload = await remoteRequest(options, authority, {
+          method: "POST",
+          path: "/v1/shared-memory/repository-rules/review",
+          body: reviewInput
+        });
+        const review = shared.repositorySharingRuleCreationReviewSchema.parse(
+          payload.review
+        );
+        if (
+          crossIdentitySyncDigest(
+            shared.repositorySharingRuleCreationReviewInputSchema
+              .strip()
+              .parse(review.scope)
+          ) !== crossIdentitySyncDigest(reviewInput)
+        )
+          throw new ControlFailure("permission_denied");
+        return success(command, { review })!;
+      } catch (error) {
+        if (
+          error instanceof SharingReviewConflict ||
+          (typeof error === "object" &&
+            error !== null &&
+            "statusCode" in error &&
+            [409, 410].includes(Number(error.statusCode)))
+        )
+          throw new ControlFailure("conflict");
+        throw error;
+      }
+    }
+    case "collaboration.review_git_anchor_sharing": {
+      const repo = options.selectionReviewRepository;
+      const loadCandidate = options.loadLocalCandidatePreview;
+      if (!repo || !loadCandidate) throw new ControlFailure("not_available");
+      try {
+        const review = await reviewGitAnchorSharing(command.input, {
+          backendId: authority.backendId,
+          ownerUserId: authority.localOwnerUserId,
+          upstreamUserId: authority.upstreamUserId,
+          cursorSecret: authority.desktopCredential.authorization,
+          enumerate: ({ target, cursor }) =>
+            cursor
+              ? repo.continuePersonalSelectionEnumeration(
+                  { userId: authority.localOwnerUserId },
+                  { cursor }
+                )
+              : repo.startPersonalSelectionEnumeration(
+                  { userId: authority.localOwnerUserId },
+                  { target }
+                ),
+          hasChanges: async (cursor) =>
+            (
+              await repo.reconcilePersonalSelectionChanges(
+                { userId: authority.localOwnerUserId },
+                { cursor }
+              )
+            ).reconciliationRequired,
+          headers: async (page) => {
+            const sessionIds = [
+              ...new Set(
+                page.entries.map((entry) => entry.source.localSessionId)
+              )
+            ];
+            if (!sessionIds.length) return new Map();
+            const groups = await repo.listLcmGraphThreads(
+              { userId: authority.localOwnerUserId },
+              {
+                personalSelection: {
+                  version: 1,
+                  ownerUserId: authority.localOwnerUserId,
+                  target: command.input.target,
+                  callerRepositoryContext: null
+                },
+                sessionIds,
+                limit: sessionIds.length,
+                offset: 0,
+                groupBySession: true
+              }
+            );
+            return new Map(
+              groups
+                .flatMap((group) => group.threads)
+                .filter((thread) => thread.sessionId)
+                .map((thread) => [
+                  thread.sessionId!,
+                  {
+                    title: thread.name || "Untitled Conversation",
+                    eventCount: thread.eventCount
+                  }
+                ])
+            );
+          },
+          candidate: (sessionId, representation) =>
+            loadCandidate({
+              localOwnerUserId: authority.localOwnerUserId,
+              sessionId,
+              representation,
+              mode: "continuous",
+              prepareLcm: false
+            }),
+          destination: async () => {
+            const payload = await remoteRequest(options, authority, {
+              method: "GET",
+              path: queryPath(
+                `/v1/shared-memory/teams/${command.input.teamId}/workspaces/${command.input.workspaceId}/sharing-review`,
+                { representation: command.input.representation }
+              )
+            });
+            return shared.sharingDestinationReviewSchema.parse(payload.review);
+          }
+        });
+        const result = success(command, { review });
+        if (!result) throw new ControlFailure("internal_error");
+        return result;
+      } catch (error) {
+        if (
+          error instanceof SharingReviewConflict ||
+          (typeof error === "object" &&
+            error !== null &&
+            "statusCode" in error &&
+            [409, 410].includes(Number(error.statusCode)))
+        )
+          throw new ControlFailure("conflict");
+        throw error;
+      }
+    }
     case "collaboration.load_shared_source_page":
       return dispatchLoadSource(options, authority, command);
     case "collaboration.list_owned_shared_memory_grants":
@@ -3467,13 +4414,356 @@ const dispatchResolved = async (
       return dispatchPreview(options, authority, command);
     case "collaboration.load_shared_memory_preview_page":
       return dispatchPreviewPage(options, authority, command);
+    case "collaboration.review_conversation_rule_creation":
+      return dispatchConversationRuleCreationReview(
+        options,
+        authority,
+        command
+      );
+    case "collaboration.create_conversation_rule":
+      throw new ControlFailure("invalid_input");
     case "collaboration.share_memory":
       return dispatchShare(options, authority, command);
     case "collaboration.revoke_shared_memory":
       return dispatchRevoke(options, authority, command);
+    case "collaboration.review_workspace_restoration": {
+      const payload = await remoteRequest(options, authority, {
+        method: "POST",
+        path: "/v1/shared-memory/workspace-exclusions/restore-review",
+        body: command.input
+      });
+      const review = shared.workspaceConversationRestorationReviewSchema.parse(
+        payload.review
+      );
+      if (
+        review.scope.ownerUserId !== authority.upstreamUserId ||
+        review.scope.logicalMemoryId !== command.input.logicalMemoryId ||
+        review.scope.teamId !== command.input.teamId ||
+        review.scope.teamWorkspaceId !== command.input.teamWorkspaceId
+      )
+        throw new ControlFailure("internal_error");
+      return success(command, { review })!;
+    }
+    case "collaboration.restore_conversation_to_workspace":
+      throw new ControlFailure("invalid_input");
+    case "collaboration.review_workspace_exclusion": {
+      const payload = await remoteRequest(options, authority, {
+        method: "POST",
+        path: "/v1/shared-memory/workspace-exclusions/review",
+        body: command.input
+      });
+      const review = shared.workspaceConversationExclusionReviewSchema.parse(
+        payload.review
+      );
+      if (
+        review.scope.ownerUserId !== authority.upstreamUserId ||
+        review.scope.logicalMemoryId !== command.input.logicalMemoryId ||
+        review.scope.teamId !== command.input.teamId ||
+        review.scope.teamWorkspaceId !== command.input.teamWorkspaceId
+      )
+        throw new ControlFailure("internal_error");
+      return success(command, { review })!;
+    }
+    case "collaboration.exclude_conversation_from_workspace":
+      throw new ControlFailure("invalid_input");
+    case "collaboration.review_shared_project_snapshot":
+    case "collaboration.update_shared_project_snapshot":
+      return dispatchRepositorySnapshot(options, authority, command);
     case "collaboration.change_shared_memory_fidelity":
       return dispatchChangeFidelity(options, authority, command);
   }
+};
+
+const selectionPublisherTransport = async (
+  options: CollaborationSharedMemoryControlOptions,
+  lease: Pick<
+    SelectionSharingSourceLease,
+    "identity" | "remoteDeviceId" | "progress"
+  >
+) => {
+  const intent = shared.selectionSharingEffectiveIntent(lease.progress);
+  const desktop = (
+    options.readDesktopCredential ?? readStoredDesktopCredential
+  )(options.koedHome);
+  if (!desktop || desktop.ownerUserId !== lease.identity.localOwnerUserId)
+    throw new ControlFailure("access_revoked");
+  const probe = collaborationRendererCommandSchema.parse({
+    contractVersion: COLLABORATION_CONTRACT_VERSION,
+    requestId: randomUUID(),
+    command: "collaboration.control_pending_share",
+    input: {
+      pendingShareId: randomUUID(),
+      mutationId: randomUUID(),
+      expectedOperationVersion: 1,
+      action: "retry"
+    }
+  });
+  if (probe.command !== "collaboration.control_pending_share")
+    throw new ControlFailure("internal_error");
+  const authority = await resolveAuthority(options, probe, {
+    upstreamBackendId: lease.identity.backendId,
+    localOwnerUserId: lease.identity.localOwnerUserId,
+    desktopCredentialKeyId: desktop.credentialKeyId
+  });
+  if (
+    !sameIdentity(authority, lease.identity) ||
+    authority.upstreamDeviceCredentialId !== lease.remoteDeviceId
+  )
+    throw new ControlFailure("access_revoked");
+  const sourceIdentity = options.resolveCandidateSourceIdentity?.(
+    lease.identity.localOwnerUserId
+  );
+  if (!sourceIdentity) throw new ControlFailure("not_available");
+  const basePath = `/v1/shared-memory/repository-rules/${encodeURIComponent(lease.progress.intent.ruleId)}/members`;
+  const request = async (
+    path: string,
+    body: Record<string, unknown>,
+    idempotencyKey: string
+  ) => {
+    // Recheck local owner/session authority for each outbound operation. The
+    // Team endpoint independently checks the actual enrolled publisher fence.
+    const current = (
+      options.readDesktopCredential ?? readStoredDesktopCredential
+    )(options.koedHome);
+    if (
+      !current ||
+      current.ownerUserId !== lease.identity.localOwnerUserId ||
+      current.credentialKeyId !== desktop.credentialKeyId ||
+      !current.operationFamilies.includes("personal_collaboration_write")
+    )
+      throw new ControlFailure("access_revoked");
+    return remoteRequest(options, authority, {
+      method: "POST",
+      path,
+      body,
+      idempotencyKey
+    });
+  };
+  return { request, basePath, sourceIdentity, intent, authority };
+};
+
+const readPublisherInventory = async (
+  options: CollaborationSharedMemoryControlOptions,
+  lease: import("@koed/db").SelectionSharingProgressLease
+) => {
+  if (!("publisherTakeover" in lease.data.intent))
+    throw new ControlFailure("invalid_input");
+  const { request, basePath } = await selectionPublisherTransport(options, {
+    ...lease,
+    progress: lease.data
+  });
+  const inventory = lease.data.proposal?.inventory;
+  let scope = inventory?.scope;
+  if (!scope) {
+    const response = await request(
+      `${basePath}/inspect`,
+      {
+        logicalMemoryIds: [
+          lease.data.intent.publisherTakeover.review.logicalMemoryId
+        ]
+      },
+      randomUUID()
+    );
+    const state = shared.repositorySharingRuleMembersStateSchema.parse(
+      response.members
+    );
+    scope = {
+      authorityVersion: state.authorityVersion,
+      publisherFence: state.publisherFence
+    };
+  }
+  try {
+    const response = await request(
+      `${basePath}/inventory`,
+      {
+        expectedAuthorityVersion: scope.authorityVersion,
+        publisherFence: scope.publisherFence,
+        ...(inventory?.afterMembershipId
+          ? { afterMembershipId: inventory.afterMembershipId }
+          : {})
+      },
+      randomUUID()
+    );
+    return response.inventory;
+  } catch (error) {
+    if (error instanceof ControlFailure && error.code === "conflict")
+      throw Object.assign(new Error("Publisher inventory changed"), {
+        code: "selection_enumeration_stale"
+      });
+    throw error;
+  }
+};
+
+const selectionDeliveryTransport = async (
+  options: CollaborationSharedMemoryControlOptions,
+  lease: SelectionSharingSourceLease
+): Promise<SelectionSharingDeliveryTransport> => {
+  const { request, basePath, sourceIdentity, intent, authority } =
+    await selectionPublisherTransport(options, lease);
+  return {
+    deploymentProtocolId: sourceIdentity.sourceDeploymentProtocolId,
+    async resolvePortableSource(sourceIdentity) {
+      const response = await request(
+        `${basePath}/resolve`,
+        { sourceIdentity },
+        randomUUID()
+      );
+      return z
+        .object({ logicalMemoryId: z.uuid().nullable() })
+        .strict()
+        .parse(response).logicalMemoryId;
+    },
+    async inspect(logicalMemoryId) {
+      const response = await request(
+        `${basePath}/inspect`,
+        { logicalMemoryIds: [logicalMemoryId] },
+        randomUUID()
+      );
+      return response.members;
+    },
+    async prepareAdmission(logicalMemoryId) {
+      const candidate = sharedMemoryCandidatePreviewSchema.parse(
+        await options.loadLocalCandidatePreview?.({
+          localOwnerUserId: lease.identity.localOwnerUserId,
+          sessionId: lease.goal.source.localSessionId,
+          representation: intent.maximumFidelity,
+          mode: "continuous",
+          prepareLcm: true
+        })
+      );
+      if (
+        candidate.logicalMemoryId !== logicalMemoryId ||
+        candidate.source.kind !== "captured_session" ||
+        candidate.source.sessionId !== lease.goal.source.localSessionId
+      )
+        throw new ControlFailure("conflict");
+      const input = {
+        source: candidate.source,
+        logicalMemoryId,
+        teamId: lease.progress.intent.teamId,
+        workspaceId: lease.progress.intent.teamWorkspaceId,
+        sourceCapabilities: candidate.sourceCapabilities,
+        activationRepresentation: candidate.activationRepresentation,
+        maximumFidelity: intent.maximumFidelity,
+        includeCuratedMemory: intent.includeCuratedMemory,
+        mode: "continuous",
+        candidate: {
+          source: candidate.source,
+          sourceCapabilities: candidate.sourceCapabilities,
+          activationRepresentation: candidate.activationRepresentation,
+          candidateHash: candidate.candidateHash,
+          sourceRevision: candidate.sourceRevision,
+          itemCount: candidate.itemCount,
+          excludedItemCount: candidate.excludedItemCount,
+          manifest: candidate.manifest,
+          byteCount: candidate.byteCount,
+          mode: candidate.mode,
+          expiresAt: candidate.expiresAt
+        }
+      };
+      const previewRequestId = randomUUID();
+      const grant = await options.actionGrantControl?.dispatch(
+        {
+          contractVersion: COLLABORATION_CONTRACT_VERSION,
+          requestId: randomUUID(),
+          command: "collaboration.request_action_grant",
+          input: {
+            intent: {
+              ...input,
+              intent: "collaboration.preview_shared_memory",
+              commandRequestId: previewRequestId
+            }
+          }
+        },
+        {
+          backend: authority.backend,
+          localOwnerUserId: authority.localOwnerUserId,
+          principalUserId: authority.upstreamUserId,
+          upstreamDeviceCredentialId: authority.upstreamDeviceCredentialId,
+          upstreamDeviceAuthorization: authority.upstreamAuthorization,
+          operationFamilies: new Set(["action_grant", "share_grant_management"])
+        }
+      );
+      if (!grant?.ok || grant.command !== "collaboration.request_action_grant")
+        throw new ControlFailure("not_available");
+      const status = shared.collaborationActionGrantStatusSchema.parse(
+        grant.data.status
+      );
+      if (status.approvalTier !== "direct" || status.state !== "approved")
+        throw new ControlFailure("permission_denied");
+      const command = collaborationRendererCommandSchema.parse({
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
+        requestId: previewRequestId,
+        command: "collaboration.preview_shared_memory",
+        input: { ...input, actionGrant: status.actionGrant }
+      });
+      if (command.command !== "collaboration.preview_shared_memory")
+        throw new ControlFailure("internal_error");
+      const result = await dispatchPreview(options, authority, command);
+      if (
+        !result.ok ||
+        result.command !== "collaboration.preview_shared_memory"
+      )
+        throw new ControlFailure("not_available");
+      const dto = sharedMemoryPreviewSchema.parse(result.data.preview);
+      const persisted = persistedPreviewSchema.parse(
+        await options.authorityStore.readAuthoritativePreview({
+          ...lease.identity,
+          previewHash: dto.previewHash
+        })
+      );
+      if (
+        !sameIdentity(persisted, lease.identity) ||
+        persisted.logicalMemoryId !== logicalMemoryId ||
+        persisted.teamId !== lease.progress.intent.teamId ||
+        persisted.teamWorkspaceId !== lease.progress.intent.teamWorkspaceId
+      )
+        throw new ControlFailure("permission_denied");
+      return {
+        candidate,
+        previewId: persisted.previewId,
+        previewHash: persisted.previewHash,
+        previewRevision: persisted.previewRevision
+      };
+    },
+    async send(attempt) {
+      return request(
+        attempt.kind === "admit"
+          ? attempt.sourceWorkMode === "retained"
+            ? `${basePath}/readmit`
+            : basePath
+          : `${basePath}/${encodeURIComponent(attempt.membershipId)}/${attempt.kind === "remove" ? "remove" : "context"}`,
+        attempt.body,
+        attempt.mutationId
+      );
+    },
+    async cancel(attempt) {
+      const response = await request(
+        `${basePath}/cancel-mutation`,
+        {
+          mutationId: attempt.mutationId,
+          kind: attempt.kind,
+          logicalMemoryId: attempt.logicalMemoryId,
+          membershipId: attempt.membershipId,
+          requestHash: attempt.requestHash
+        },
+        attempt.mutationId
+      );
+      return response.settlement;
+    },
+    async queueSource(input) {
+      const saved = await options.authorityStore.persistPendingShareSourceWork({
+        identity: lease.identity,
+        pendingShareId: input.pendingShareId,
+        mutationId: input.mutationId,
+        mode: "continuous",
+        source: input.source,
+        sourceRevision: input.sourceRevision
+      });
+      if (!saved) throw new ControlFailure("not_available");
+      options.requestPendingShareSourceWork?.();
+    }
+  };
 };
 
 export const createCollaborationSharedMemoryControl = (
@@ -3647,6 +4937,310 @@ export const createCollaborationSharedMemoryControl = (
     } while (afterShareGrantId);
     return { queued };
   },
+  async reconcileRuleDeliveries() {
+    const activeDesktop = (
+      options.readDesktopCredential ?? readStoredDesktopCredential
+    )(options.koedHome);
+    if (
+      !activeDesktop?.operationFamilies.includes("personal_collaboration_write")
+    )
+      return { processed: 0, acknowledged: 0 };
+    const work = await options.authorityStore.claimRuleDeliveries({
+      limit: 10,
+      localOwnerUserId: activeDesktop.ownerUserId
+    });
+    let acknowledged = 0;
+    for (const item of work) {
+      let outcome: "retry" | "needs_review" = "retry";
+      let failureCode: shared.SharingRuleDelivery["failureCode"] =
+        "remote_unavailable";
+      try {
+        const desktop = (
+          options.readDesktopCredential ?? readStoredDesktopCredential
+        )(options.koedHome);
+        if (!desktop || desktop.ownerUserId !== item.identity.localOwnerUserId)
+          throw new ControlFailure("temporarily_unavailable");
+        const candidate = ruleDeliveryCommand(
+          item.intent,
+          item.requestId,
+          item.actionGrantId
+        );
+        if (
+          candidate.command !== "collaboration.take_over_publisher" &&
+          candidate.command !== "collaboration.amend_rule_detail" &&
+          candidate.command !== "collaboration.amend_rule_content_policy" &&
+          candidate.command !== "collaboration.control_sharing_rule" &&
+          candidate.command !== "collaboration.control_repository_rule" &&
+          candidate.command !==
+            "collaboration.exclude_conversation_from_workspace" &&
+          candidate.command !==
+            "collaboration.restore_conversation_to_workspace" &&
+          candidate.command !== "collaboration.create_conversation_rule" &&
+          candidate.command !== "collaboration.create_repository_rule"
+        )
+          throw new ControlFailure("invalid_input");
+        const authority = await resolveAuthority(options, candidate, {
+          upstreamBackendId: item.identity.backendId,
+          localOwnerUserId: item.identity.localOwnerUserId,
+          desktopCredentialKeyId: desktop.credentialKeyId
+        });
+        if (
+          !sameIdentity(authority, item.identity) ||
+          authority.upstreamDeviceCredentialId !== item.remoteDeviceId
+        )
+          throw new ControlFailure("access_revoked");
+        let receiptOnly = false;
+        if (
+          "source" in item.intent &&
+          item.intent.sourceIdentity &&
+          crossIdentitySyncDigest(
+            await readNativeConversationOrigin(
+              options,
+              authority,
+              item.intent.source
+            )
+          ) !== crossIdentitySyncDigest(item.intent.sourceIdentity)
+        ) {
+          receiptOnly = true;
+          failureCode = "source_unavailable";
+        }
+        if (
+          "operationKind" in item.intent &&
+          item.intent.operationKind === "publisher_takeover" &&
+          !(await verifyPublisherTakeoverLocalEvidence({
+            review: item.intent,
+            localOwnerUserId: authority.localOwnerUserId,
+            receivingCredentialId: authority.upstreamDeviceCredentialId,
+            readSource: (input) => readTakeoverSource(options, input)
+          }))
+        ) {
+          receiptOnly = true;
+          failureCode = "source_unavailable";
+        }
+        const binding = ruleDeliveryBinding(item.intent, item.actionGrantId);
+        // An expired credential can recover only its already committed receipt;
+        // the Team executor rejects any fresh execution after expiry.
+        const payload = await remoteRequest(options, authority, {
+          method: binding.method,
+          path: receiptOnly ? `${binding.path}/receipt` : binding.path,
+          body: binding.body,
+          idempotencyKey: item.intent.mutationId,
+          actionGrant: item.actionGrant
+        });
+        if (
+          receiptOnly &&
+          (payload.publisherTransfer === null || payload.pendingShare === null)
+        ) {
+          if (payload.receiptPending === true)
+            throw new ControlFailure("temporarily_unavailable");
+          if (payload.receiptPending === false)
+            throw new ControlFailure("permission_denied");
+          failureCode = "response_invalid";
+          throw new ControlFailure("internal_error");
+        }
+        let receipt: {
+          contentPolicyAmendment?: NonNullable<
+            shared.SharingRuleDelivery["contentPolicyAmendment"]
+          >;
+          publisherTakeover?: NonNullable<
+            shared.SharingRuleDelivery["publisherTakeover"]
+          >;
+          detailAmendment?: NonNullable<
+            shared.SharingRuleDelivery["detailAmendment"]
+          >;
+          control?: NonNullable<shared.SharingRuleDelivery["control"]>;
+          creation?: NonNullable<shared.SharingRuleDelivery["creation"]>;
+          exclusion?: NonNullable<shared.SharingRuleDelivery["exclusion"]>;
+        };
+        if ("scope" in item.intent) {
+          receipt = {
+            exclusion: shared.workspaceConversationExclusionSchema.parse(
+              payload.exclusion
+            )
+          };
+        } else if (
+          "operationKind" in item.intent &&
+          item.intent.operationKind === "publisher_takeover"
+        ) {
+          const scope =
+            shared.sharingRulePublisherTakeoverAppliedScopeSchema.safeParse({
+              review: item.intent.review,
+              result: payload.publisherTransfer
+            });
+          if (
+            !scope.success ||
+            scope.data.result.mutationId !== item.intent.mutationId
+          ) {
+            failureCode = "response_invalid";
+            throw new ControlFailure("internal_error");
+          }
+          receipt = { publisherTakeover: scope.data };
+        } else if (
+          "operationKind" in item.intent &&
+          item.intent.operationKind === "content_policy"
+        ) {
+          const result = shared.sharingRuleContentPolicyResultSchema.parse(
+            payload.contentPolicyAmendment
+          );
+          receipt = {
+            contentPolicyAmendment:
+              shared.sharingRuleContentPolicyAppliedScopeSchema.parse({
+                approvedAt: result.approvedAt,
+                review: item.intent.review,
+                result
+              })
+          };
+        } else if (
+          "operationKind" in item.intent &&
+          item.intent.operationKind === "detail"
+        ) {
+          const result = shared.sharingRuleDetailResultSchema.parse(
+            payload.detailAmendment
+          );
+          receipt = {
+            detailAmendment: shared.sharingRuleDetailAppliedScopeSchema.parse({
+              approvedAt: result.approvedAt,
+              review: item.intent.review,
+              result
+            })
+          };
+        } else if ("controlAction" in item.intent) {
+          const control = (
+            "selectorKind" in item.intent
+              ? shared.repositorySharingRuleControlResultSchema
+              : shared.conversationSharingRuleControlResultSchema
+          ).safeParse(payload.control);
+          if (!control.success) {
+            failureCode = "response_invalid";
+            throw new ControlFailure("internal_error");
+          }
+          receipt = { control: control.data };
+        } else if ("includesFutureConversations" in item.intent) {
+          const created =
+            shared.repositorySharingRuleCreationResultSchema.safeParse(
+              payload.rule
+            );
+          if (!created.success || created.data.ruleId !== item.intent.ruleId) {
+            failureCode = "response_invalid";
+            throw new ControlFailure("internal_error");
+          }
+          receipt = { creation: created.data };
+        } else {
+          const response = z
+            .object({ ruleId: uuidSchema, pendingShare: pendingShareSchema })
+            .strict()
+            .safeParse(payload);
+          const intent = item.intent;
+          const pending = response.success ? response.data.pendingShare : null;
+          if (
+            !response.success ||
+            response.data.ruleId !== intent.ruleId ||
+            !pending ||
+            pending.id !==
+              shared.crossIdentitySyncDeterministicUuid({
+                kind: "pending_share",
+                mutationId: intent.mutationId
+              }) ||
+            pending.mutationId !== intent.mutationId ||
+            pending.logicalGrantId !== intent.logicalGrantId ||
+            pending.consentId !== intent.consentId ||
+            pending.logicalMemoryId !== intent.logicalMemoryId ||
+            pending.teamId !== intent.teamId ||
+            pending.workspaceId !== intent.teamWorkspaceId ||
+            crossIdentitySyncDigest(pending.source) !==
+              crossIdentitySyncDigest(intent.source) ||
+            crossIdentitySyncDigest(pending.sourceCapabilities) !==
+              crossIdentitySyncDigest(intent.sourceCapabilities) ||
+            pending.activationRepresentation !==
+              intent.activationRepresentation ||
+            pending.maximumFidelity !== intent.maximumFidelity ||
+            pending.includeCuratedMemory !== intent.includeCuratedMemory ||
+            pending.mode !== "continuous" ||
+            pending.state !== "preparing" ||
+            pending.workspaceAccessState !== "none"
+          ) {
+            failureCode = "response_invalid";
+            throw new ControlFailure("internal_error");
+          }
+          const persisted =
+            await options.authorityStore.persistPendingShareSourceWork({
+              identity: item.identity,
+              pendingShareId: pending.id,
+              mutationId: intent.mutationId,
+              mode: "continuous",
+              source: intent.source,
+              sourceRevision: pending.sourceRevision
+            });
+          if (!persisted) throw new ControlFailure("temporarily_unavailable");
+          options.requestPendingShareSourceWork?.();
+          receipt = {
+            creation: {
+              pendingShareId: pending.id,
+              sourceRevision: pending.sourceRevision
+            }
+          };
+        }
+        const saved = await options.authorityStore.finishRuleDelivery({
+          workId: item.workId,
+          leaseVersion: item.leaseVersion,
+          identity: item.identity,
+          outcome: "acknowledged",
+          ...receipt
+        });
+        if (saved?.state === "acknowledged") acknowledged += 1;
+        continue;
+      } catch (error) {
+        if (error instanceof ControlFailure) {
+          if (
+            [
+              "permission_denied",
+              "access_revoked",
+              "conflict",
+              "invalid_input",
+              "not_available"
+            ].includes(error.code)
+          )
+            outcome = "needs_review";
+          failureCode =
+            error.code === "offline"
+              ? "offline"
+              : error.code === "conflict"
+                ? "conflict"
+                : outcome === "needs_review"
+                  ? "authority_unavailable"
+                  : failureCode;
+        }
+      }
+      await options.authorityStore.finishRuleDelivery({
+        workId: item.workId,
+        leaseVersion: item.leaseVersion,
+        identity: item.identity,
+        outcome,
+        failureCode
+      });
+    }
+    const currentDesktop = (
+      options.readDesktopCredential ?? readStoredDesktopCredential
+    )(options.koedHome);
+    if (
+      currentDesktop?.ownerUserId === activeDesktop.ownerUserId &&
+      currentDesktop.operationFamilies.includes("personal_collaboration_write")
+    ) {
+      await options.reconcileSelectionSharing?.(
+        activeDesktop.ownerUserId,
+        (lease) => readPublisherInventory(options, lease)
+      );
+      if (options.selectionSharingJournal)
+        await deliverSelectionSharingSources({
+          journal: options.selectionSharingJournal,
+          localOwnerUserId: activeDesktop.ownerUserId,
+          limit: 1,
+          resolveTransport: (lease) =>
+            selectionDeliveryTransport(options, lease)
+        });
+    }
+    return { processed: work.length, acknowledged };
+  },
   async resolvePreviewTarget(input, contextInput) {
     const context = dispatchContextSchema.safeParse(contextInput);
     const parsedInput = z
@@ -3700,10 +5294,43 @@ export const createCollaborationSharedMemoryControl = (
       return null;
     }
   },
+  async verifyPublisherTakeoverReview(input, contextInput) {
+    try {
+      const intent = shared.sharingRulePublisherTakeoverLocalIntentSchema
+        .strip()
+        .parse({ ...input, teamWorkspaceId: input.workspaceId });
+      const { teamWorkspaceId, ...localIntent } = intent;
+      const command = collaborationRendererCommandSchema.parse({
+        contractVersion: COLLABORATION_CONTRACT_VERSION,
+        requestId: randomUUID(),
+        command: "collaboration.take_over_publisher",
+        input: {
+          ...localIntent,
+          workspaceId: teamWorkspaceId,
+          actionGrant: { id: randomUUID() }
+        }
+      });
+      if (command.command !== "collaboration.take_over_publisher") return false;
+      const authority = await resolveAuthority(
+        options,
+        command,
+        dispatchContextSchema.parse(contextInput)
+      );
+      return await verifyPublisherTakeoverLocalEvidence({
+        review: intent,
+        localOwnerUserId: authority.localOwnerUserId,
+        receivingCredentialId: authority.upstreamDeviceCredentialId,
+        readSource: (input) => readTakeoverSource(options, input)
+      });
+    } catch {
+      return false;
+    }
+  },
   async resolveConsentPreview(input, contextInput) {
     const context = dispatchContextSchema.safeParse(contextInput);
     const parsedInput = z
       .object({
+        sourceIdentity: shared.sharingRuleSourceIdentitySchema.optional(),
         source: sharedMemorySourceRefSchema,
         sourceCapabilities: z.array(representationSchema).min(1).max(4),
         activationRepresentation: representationSchema,
@@ -3775,6 +5402,17 @@ export const createCollaborationSharedMemoryControl = (
       ) {
         return null;
       }
+      if (
+        parsedInput.data.sourceIdentity &&
+        crossIdentitySyncDigest(
+          await readNativeConversationOrigin(
+            options,
+            authority,
+            parsedInput.data.source
+          )
+        ) !== crossIdentitySyncDigest(parsedInput.data.sourceIdentity)
+      )
+        return null;
       return { previewId: preview.data.previewId };
     } catch {
       return null;
@@ -3906,6 +5544,24 @@ export const createCollaborationSharedMemoryControl = (
     const parsedContext = dispatchContextSchema.safeParse(contextInput);
     if (!parsedContext.success) return failure(command, "invalid_input");
     try {
+      if (
+        command.command === "collaboration.take_over_publisher" ||
+        command.command === "collaboration.amend_rule_detail" ||
+        command.command === "collaboration.amend_rule_content_policy" ||
+        command.command === "collaboration.control_sharing_rule" ||
+        command.command === "collaboration.control_repository_rule" ||
+        command.command === "collaboration.create_conversation_rule" ||
+        command.command === "collaboration.create_repository_rule" ||
+        command.command === "collaboration.list_sharing_rule_deliveries" ||
+        command.command ===
+          "collaboration.exclude_conversation_from_workspace" ||
+        command.command === "collaboration.restore_conversation_to_workspace"
+      )
+        return await dispatchLocalRuleDelivery(
+          options,
+          command,
+          parsedContext.data
+        );
       if (command.command === "collaboration.preview_shared_memory_candidate") {
         const source = command.input.source;
         if (
